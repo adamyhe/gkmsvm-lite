@@ -33,12 +33,146 @@ def ism(
     Returns:
         [B, 4, L] score deltas.
     """
+    kernel = model.kernel
+    chunk = sv_chunk_size if sv_chunk_size is not None else model.sv_chunk_size
+
+    if hasattr(kernel, "pairwise_from_indices"):
+        return _ism_index(model, x, chunk)
+    return _ism_float(model, x, chunk)
+
+
+# -----------------------------------------------------------------------
+# Index-based path (int8, ~16x less memory, 4x fewer ops)
+# -----------------------------------------------------------------------
+
+
+def _ism_index(model, x, chunk):
     xp = get_array_module(x)
     B, C, L = x.shape
     kernel = model.kernel
     l = kernel.l
     W = L - l + 1
-    chunk = sv_chunk_size if sv_chunk_size is not None else model.sv_chunk_size
+    S = model.num_support_vectors
+    do_norm = kernel.normalize
+    do_rc = kernel.include_rc
+    coefs = model.coefficients
+    bias = model.bias
+
+    sv_idx, sv_rc_idx = model._get_sv_index_windows()
+    bx = kernel.base_index_windows(x)
+
+    ref_raw = kernel.pairwise_from_indices(bx, sv_idx)
+    if do_rc:
+        ref_raw = ref_raw + kernel.pairwise_from_indices(bx, sv_rc_idx)
+
+    ref_score = model(x).squeeze(-1)
+
+    if do_norm:
+        diag_sv = model._get_sv_diag()
+
+    bx_cpu = bx if xp is np else xp.asnumpy(bx)
+    all_old, all_new = _build_idx_mutations(bx_cpu, L, W, l, B)
+
+    all_old = xp.asarray(all_old)
+    all_new = xp.asarray(all_new)
+
+    old_flat = all_old.reshape(L * B, l, l)
+    new_flat = all_new.reshape(4 * L * B, l, l)
+
+    old_pw = _partial_pairwise_idx(kernel, old_flat, sv_idx, chunk).reshape(L, B, S)
+    new_pw = _partial_pairwise_idx(kernel, new_flat, sv_idx, chunk).reshape(4, L, B, S)
+    delta_K = new_pw - old_pw[None]
+
+    if do_rc:
+        old_pw_rc = _partial_pairwise_idx(kernel, old_flat, sv_rc_idx, chunk).reshape(L, B, S)
+        new_pw_rc = _partial_pairwise_idx(kernel, new_flat, sv_rc_idx, chunk).reshape(4, L, B, S)
+        delta_K = delta_K + (new_pw_rc - old_pw_rc[None])
+
+    K_raw_new = ref_raw + delta_K
+
+    if not do_norm:
+        scores = (K_raw_new * coefs).sum(axis=3) + bias
+        return (scores - ref_score).transpose(2, 0, 1).astype(x.dtype)
+
+    diag_new = _mutated_diagonals(kernel, x, xp)
+
+    norm = xp.sqrt(diag_new[:, :, :, None] * diag_sv)
+    K_norm = K_raw_new / xp.clip(norm, 1e-10, None)
+
+    scores = (K_norm * coefs).sum(axis=3) + bias
+    return (scores - ref_score).transpose(2, 0, 1).astype(x.dtype)
+
+
+def _build_idx_mutations(bx_cpu, L, W, l, B):
+    # Sentinel -1: never matches any base (0-3), so all l positions
+    # mismatch → table[l] = C(0, k) = 0 contribution for padding.
+    all_old = np.full((L, B, l, l), -1, dtype=np.int8)
+    all_new = np.full((4, L, B, l, l), -1, dtype=np.int8)
+
+    for p in range(L):
+        a_s = max(0, p - l + 1)
+        a_e = min(p + 1, W)
+        n_a = a_e - a_s
+        offsets = [p - i for i in range(a_s, a_e)]
+
+        old_A = bx_cpu[:, a_s:a_e, :]
+        all_old[p, :, :n_a, :] = old_A
+
+        muts = _mutate_index_windows(old_A, offsets, _BASES)
+        all_new[:, p, :, :n_a, :] = muts
+
+    return all_old, all_new
+
+
+def _mutate_index_windows(bx_A, offsets, bases):
+    result = np.broadcast_to(bx_A[None], (4, *bx_A.shape)).copy()
+    for a_idx, off in enumerate(offsets):
+        for vi, base in enumerate(bases):
+            result[vi, :, a_idx, off] = base
+    return result
+
+
+def _partial_pairwise_idx(kernel, bx_A, by, chunk_size):
+    xp = get_array_module(bx_A)
+    S = by.shape[0]
+    B = bx_A.shape[0]
+    if chunk_size is None or chunk_size >= S:
+        return kernel.pairwise_from_indices(bx_A, by)
+    result = xp.zeros((B, S), dtype=np.float64)
+    for s in range(0, S, chunk_size):
+        e = min(s + chunk_size, S)
+        result[:, s:e] = kernel.pairwise_from_indices(bx_A, by[s:e])
+    return result
+
+
+def _mutated_diagonals(kernel, x, xp):
+    """Self-kernel diagonals for all single-base mutations.
+
+    Only 4*L*B sequences — trivially fast even for large models.
+    """
+    B, C, L = x.shape
+    x_exp = x[None, None]  # [1, 1, B, 4, L]
+    mut_x = xp.broadcast_to(x_exp, (4, L, B, C, L)).copy()
+    for p in range(L):
+        mut_x[:, p, :, :, p] = 0
+        for vi in range(4):
+            mut_x[vi, p, :, vi, p] = 1
+    mut_flat = mut_x.reshape(4 * L * B, C, L)
+    diag = kernel._raw_diagonal(mut_flat)
+    return diag.reshape(4, L, B)
+
+
+# -----------------------------------------------------------------------
+# Float-based path (fallback for non-DirectGkmKernel)
+# -----------------------------------------------------------------------
+
+
+def _ism_float(model, x, chunk):
+    xp = get_array_module(x)
+    B, C, L = x.shape
+    kernel = model.kernel
+    l = kernel.l
+    W = L - l + 1
 
     wx = kernel.flat_windows(x)
     sv = model.support_sequences
@@ -62,14 +196,13 @@ def ism(
     coefs = model.coefficients
     bias = model.bias
 
-    # Build mutation tensors on CPU
     wx_cpu = wx if not xp.__name__.startswith("cupy") else xp.asnumpy(wx)
-    all_old, all_new, all_wx_full, ranges = _build_mutations(
+    all_old, all_new, all_wx_full, ranges = _build_float_mutations(
         wx_cpu, L, W, l, B, F, wx_cpu.dtype
     )
     if do_rc and do_norm:
         wx_rc_cpu = wx_rc if not xp.__name__.startswith("cupy") else xp.asnumpy(wx_rc)
-        all_wx_rc_full = _build_rc_mutations(wx_rc_cpu, ranges, L, W, l, B, F, wx_rc_cpu.dtype)
+        all_wx_rc_full = _build_rc_float_mutations(wx_rc_cpu, ranges, L, W, l, B, F, wx_rc_cpu.dtype)
 
     all_old = xp.asarray(all_old)
     all_new = xp.asarray(all_new)
@@ -108,7 +241,7 @@ def ism(
     return (scores - ref_score).transpose(2, 0, 1).astype(x.dtype)
 
 
-def _build_mutations(wx_cpu, L, W, l, B, F, dtype):
+def _build_float_mutations(wx_cpu, L, W, l, B, F, dtype):
     all_old = np.zeros((L, B, l, F), dtype=dtype)
     all_new = np.zeros((4, L, B, l, F), dtype=dtype)
     all_wx_full = np.broadcast_to(wx_cpu[None], (4 * L, B, W, F)).copy()
@@ -124,7 +257,7 @@ def _build_mutations(wx_cpu, L, W, l, B, F, dtype):
         old_A = wx_cpu[:, a_s:a_e, :]
         all_old[p, :, :n_a, :] = old_A
 
-        muts = _mutate_windows(old_A, offsets, l, _BASES)
+        muts = _mutate_float_windows(old_A, offsets, l, _BASES)
         all_new[:, p, :, :n_a, :] = muts
 
         for vi in range(4):
@@ -133,7 +266,7 @@ def _build_mutations(wx_cpu, L, W, l, B, F, dtype):
     return all_old, all_new, all_wx_full, ranges
 
 
-def _build_rc_mutations(wx_rc_cpu, ranges, L, W, l, B, F, dtype):
+def _build_rc_float_mutations(wx_rc_cpu, ranges, L, W, l, B, F, dtype):
     all_wx_rc_full = np.broadcast_to(wx_rc_cpu[None], (4 * L, B, W, F)).copy()
 
     for p in range(L):
@@ -144,7 +277,7 @@ def _build_rc_mutations(wx_rc_cpu, ranges, L, W, l, B, F, dtype):
         if n_rc > 0:
             rc_off = [rc_p - i for i in range(rc_as, rc_ae)]
             rc_A = wx_rc_cpu[:, rc_as:rc_ae, :]
-            rc_muts = _mutate_windows(rc_A, rc_off, l, _COMPLEMENT)
+            rc_muts = _mutate_float_windows(rc_A, rc_off, l, _COMPLEMENT)
             for vi in range(4):
                 all_wx_rc_full[vi * L + p, :, rc_as:rc_ae, :] = rc_muts[vi]
 
@@ -183,7 +316,7 @@ def _batched_cross_kernel(
     return diag.reshape(4, L, B)
 
 
-def _mutate_windows(wx_A, offsets, l, bases):
+def _mutate_float_windows(wx_A, offsets, l, bases):
     result = np.broadcast_to(wx_A[None], (4, *wx_A.shape)).copy()
     for a_idx, off in enumerate(offsets):
         for c in range(4):
