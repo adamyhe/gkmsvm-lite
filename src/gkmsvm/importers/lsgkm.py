@@ -12,35 +12,19 @@ ENCODE public gkm-SVM models use this format.
 
 from __future__ import annotations
 
-import gzip
 from pathlib import Path
 
 import numpy as np
 
 from gkmsvm.codec import one_hot_encode
-from gkmsvm.svm import GkmSVM
+from gkmsvm.importers import _open_auto
+from gkmsvm.svm import KERNEL_ALIASES, GkmSVM
 
 KERNEL_TYPE_MAP = {
-    "gkm_cnt": 0,
-    "gkm_estfull": 1,
-    "gkm_esttrunc": 2,
-    "gkmrbf": 3,
-    "wgkm": 4,
-    "wgkmrbf": 5,
+    name: idx for idx, name in KERNEL_ALIASES.items() if isinstance(idx, int)
 }
 
 KERNEL_TYPE_REVERSE = {v: k for k, v in KERNEL_TYPE_MAP.items()}
-
-
-def _open_auto(path: Path):
-    """Open a file, auto-detecting gzip compression."""
-    try:
-        f = gzip.open(path, "rt")
-        f.readline()
-        f.seek(0)
-        return f
-    except gzip.BadGzipFile:
-        return open(path, "r")
 
 
 def parse_lsgkm_header(path: str | Path) -> dict:

@@ -92,6 +92,7 @@ def gkmexplain(
 
 
 def _build_alpha_table(mismatch_table: np.ndarray, l: int, d: int) -> np.ndarray:
+    """Per-mismatch importance weights: table[m] / (l - m) for matching positions."""
     alpha = np.zeros(l + 2, dtype=np.float64)
     for m in range(min(d, l) + 1):
         if l - m > 0:
@@ -100,6 +101,7 @@ def _build_alpha_table(mismatch_table: np.ndarray, l: int, d: int) -> np.ndarray
 
 
 def _build_kappa_table(mismatch_table: np.ndarray, l: int, d: int) -> np.ndarray:
+    """Per-mismatch hypothetical weights for mode=1 (counterfactual attribution)."""
     kappa = np.zeros(l + 2, dtype=np.float64)
     for m in range(1, min(d, l) + 1):
         if l - m + 1 > 0:

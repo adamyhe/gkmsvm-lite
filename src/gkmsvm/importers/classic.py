@@ -14,35 +14,15 @@ Classic gkmSVM: score = sum(alpha_i * K) + rho, so bias = +rho.
 
 from __future__ import annotations
 
-import gzip
 from pathlib import Path
 
 import numpy as np
 
 from gkmsvm.codec import one_hot_encode
 from gkmsvm.fasta import read_fasta
+from gkmsvm.importers import _open_auto
 from gkmsvm.importers.lsgkm import KERNEL_TYPE_MAP
-from gkmsvm.svm import GkmSVM
-
-CLASSIC_KERNEL_TYPE_MAP = {
-    0: "gkm_cnt",
-    1: "gkm_estfull",
-    2: "gkm_esttrunc",
-    3: "gkmrbf",
-    4: "wgkm",
-    5: "wgkmrbf",
-}
-
-
-def _open_auto(path: Path):
-    """Open a file, auto-detecting gzip compression."""
-    try:
-        f = gzip.open(path, "rt")
-        f.readline()
-        f.seek(0)
-        return f
-    except gzip.BadGzipFile:
-        return open(path, "r")
+from gkmsvm.svm import KERNEL_ALIASES, GkmSVM
 
 
 def _parse_classic_file(f) -> tuple[dict, bool, list[str]]:
@@ -72,7 +52,7 @@ def _parse_classic_file(f) -> tuple[dict, bool, list[str]]:
             if value.isdigit():
                 kt_id = int(value)
                 header["kernel_type_id"] = kt_id
-                header["kernel_type"] = CLASSIC_KERNEL_TYPE_MAP.get(kt_id, value)
+                header["kernel_type"] = KERNEL_ALIASES.get(kt_id, value)
             else:
                 header["kernel_type"] = value
                 header["kernel_type_id"] = KERNEL_TYPE_MAP.get(value, -1)

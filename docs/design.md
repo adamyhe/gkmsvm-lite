@@ -34,9 +34,19 @@ Normalize by self-similarity: `K_norm(x,y) = K(x,y) / sqrt(K(x,x) * K(y,y))`. Un
 
 On by default (`norc=0` in LS-GKM). Scores must be invariant under RC. When enabled, kernel computes K(x,y) + K(x, RC(y)).
 
+## Kernel naming
+
+Each kernel mode has three identifiers: LS-GKM `-t N` integer, an internal name (used in model files), and a descriptive alias. `resolve_kernel_type()` accepts any of these and returns the canonical internal name. `GkmSVM` resolves on construction — `model.kernel_type` is always the internal name.
+
 ## Kernel computation: matmul + table lookup
 
 Window match counts are computed via matmul on flattened one-hot windows (`[B, W, 4*l]`), avoiding a 6D broadcast intermediate that is 440x larger. The `_apply_table` step uses eager gather: `table[mismatches].sum()`. Both NumPy (CPU) and CuPy (GPU) use the same code path since CuPy mirrors NumPy's fancy indexing.
+
+## Fused pairwise kernels
+
+CPU: Numba `@njit(parallel=True, fastmath=True)` fuses match-count + table-lookup + sum into a single parallel kernel, avoiding materialization of the full `[B, S, W, W]` match tensor.
+
+GPU: CuPy RawKernel with coalesced memory access. The int8 index path transposes SV windows from `[S, Wy, l]` to `[l, Wy, S]` so adjacent CUDA threads read adjacent bytes. Uses `--use_fast_math` and shared-memory table caching.
 
 ## Chunked SV inference
 
@@ -72,10 +82,14 @@ The SVM caches the support-vector self-kernel diagonal (`_raw_diagonal(sv)`) aft
 
 gkm-SVMs are not differentiable — autograd provides no value. The array operations (matmul, einsum, fancy indexing) are identical in NumPy and CuPy, so a single codebase handles both CPU and GPU via `gkmsvm.backend.get_array_module()`.
 
-CPU: NumPy arrays + Numba `@njit(parallel=True)` for reference kernels.
-GPU: CuPy arrays (optional `[gpu]` extra). `model.cuda()` moves data to GPU.
+CPU: NumPy arrays + Numba `@njit(parallel=True)` fused pairwise kernels.
+GPU: CuPy arrays (optional `[gpu]` extra) + CuPy RawKernel CUDA code. `model.cuda()` moves data to GPU.
 
 tangermeme interop is vendored — only `extract_loci` (pyfaidx) and FASTA I/O are needed. ledidi requires differentiable models and does not work with gkm-SVMs.
+
+## Int8 index path
+
+The default pairwise kernel uses int8 base-index comparison instead of float32 one-hot dot products. For window length l=11: 11 int8 comparisons vs 44 float32 multiplications — 4x fewer ops, 16x less memory. SV index windows are cached on the model (`_get_sv_index_windows`). ISM uses this path via `pairwise_from_indices`.
 
 ## References
 

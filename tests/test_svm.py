@@ -53,7 +53,7 @@ class TestGkmSVMConstruction:
             )
 
     def test_unsupported_kernel(self):
-        with pytest.raises(NotImplementedError, match="not yet implemented"):
+        with pytest.raises(NotImplementedError, match="Unknown kernel type"):
             GkmSVM(
                 support_sequences=np.zeros((3, 4, 10)),
                 coefficients=np.zeros(3),
