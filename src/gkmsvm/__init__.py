@@ -9,7 +9,9 @@ from gkmsvm.codec import (
     reverse_complement,
     validate,
 )
+from gkmsvm.deltasvm import DeltaSVM
 from gkmsvm.explain import gkmexplain
+from gkmsvm.importers.deltasvm import load_deltasvm_weights
 from gkmsvm.importers.lsgkm import load_lsgkm_model
 from gkmsvm.ism import ism
 from gkmsvm.svm import GkmSVM
@@ -21,7 +23,9 @@ __all__ = [
     "validate",
     "encode_batch",
     "GkmSVM",
+    "DeltaSVM",
     "load_lsgkm_model",
+    "load_deltasvm_weights",
     "ism",
     "gkmexplain",
 ]

@@ -16,10 +16,10 @@
 - [x] GPU _apply_table histogram dispatch (17x less peak memory, prevents MPS OOM at 500 SVs)
 - [x] ISM utility with window-delta optimization (19x MPS speedup via batched GPU compute)
 - [x] GkmExplain attribution (mode 0 + hypothetical mode 1, 20-30x faster than ISM)
-- [x] 149 tests passing
+- [x] DeltaSVM model + importer (linear gapped k-mer scoring)
+- [x] 172 tests passing
 
 ## Next
-- [ ] **deltaSVM importer** — tab-separated `<kmer>\t<score>` linear model
 - [ ] **gkmSVM classic importer** — legacy two-file format with opposite bias sign
 - [ ] **Extend kernel modes** — `-t 3` (RBF), `-t 4` (center-weighted), `-t 5` (combined)
 - [ ] **Training** — C-SVM solver with kernel-capable optimizer and cache discipline
