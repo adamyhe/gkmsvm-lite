@@ -9,6 +9,7 @@ from gkmsvm.codec import (
     reverse_complement,
     validate,
 )
+from gkmsvm.explain import gkmexplain
 from gkmsvm.importers.lsgkm import load_lsgkm_model
 from gkmsvm.ism import ism
 from gkmsvm.svm import GkmSVM
@@ -22,4 +23,5 @@ __all__ = [
     "GkmSVM",
     "load_lsgkm_model",
     "ism",
+    "gkmexplain",
 ]

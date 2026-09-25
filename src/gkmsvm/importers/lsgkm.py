@@ -20,7 +20,6 @@ import torch
 from gkmsvm.codec import one_hot_encode
 from gkmsvm.svm import GkmSVM
 
-
 KERNEL_TYPE_MAP = {
     "gkm_cnt": 0,
     "gkm_estfull": 1,
@@ -162,9 +161,7 @@ def load_lsgkm_model(
             sequences.append(seq)
 
     if len(sequences) != total_sv:
-        raise ValueError(
-            f"Expected {total_sv} support vectors, got {len(sequences)}"
-        )
+        raise ValueError(f"Expected {total_sv} support vectors, got {len(sequences)}")
 
     encoded = [one_hot_encode(seq, dtype=dtype) for seq in sequences]
     lengths = {t.shape[1] for t in encoded}

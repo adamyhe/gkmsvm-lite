@@ -13,7 +13,6 @@ from math import comb
 import numba
 import numpy as np
 
-
 # ── Weight tables ──────────────────────────────────────────────────────
 
 

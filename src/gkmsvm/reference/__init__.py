@@ -8,10 +8,10 @@ from gkmsvm.reference.kernels import (
 )
 
 __all__ = [
-    "build_gkm_cnt_table",
     "build_esttrunc_table",
+    "build_gkm_cnt_table",
     "one_hot_encode_np",
-    "reverse_complement_np",
     "pairwise",
+    "reverse_complement_np",
     "score",
 ]

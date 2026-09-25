@@ -4,7 +4,6 @@ from math import comb
 
 import torch
 
-from gkmsvm.kernels.base import GkmKernel
 from gkmsvm.kernels.direct import DirectGkmKernel
 
 

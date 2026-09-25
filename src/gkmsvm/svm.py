@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 from gkmsvm.kernels.base import GkmKernel
 from gkmsvm.kernels.direct import DirectGkmKernel
@@ -12,12 +12,20 @@ KERNEL_BUILDERS = {
         l=p["L"], k=p["k"], normalize=True, include_rc=p.get("include_rc", True)
     ),
     "gkm_esttrunc": lambda p: EstTruncGkmKernel(
-        l=p["L"], k=p["k"], d=p.get("d", 3), normalize=True,
-        include_rc=p.get("include_rc", True), truncate=True,
+        l=p["L"],
+        k=p["k"],
+        d=p.get("d", 3),
+        normalize=True,
+        include_rc=p.get("include_rc", True),
+        truncate=True,
     ),
     "gkm_estfull": lambda p: EstTruncGkmKernel(
-        l=p["L"], k=p["k"], d=p.get("d", 3), normalize=True,
-        include_rc=p.get("include_rc", True), truncate=False,
+        l=p["L"],
+        k=p["k"],
+        d=p.get("d", 3),
+        normalize=True,
+        include_rc=p.get("include_rc", True),
+        truncate=False,
     ),
 }
 
@@ -113,9 +121,7 @@ class GkmSVM(nn.Module):
 
         return scores + self._bias
 
-    def score_variants(
-        self, ref: torch.Tensor, alt: torch.Tensor
-    ) -> torch.Tensor:
+    def score_variants(self, ref: torch.Tensor, alt: torch.Tensor) -> torch.Tensor:
         """Compute variant effect scores as score(alt) - score(ref).
 
         Args:

@@ -11,7 +11,9 @@ class GkmKernel(ABC):
     Subclasses implement specific kernel modes (-t 0, -t 2, etc.).
     """
 
-    def __init__(self, l: int, k: int, *, normalize: bool = True, include_rc: bool = True):
+    def __init__(
+        self, l: int, k: int, *, normalize: bool = True, include_rc: bool = True
+    ):
         if k > l:
             raise ValueError(f"k ({k}) must be <= l ({l})")
         if l < 1:

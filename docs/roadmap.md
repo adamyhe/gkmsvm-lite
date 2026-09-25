@@ -15,11 +15,10 @@
 - [x] GPU kernel redesign: matmul replaces 6D broadcast (440x less intermediate memory)
 - [x] GPU _apply_table histogram dispatch (17x less peak memory, prevents MPS OOM at 500 SVs)
 - [x] ISM utility with window-delta optimization (19x MPS speedup via batched GPU compute)
-- [x] 132 tests passing
+- [x] GkmExplain attribution (mode 0 + hypothetical mode 1, 20-30x faster than ISM)
+- [x] 149 tests passing
 
 ## Next
-
-- [ ] **GkmExplain** — port from kundajelab/lsgkm C implementation
 - [ ] **deltaSVM importer** — tab-separated `<kmer>\t<score>` linear model
 - [ ] **gkmSVM classic importer** — legacy two-file format with opposite bias sign
 - [ ] **Extend kernel modes** — `-t 3` (RBF), `-t 4` (center-weighted), `-t 5` (combined)

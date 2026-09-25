@@ -9,7 +9,16 @@ Ledidi is gradient-based (uses backprop for sequence design) and therefore incom
 ## Supported methods
 
 ### GkmExplain (primary)
-Analytically decomposes the SVM decision function into per-base importance scores without gradients. Much faster than ISM. No Python implementation exists — must be ported from C (kundajelab/lsgkm). Reference: Shrikumar et al. 2019.
+Analytically decomposes the SVM decision function into per-base importance scores without gradients. 20-30x faster than ISM on CPU. Ported from kundajelab/lsgkm C implementation (Shrikumar et al. 2019).
+
+- Mode 0: importance scores — attributes kernel value to matching positions
+- Mode 1: hypothetical importance scores — all 4 bases get values at each position
+
+```python
+from gkmsvm import gkmexplain
+scores = gkmexplain(model, x, mode=0)         # [B, 4, L]
+hyp_scores = gkmexplain(model, x, mode=1)     # [B, 4, L]
+```
 
 ### ISM (in-silico mutagenesis)
 Exhaustively score all single-base mutations. Evaluation-based, no gradients needed. Slower but exact. Can leverage tangermeme.ersatz.substitute for sequence manipulation.

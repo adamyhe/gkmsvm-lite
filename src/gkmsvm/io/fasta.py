@@ -9,7 +9,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import torch
-
 from tangermeme.io import extract_loci as _tangermeme_extract_loci
 from tangermeme.io import one_hot_to_fasta
 
@@ -74,8 +73,10 @@ def write_fasta(
     with open(path, "w") as f:
         for header, sequence in records:
             f.write(f">{header}\n")
-            for i in range(0, len(sequence), line_width):
-                f.write(sequence[i : i + line_width] + "\n")
+            f.writelines(
+                sequence[i : i + line_width] + "\n"
+                for i in range(0, len(sequence), line_width)
+            )
 
 
 def extract_loci(

@@ -183,7 +183,9 @@ def _batched_self_kernel(kernel, all_wx_full, L, B, W, F, group_sz=200):
     return diag.reshape(4, L, B)
 
 
-def _batched_cross_kernel(kernel, all_wx_full, all_wx_rc_full, L, B, W, F, group_sz=200):
+def _batched_cross_kernel(
+    kernel, all_wx_full, all_wx_rc_full, L, B, W, F, group_sz=200
+):
     """Batched cross-RC kernel via grouped bmm."""
     device = all_wx_full.device
     dtype = all_wx_full.dtype

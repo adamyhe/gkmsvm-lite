@@ -59,19 +59,29 @@ class DirectGkmKernel(GkmKernel):
         Returns:
             [...] tensor with window dimensions summed out.
         """
-        dtype = torch.float32 if matches.device.type == "mps" else self._mismatch_table.dtype
+        dtype = (
+            torch.float32
+            if matches.device.type == "mps"
+            else self._mismatch_table.dtype
+        )
         table = self._mismatch_table.to(device=matches.device, dtype=dtype)
         if matches.device.type in ("cuda", "mps"):
             return self._apply_table_histogram(matches, table)
         return self._apply_table_eager(matches, table)
 
-    def _apply_table_eager(self, matches: torch.Tensor, table: torch.Tensor) -> torch.Tensor:
+    def _apply_table_eager(
+        self, matches: torch.Tensor, table: torch.Tensor
+    ) -> torch.Tensor:
         mismatches = (self.l - matches).round().long().clamp(0, self.l)
         return table[mismatches].sum(dim=(-2, -1))
 
-    def _apply_table_histogram(self, matches: torch.Tensor, table: torch.Tensor) -> torch.Tensor:
+    def _apply_table_histogram(
+        self, matches: torch.Tensor, table: torch.Tensor
+    ) -> torch.Tensor:
         rounded = matches.round()
-        result = torch.zeros(matches.shape[:-2], dtype=table.dtype, device=matches.device)
+        result = torch.zeros(
+            matches.shape[:-2], dtype=table.dtype, device=matches.device
+        )
         for m in range(self.l + 1):
             w = table[m].item()
             if w == 0.0:
@@ -80,9 +90,7 @@ class DirectGkmKernel(GkmKernel):
             result = result + w * count.to(table.dtype)
         return result
 
-    def pairwise_from_windows(
-        self, wx: torch.Tensor, wy: torch.Tensor
-    ) -> torch.Tensor:
+    def pairwise_from_windows(self, wx: torch.Tensor, wy: torch.Tensor) -> torch.Tensor:
         """Raw kernel from pre-extracted flat windows (no RC, no normalization).
 
         Useful for training where windows can be cached across iterations.

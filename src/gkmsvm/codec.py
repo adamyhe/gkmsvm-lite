@@ -61,9 +61,7 @@ def validate(tensor: torch.Tensor) -> None:
     has exactly one nonzero entry. Raises ValueError on failure.
     """
     if tensor.shape[-2] != 4:
-        raise ValueError(
-            f"Channel dimension must be 4, got {tensor.shape[-2]}"
-        )
+        raise ValueError(f"Channel dimension must be 4, got {tensor.shape[-2]}")
     sums = tensor.sum(dim=-2)
     if not torch.allclose(sums, torch.ones_like(sums)):
         raise ValueError("Each position must sum to 1.0")
