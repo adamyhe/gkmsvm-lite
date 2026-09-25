@@ -10,6 +10,7 @@ from gkmsvm.codec import (
     validate,
 )
 from gkmsvm.importers.lsgkm import load_lsgkm_model
+from gkmsvm.ism import ism
 from gkmsvm.svm import GkmSVM
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "encode_batch",
     "GkmSVM",
     "load_lsgkm_model",
+    "ism",
 ]

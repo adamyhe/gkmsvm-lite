@@ -113,6 +113,40 @@ class TestDirectGkmKernelRC:
         assert k.item() == pytest.approx(1.0)
 
 
+class TestApplyTableDispatch:
+    """Verify histogram and eager _apply_table give identical results."""
+
+    def test_histogram_matches_eager(self):
+        kernel = DirectGkmKernel(l=5, k=3, normalize=False, include_rc=False)
+        x = torch.stack([one_hot_encode(s) for s in ["ACGTACGT", "TGCATGCA", "AAACCCGG"]])
+        y = torch.stack([one_hot_encode(s) for s in ["CCCCGGGG", "ACGTACGT"]])
+        wx = kernel.flat_windows(x)
+        wy = kernel.flat_windows(y)
+        matches = torch.einsum("bif,sjf->bsij", wx, wy)
+
+        table = kernel._mismatch_table.to(dtype=torch.float64)
+        eager = kernel._apply_table_eager(matches, table)
+        hist = kernel._apply_table_histogram(matches, table)
+        assert torch.allclose(eager, hist, atol=1e-10)
+
+    def test_histogram_matches_eager_esttrunc(self):
+        from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
+        kernel = EstTruncGkmKernel(11, 7, d=3, normalize=False, include_rc=False)
+        import random
+        rng = random.Random(77)
+        seqs = ["".join(rng.choice("ACGT") for _ in range(30)) for _ in range(10)]
+        x = torch.stack([one_hot_encode(s) for s in seqs[:4]])
+        y = torch.stack([one_hot_encode(s) for s in seqs[4:]])
+        wx = kernel.flat_windows(x)
+        wy = kernel.flat_windows(y)
+        matches = torch.einsum("bif,sjf->bsij", wx, wy)
+
+        table = kernel._mismatch_table.to(dtype=torch.float64)
+        eager = kernel._apply_table_eager(matches, table)
+        hist = kernel._apply_table_histogram(matches, table)
+        assert torch.allclose(eager, hist, atol=1e-10)
+
+
 class TestDirectGkmKernelEdgeCases:
     def test_sequence_too_short(self):
         kernel = DirectGkmKernel(l=5, k=3)

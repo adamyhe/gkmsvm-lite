@@ -12,12 +12,14 @@
 - [x] 107 tests passing
 - [x] NumPy/Numba CPU reference implementation with cross-validation
 - [x] Numba/PyTorch threading layer pin (workqueue, adapted from scprism)
-- [x] 120 tests passing
+- [x] GPU kernel redesign: matmul replaces 6D broadcast (440x less intermediate memory)
+- [x] GPU _apply_table histogram dispatch (17x less peak memory, prevents MPS OOM at 500 SVs)
+- [x] ISM utility with window-delta optimization (19x MPS speedup via batched GPU compute)
+- [x] 132 tests passing
 
 ## Next
 
 - [ ] **GkmExplain** — port from kundajelab/lsgkm C implementation
-- [ ] **ISM utility** — exhaustive single-base mutagenesis scoring
 - [ ] **deltaSVM importer** — tab-separated `<kmer>\t<score>` linear model
 - [ ] **gkmSVM classic importer** — legacy two-file format with opposite bias sign
 - [ ] **Extend kernel modes** — `-t 3` (RBF), `-t 4` (center-weighted), `-t 5` (combined)

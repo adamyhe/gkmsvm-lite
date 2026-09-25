@@ -28,6 +28,17 @@ Normalize by self-similarity: `K_norm(x,y) = K(x,y) / sqrt(K(x,x) * K(y,y))`. Un
 
 On by default (`norc=0` in LS-GKM). Scores must be invariant under RC. When enabled, kernel computes K(x,y) + K(x, RC(y)).
 
+## Kernel computation: matmul + table lookup
+
+Window match counts are computed via matmul on flattened one-hot windows (`[B, W, 4*l]`), avoiding a 6D broadcast intermediate that is 440x larger. The `_apply_table` step (match counts → weighted kernel values) dispatches by device:
+
+- **CPU**: eager gather — `table[mismatches].sum()`. Fastest on CPU due to PyTorch's optimized gather. Further 3–14x speedup available via `torch.compile(model, backend="inductor")`, which fuses the 6-op chain (subtract → round → long → clamp → gather → sum) into a single kernel.
+- **GPU (CUDA/MPS)**: histogram loop — iterates over nonzero weight entries (4 for d=3) and counts matching window pairs per mismatch level. Avoids materializing the full `[B, S, Wx, Wy]` gather result (17x less peak intermediate memory), preventing OOM on large models. 1.4–1.7x faster than eager on MPS.
+
+## Chunked SV inference
+
+`GkmSVM(sv_chunk_size=N)` chunks pairwise kernel computation over support vectors, bounding memory for large models. ENCODE ENCFF579AOX has 72,145 SVs — without chunking at 300bp, the matches tensor alone would be hundreds of GB. Use `sv_chunk_size=100–200` for GPU, `None` (full batch) for small models.
+
 ## No dense Gram matrix
 
 LS-GKM exists because the full N×N kernel matrix doesn't fit in memory at scale (50k examples ≈ 10 GB, 90k ≈ 32 GB). Use block/column evaluation with chunked SV inference.

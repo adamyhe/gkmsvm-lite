@@ -123,6 +123,24 @@ class TestGkmSVMChunked:
 
         assert torch.allclose(full_scores, chunked_scores, atol=1e-6)
 
+    def test_chunked_esttrunc(self):
+        import random
+        rng = random.Random(99)
+        seqs = ["".join(rng.choice("ACGT") for _ in range(30)) for _ in range(20)]
+        svs = torch.stack([one_hot_encode(s) for s in seqs])
+        coefs = torch.randn(20)
+        queries = torch.stack([one_hot_encode(s) for s in seqs[:5]])
+
+        model = GkmSVM(svs, coefs, -0.1, "gkm_esttrunc",
+                        {"L": 11, "k": 7, "d": 3, "include_rc": True})
+        full = model(queries)
+
+        for chunk in [3, 7, 10, 20]:
+            model.sv_chunk_size = chunk
+            chunked = model(queries)
+            assert torch.allclose(full, chunked, atol=1e-6), \
+                f"chunk_size={chunk}: max diff {(full - chunked).abs().max()}"
+
 
 class TestGkmSVMVariants:
     def test_score_variants(self, small_model):

@@ -25,6 +25,7 @@ pytest tests/ -k "test_rc"          # pattern match
 - Output: `[batch, 1]` floating-point margin scores
 - Kernel normalization on by default, RC equivalence on by default
 - Score = `Σ coef_i × K(x, sv_i) + bias` where `bias = -rho`
+- ISM via `ism(model, x)` returns `[B, 4, L]` score deltas using window-delta optimization
 - Gradient-based attribution (DeepLIFT, SHAP, captum, ledidi) is incompatible — use GkmExplain or ISM
 
 ## Gotchas
