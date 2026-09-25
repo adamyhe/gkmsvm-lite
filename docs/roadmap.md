@@ -17,9 +17,9 @@
 - [x] ISM utility with window-delta optimization (19x MPS speedup via batched GPU compute)
 - [x] GkmExplain attribution (mode 0 + hypothetical mode 1, 20-30x faster than ISM)
 - [x] DeltaSVM model + importer (linear gapped k-mer scoring)
-- [x] 172 tests passing
+- [x] Classic gkmSVM importer — legacy two-file format with opposite bias sign
+- [x] Extended kernel modes — `-t 3` (RBF), `-t 4` (center-weighted), `-t 5` (combined)
+- [x] 219 tests passing
 
 ## Next
-- [ ] **gkmSVM classic importer** — legacy two-file format with opposite bias sign
-- [ ] **Extend kernel modes** — `-t 3` (RBF), `-t 4` (center-weighted), `-t 5` (combined)
 - [ ] **Training** — C-SVM solver with kernel-capable optimizer and cache discipline

@@ -24,10 +24,12 @@ pytest tests/ -k "test_rc"          # pattern match
 - Tensor format: `[batch, 4, length]` one-hot DNA, channel order A=0/C=1/G=2/T=3
 - Output: `[batch, 1]` floating-point margin scores
 - Kernel normalization on by default, RC equivalence on by default
-- Score = `Σ coef_i × K(x, sv_i) + bias` where `bias = -rho`
+- Score = `Σ coef_i × K(x, sv_i) + bias` where `bias = -rho` (LS-GKM) or `+rho` (classic gkmSVM)
+- Kernel modes: `-t 0` (direct), `-t 1` (est full), `-t 2` (est trunc, default), `-t 3` (RBF), `-t 4` (center-weighted), `-t 5` (center-weighted RBF)
 - ISM via `ism(model, x)` returns `[B, 4, L]` score deltas using window-delta optimization
 - GkmExplain via `gkmexplain(model, x, mode=0|1)` returns `[B, 4, L]` attribution scores, 20-30x faster than ISM
-- Gradient-based attribution (DeepLIFT, SHAP, captum, ledidi) is incompatible — use GkmExplain or ISM
+- Gradient-based methods (DeepLIFT, SHAP, captum) are incompatible — use GkmExplain or ISM
+- ledidi requires differentiable models and does not work with gkm-SVMs
 
 ## Gotchas
 
@@ -36,4 +38,5 @@ pytest tests/ -k "test_rc"          # pattern match
 - `-t 0` and `-t 2` use completely different weight table math. Do not mix.
 - `tangermeme.kmers.gapped_kmers` is NOT usable for kernel computation (returns CSR, caps at 10 k-mers).
 - `score(ALT) - score(REF)` differs from deltaSVM's k-mer-weight linear approximation.
-- Original gkmSVM (`.gkmmodel`) uses opposite sign convention for bias vs LS-GKM.
+- Original gkmSVM (`.gkmmodel`) uses opposite sign convention for bias vs LS-GKM. Use `load_classic_model()` not `load_lsgkm_model()`.
+- `-t 4`/`-t 5` (wgkm/wgkmrbf) require M and H parameters; these use per-position DP, not the matmul+table path.

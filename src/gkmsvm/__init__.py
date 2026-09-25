@@ -12,6 +12,7 @@ from gkmsvm.codec import (
 from gkmsvm.deltasvm import DeltaSVM
 from gkmsvm.explain import gkmexplain
 from gkmsvm.fasta import extract_loci, read_fasta, write_fasta
+from gkmsvm.importers.classic import load_classic_model
 from gkmsvm.importers.deltasvm import load_deltasvm_weights
 from gkmsvm.importers.lsgkm import load_lsgkm_model
 from gkmsvm.ism import ism
@@ -26,6 +27,7 @@ __all__ = [
     "GkmSVM",
     "DeltaSVM",
     "load_lsgkm_model",
+    "load_classic_model",
     "load_deltasvm_weights",
     "read_fasta",
     "write_fasta",

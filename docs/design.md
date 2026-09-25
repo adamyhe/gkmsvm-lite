@@ -12,6 +12,12 @@ Ship an LS-GKM model importer and predictor before building training. Match `gkm
 
 `-t 1` (`gkm_estfull`) is supported via `EstTruncGkmKernel(truncate=False)`.
 
+`-t 3` (`gkmrbf`) wraps the unnormalized `-t 2` kernel with an RBF transform: `K_rbf(x,y) = exp(-gamma * (K(x,x) + K(y,y) - 2*K(x,y)))`. Self-similarity is always 1.
+
+`-t 4` (`wgkm`) uses center-weighted position importance. Positions near the l-mer center get weight 1.0; edges decay as `2^(-d/H)`. Uses per-position match computation with an elementary symmetric polynomial DP — exact position weighting, not a mismatch-count average.
+
+`-t 5` (`wgkmrbf`) combines center-weighted base with RBF distance transform.
+
 ## Score formula
 
 `score(x) = Σ dual_coef_i × K(x, support_i) + bias`
@@ -51,11 +57,13 @@ LS-GKM exists because the full N×N kernel matrix doesn't fit in memory at scale
 
 Header key-value pairs until `SV` marker, then `<signed_coef> <DNA_sequence>` per line. Key fields: `svm_type`, `kernel_type`, `L`, `k`, `d`, `norc`, `rho`, `nr_class`, `total_sv`. Auto-detects gzip. Binary classification only (nr_class=2).
 
-Original gkmSVM format (`.gkmmodel`) uses OPPOSITE sign convention for bias — not yet implemented.
+## Classic gkmSVM format
+
+Original gkmSVM (Ghandi et al. 2014) uses OPPOSITE sign convention: `bias = +rho`. Supports both embedded SVs (single file) and two-file format (model + FASTA). Integer kernel types (0-5) are mapped to string names. Load via `load_classic_model(model_path, svseq_path=...)`.
 
 ## PyTorch over cuML/CuPy
 
-PyTorch chosen for compatibility with S2F ecosystem (tangermeme, Cherimoya, ledidi, scverse). All sequence manipulation and variant effect scoring uses tangermeme utilities.
+PyTorch chosen for compatibility with the S2F ecosystem (tangermeme). All sequence manipulation and variant effect scoring uses tangermeme utilities. Note: ledidi requires differentiable models and does not work with gkm-SVMs.
 
 ## References
 

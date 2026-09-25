@@ -157,12 +157,12 @@ def _raw_kernel(x, y, l, table):
     return total
 
 
-@numba.njit(cache=True)
+@numba.njit(cache=True, parallel=True)
 def _pairwise_raw(X, Y, l, table, include_rc):
     """Raw pairwise kernel matrix. X:[B,4,Lx], Y:[S,4,Ly] -> [B,S]."""
     B, S = X.shape[0], Y.shape[0]
     K = np.empty((B, S), dtype=np.float64)
-    for b in range(B):
+    for b in numba.prange(B):
         for s in range(S):
             val = _raw_kernel(X[b], Y[s], l, table)
             if include_rc:
@@ -171,12 +171,12 @@ def _pairwise_raw(X, Y, l, table, include_rc):
     return K
 
 
-@numba.njit(cache=True)
+@numba.njit(cache=True, parallel=True)
 def _diagonal_raw(X, l, table, include_rc):
     """Raw self-kernel values. X:[B,4,L] -> [B]."""
     B = X.shape[0]
     diag = np.empty(B, dtype=np.float64)
-    for b in range(B):
+    for b in numba.prange(B):
         val = _raw_kernel(X[b], X[b], l, table)
         if include_rc:
             val += _raw_kernel(X[b], _rc(X[b]), l, table)

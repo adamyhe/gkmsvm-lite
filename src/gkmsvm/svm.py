@@ -6,6 +6,11 @@ from torch import nn
 from gkmsvm.kernels.base import GkmKernel
 from gkmsvm.kernels.direct import DirectGkmKernel
 from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
+from gkmsvm.kernels.rbf import RbfGkmKernel
+from gkmsvm.kernels.weighted import (
+    CenterWeightedGkmKernel,
+    CenterWeightedRbfGkmKernel,
+)
 
 KERNEL_BUILDERS = {
     "gkm_cnt": lambda p: DirectGkmKernel(
@@ -26,6 +31,31 @@ KERNEL_BUILDERS = {
         normalize=True,
         include_rc=p.get("include_rc", True),
         truncate=False,
+    ),
+    "gkmrbf": lambda p: RbfGkmKernel(
+        l=p["L"],
+        k=p["k"],
+        d=p.get("d", 3),
+        gamma=p.get("gamma", 1.0),
+        normalize=True,
+        include_rc=p.get("include_rc", True),
+    ),
+    "wgkm": lambda p: CenterWeightedGkmKernel(
+        l=p["L"],
+        k=p["k"],
+        M=p["M"],
+        H=p["H"],
+        normalize=True,
+        include_rc=p.get("include_rc", True),
+    ),
+    "wgkmrbf": lambda p: CenterWeightedRbfGkmKernel(
+        l=p["L"],
+        k=p["k"],
+        M=p["M"],
+        H=p["H"],
+        gamma=p.get("gamma", 1.0),
+        normalize=True,
+        include_rc=p.get("include_rc", True),
     ),
 }
 

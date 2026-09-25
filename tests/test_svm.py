@@ -56,7 +56,7 @@ class TestGkmSVMConstruction:
                 support_sequences=torch.zeros(3, 4, 10),
                 coefficients=torch.zeros(3),
                 bias=0.0,
-                kernel_type="gkmrbf",
+                kernel_type="totally_fake_kernel",
                 kernel_params={"L": 11, "k": 7, "include_rc": True},
             )
 

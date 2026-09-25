@@ -177,21 +177,20 @@ class TestLoadEstTruncModel:
 
 class TestLoadModelErrors:
     def test_unsupported_kernel(self, tmp_path):
-        p = tmp_path / "rbf.model.txt"
+        p = tmp_path / "fake.model.txt"
         p.write_text(textwrap.dedent("""\
             svm_type c_svc
-            kernel_type gkmrbf
+            kernel_type totally_fake_kernel
             L 11
             k 7
             d 3
-            gamma 2.0
             nr_class 2
             total_sv 1
             rho 0.0
             SV
             1.0 ACGTACGTACGT
         """))
-        with pytest.raises(NotImplementedError, match="gkmrbf"):
+        with pytest.raises(NotImplementedError, match="totally_fake_kernel"):
             load_lsgkm_model(p)
 
     def test_wrong_sv_count(self, tmp_path):
