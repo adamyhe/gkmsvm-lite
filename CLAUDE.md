@@ -30,6 +30,8 @@ pytest tests/ -k "test_rc"          # pattern match
 - GkmExplain via `gkmexplain(model, x, mode=0|1)` returns `[B, 4, L]` attribution scores, 20-30x faster than ISM
 - Gradient-based methods (DeepLIFT, SHAP, captum) are incompatible — use GkmExplain or ISM
 - ledidi requires differentiable models and does not work with gkm-SVMs
+- GPU: `model.cuda().compile(dtype=torch.bfloat16)` fuses kernel + uses bf16 tensor cores (5.3x faster than LS-GKM C)
+- GPU uses float32 (or bf16 with compile), CPU uses float64. Score diff is ~2e-6, negligible for scoring
 
 ## Gotchas
 

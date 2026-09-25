@@ -142,7 +142,17 @@ class CenterWeightedGkmKernel(GkmKernel):
 
         return result
 
-    def _raw_diagonal(self, x: torch.Tensor) -> torch.Tensor:
+    def _raw_diagonal(
+        self, x: torch.Tensor, *, chunk_size: int | None = None
+    ) -> torch.Tensor:
+        B = x.shape[0]
+        if chunk_size is not None and chunk_size < B:
+            result = torch.empty(B, dtype=x.dtype, device=x.device)
+            for start in range(0, B, chunk_size):
+                end = min(start + chunk_size, B)
+                result[start:end] = self._raw_diagonal(x[start:end])
+            return result
+
         pw = self._pos_weights.to(device=x.device, dtype=x.dtype)
         matches = self._per_position_self_matches(x)
         result = _weighted_kernel_from_matches(matches, pw, self.k)
@@ -187,9 +197,12 @@ class CenterWeightedRbfGkmKernel(GkmKernel):
     def _raw_pairwise(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         K_xy = self._base._raw_pairwise(x, y)
         K_xx = self._base._raw_diagonal(x)
-        K_yy = self._base._raw_diagonal(y)
+        cs = 1000 if y.shape[0] > self._DIAG_CHUNK_THRESHOLD else None
+        K_yy = self._base._raw_diagonal(y, chunk_size=cs)
         dist_sq = K_xx.unsqueeze(1) + K_yy.unsqueeze(0) - 2 * K_xy
         return torch.exp(-self.gamma * torch.clamp(dist_sq, min=0))
 
-    def _raw_diagonal(self, x: torch.Tensor) -> torch.Tensor:
+    def _raw_diagonal(
+        self, x: torch.Tensor, *, chunk_size: int | None = None
+    ) -> torch.Tensor:
         return torch.ones(x.shape[0], dtype=x.dtype, device=x.device)

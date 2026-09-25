@@ -43,7 +43,13 @@ Window match counts are computed via matmul on flattened one-hot windows (`[B, W
 
 ## Chunked SV inference
 
-`GkmSVM(sv_chunk_size=N)` chunks pairwise kernel computation over support vectors, bounding memory for large models. ENCODE ENCFF579AOX has 72,145 SVs — without chunking at 300bp, the matches tensor alone would be hundreds of GB. Use `sv_chunk_size=100–200` for GPU, `None` (full batch) for small models.
+`GkmSVM(sv_chunk_size=N)` chunks pairwise kernel computation over support vectors, bounding memory for large models. ENCODE ENCFF579AOX has 72,145 SVs — without chunking at 300bp, the matches tensor alone would be hundreds of GB. Recommended chunk sizes for single-sequence scoring at 300bp:
+
+- 10 GB GPU: `sv_chunk_size=5000` (peak ~3.4 GB for matches + histogram)
+- 16+ GB GPU: `sv_chunk_size=10000`
+- CPU: `sv_chunk_size=5000` or `None` for small models
+
+For batch scoring, reduce proportionally (`5000 / batch_size`).
 
 ## No dense Gram matrix
 
@@ -60,6 +66,14 @@ Header key-value pairs until `SV` marker, then `<signed_coef> <DNA_sequence>` pe
 ## Classic gkmSVM format
 
 Original gkmSVM (Ghandi et al. 2014) uses OPPOSITE sign convention: `bias = +rho`. Supports both embedded SVs (single file) and two-file format (model + FASTA). Integer kernel types (0-5) are mapped to string names. Load via `load_classic_model(model_path, svseq_path=...)`.
+
+## GPU compute precision
+
+Kernel computation uses float32 on GPU (CUDA and MPS), float64 on CPU. Consumer NVIDIA GPUs have severely degraded float64 throughput (1:64 FP64:FP32 on Ampere). Since gkm kernel match counts are small integers (≤ l) and the mismatch table has at most d+1 nonzero entries, float32 is exact where it matters and negligible-error everywhere else. On Ampere+, float32 matmuls automatically use TF32 (19-bit mantissa tensor cores), which is also exact for these integer dot products. See `docs/performance.md` for the full analysis.
+
+The SVM caches the support-vector self-kernel diagonal (`_raw_diagonal(sv)`) after first computation, avoiding a chunked recomputation on every forward call.
+
+`model.compile()` uses `torch.compile` to fuse the einsum + histogram table lookup into a single Triton GPU kernel — 15x faster pairwise computation. With `compile(dtype=torch.bfloat16)`, the flat windows are converted to bf16 before the fused kernel, using Ampere+ tensor cores for ~60% additional throughput (5.3x faster than LS-GKM C). Match counts are exact in bf16 (integers ≤ 15). See `docs/performance.md`.
 
 ## PyTorch over cuML/CuPy
 

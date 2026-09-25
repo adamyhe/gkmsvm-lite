@@ -60,8 +60,9 @@ def ism(
     do_norm = kernel.normalize
     do_rc = kernel.include_rc
 
+    diag_chunk = chunk if chunk is not None else 1000
     if do_norm:
-        diag_sv = kernel._raw_diagonal(sv)
+        diag_sv = kernel._raw_diagonal(sv, chunk_size=diag_chunk)
     if do_rc:
         wy_rc = kernel.flat_windows(reverse_complement(sv))
         wx_rc = kernel.flat_windows(reverse_complement(x))
@@ -220,7 +221,8 @@ def _partial_pairwise(kernel, wx_A, wy, chunk_size):
     if chunk_size is None or chunk_size >= S:
         matches = torch.einsum("bif,sjf->bsij", wx_A, wy)
         return kernel._apply_table(matches)
-    result = torch.zeros(B, S, device=wx_A.device, dtype=torch.float64)
+    compute_dtype = torch.float64 if wx_A.device.type == "cpu" else torch.float32
+    result = torch.zeros(B, S, device=wx_A.device, dtype=compute_dtype)
     for s in range(0, S, chunk_size):
         e = min(s + chunk_size, S)
         matches = torch.einsum("bif,sjf->bsij", wx_A, wy[s:e])

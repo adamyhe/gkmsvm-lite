@@ -38,15 +38,20 @@ class GkmKernel(ABC):
         """
 
     @abstractmethod
-    def _raw_diagonal(self, x: torch.Tensor) -> torch.Tensor:
+    def _raw_diagonal(
+        self, x: torch.Tensor, *, chunk_size: int | None = None
+    ) -> torch.Tensor:
         """Compute unnormalized self-kernel values.
 
         Args:
             x: [B, 4, L] one-hot encoded sequences.
+            chunk_size: Process in chunks to limit memory.
 
         Returns:
             [B] tensor of K(x_i, x_i) values.
         """
+
+    _DIAG_CHUNK_THRESHOLD = 10000
 
     def pairwise(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         """Compute kernel values between all pairs of sequences in x and y.
@@ -62,7 +67,8 @@ class GkmKernel(ABC):
         if not self.normalize:
             return raw
         diag_x = self._raw_diagonal(x)
-        diag_y = self._raw_diagonal(y)
+        cs = 1000 if y.shape[0] > self._DIAG_CHUNK_THRESHOLD else None
+        diag_y = self._raw_diagonal(y, chunk_size=cs)
         norm = torch.sqrt(diag_x.unsqueeze(1) * diag_y.unsqueeze(0))
         norm = torch.clamp(norm, min=1e-10)
         return raw / norm

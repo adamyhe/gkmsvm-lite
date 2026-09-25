@@ -63,15 +63,24 @@ def load_deltasvm_weights(
                 continue
 
             parts = line.split("\t")
-            if len(parts) != 2:
+            if len(parts) == 1:
                 parts = line.split()
-            if len(parts) != 2:
+
+            if len(parts) == 3:
+                kmer, revcomp, weight_str = parts
+            elif len(parts) == 2:
+                kmer, weight_str = parts
+                revcomp = None
+            else:
                 raise ValueError(
-                    f"Line {line_num}: expected 'kmer\\tweight', got: {line[:80]}"
+                    f"Line {line_num}: expected 2 or 3 columns, got: {line[:80]}"
                 )
 
-            kmer, weight_str = parts
             kmer = kmer.upper()
+            if not all(b in "ACGT" for b in kmer):
+                if line_num == 1 and not any(b in "ACGT" for b in kmer):
+                    continue
+                raise ValueError(f"Line {line_num}: invalid bases in k-mer '{kmer}'")
 
             if k is None:
                 k = len(kmer)
@@ -80,10 +89,11 @@ def load_deltasvm_weights(
                     f"Line {line_num}: k-mer length {len(kmer)} != expected {k}"
                 )
 
-            if not all(b in "ACGT" for b in kmer):
-                raise ValueError(f"Line {line_num}: invalid bases in k-mer '{kmer}'")
-
             kmer_weights[kmer] = float(weight_str)
+            if revcomp is not None:
+                revcomp = revcomp.upper()
+                if all(b in "ACGT" for b in revcomp) and len(revcomp) == k:
+                    kmer_weights[revcomp] = float(weight_str)
 
     if k is None:
         raise ValueError("Empty weight file")
