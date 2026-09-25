@@ -14,6 +14,9 @@ class DirectGkmKernel(GkmKernel):
     For window length l and k informative positions, two windows differing
     in m positions share C(l-m, k) gapped k-mer features. The kernel sums
     these shared features over all pairs of windows from the two sequences.
+
+    Kernel computation uses matmul on flattened one-hot windows, avoiding
+    the O(B*S*W*W*4*l) intermediate of the broadcast approach.
     """
 
     def __init__(
@@ -25,92 +28,85 @@ class DirectGkmKernel(GkmKernel):
             dtype=torch.float64,
         )
 
-    def _windows(self, x: torch.Tensor) -> torch.Tensor:
-        """Extract all length-l windows from one-hot sequences.
+    def flat_windows(self, x: torch.Tensor) -> torch.Tensor:
+        """Extract length-l windows and flatten channels for matmul.
 
         Args:
             x: [B, 4, L] one-hot tensor.
 
         Returns:
-            [B, W, 4, l] tensor where W = L - l + 1.
+            [B, W, 4*l] tensor where W = L - l + 1.
         """
         B, C, L = x.shape
         if L < self.l:
             raise ValueError(
                 f"Sequence length {L} is shorter than window length {self.l}"
             )
-        return x.unfold(2, self.l, 1).permute(0, 2, 1, 3)
+        wx = x.unfold(2, self.l, 1)  # [B, 4, W, l]
+        wx = wx.permute(0, 2, 1, 3)  # [B, W, 4, l]
+        return wx.reshape(B, -1, C * self.l)  # [B, W, 4*l]
 
-    def _count_mismatches(
+    def _apply_table(self, matches: torch.Tensor) -> torch.Tensor:
+        """Look up weight table from match counts, sum over window dims.
+
+        Args:
+            matches: [..., Wx, Wy] float tensor of per-window-pair match counts.
+
+        Returns:
+            [...] tensor with window dimensions summed out.
+        """
+        mismatches = (self.l - matches).round().long().clamp(0, self.l)
+        dtype = torch.float32 if matches.device.type == "mps" else self._mismatch_table.dtype
+        table = self._mismatch_table.to(device=matches.device, dtype=dtype)
+        return table[mismatches].sum(dim=(-2, -1))
+
+    def pairwise_from_windows(
         self, wx: torch.Tensor, wy: torch.Tensor
     ) -> torch.Tensor:
-        """Count per-position mismatches between all pairs of windows.
+        """Raw kernel from pre-extracted flat windows (no RC, no normalization).
+
+        Useful for training where windows can be cached across iterations.
 
         Args:
-            wx: [B, Wx, 4, l] windows from sequence x.
-            wy: [S, Wy, 4, l] windows from sequence y.
+            wx: [B, Wx, F] flat windows from query sequences.
+            wy: [S, Wy, F] flat windows from support sequences.
 
         Returns:
-            [B, S, Wx, Wy] integer tensor of mismatch counts.
+            [B, S] raw kernel values.
         """
-        # matches[b, s, wx, wy, pos] = 1 where bases match
-        # wx: [B, Wx, 4, l] -> [B, 1, Wx, 1, 4, l]
-        # wy: [S, Wy, 4, l] -> [1, S, 1, Wy, 4, l]
-        matches = (
-            wx[:, None, :, None, :, :] * wy[None, :, None, :, :, :]
-        ).sum(dim=-2)  # [B, S, Wx, Wy, l]
-        return self.l - matches.sum(dim=-1)  # [B, S, Wx, Wy]
+        matches = torch.einsum("bif,sjf->bsij", wx, wy)
+        return self._apply_table(matches)
 
-    def _kernel_from_mismatches(self, mismatches: torch.Tensor) -> torch.Tensor:
-        """Look up shared features from mismatch counts and sum.
+    def diagonal_from_windows(self, wx: torch.Tensor) -> torch.Tensor:
+        """Raw self-kernel from pre-extracted flat windows (no RC, no normalization).
 
         Args:
-            mismatches: [B, S, Wx, Wy] integer mismatch counts.
+            wx: [B, W, F] flat windows.
 
         Returns:
-            [B, S] kernel values.
+            [B] raw self-kernel values.
         """
-        dtype = torch.float32 if mismatches.device.type == "mps" else self._mismatch_table.dtype
-        table = self._mismatch_table.to(device=mismatches.device, dtype=dtype)
-        mismatches = mismatches.long().clamp(0, self.l)
-        shared = table[mismatches]
-        return shared.sum(dim=(-2, -1))
+        self_matches = torch.bmm(wx, wx.transpose(1, 2))
+        return self._apply_table(self_matches)
 
     def _raw_pairwise(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        wx = self._windows(x)
-        wy = self._windows(y)
-        mismatches = self._count_mismatches(wx, wy)
-        result = self._kernel_from_mismatches(mismatches)
+        wx = self.flat_windows(x)
+        wy = self.flat_windows(y)
+        result = self.pairwise_from_windows(wx, wy)
 
         if self.include_rc:
-            y_rc = reverse_complement(y)
-            wy_rc = self._windows(y_rc)
-            mismatches_rc = self._count_mismatches(wx, wy_rc)
-            result = result + self._kernel_from_mismatches(mismatches_rc)
+            wy_rc = self.flat_windows(reverse_complement(y))
+            result = result + self.pairwise_from_windows(wx, wy_rc)
 
         return result.to(x.dtype)
 
     def _raw_diagonal(self, x: torch.Tensor) -> torch.Tensor:
-        wx = self._windows(x)
-        B, W, C, l = wx.shape
-        # Self-kernel: every window pair (i, i) has 0 mismatches
-        zero_mismatch_contribution = self._mismatch_table[0]
-        # Cross-window pairs within the same sequence
-        mismatches = self._count_mismatches(wx, wx)  # [B, B, W, W]
-        diag_mismatches = torch.diagonal(mismatches, dim1=0, dim2=1)  # [W, W, B]
-        diag_mismatches = diag_mismatches.permute(2, 0, 1)  # [B, W, W]
-        dtype = torch.float32 if x.device.type == "mps" else self._mismatch_table.dtype
-        table = self._mismatch_table.to(device=x.device, dtype=dtype)
-        shared = table[diag_mismatches.long().clamp(0, self.l)]
-        result = shared.sum(dim=(-2, -1))
+        wx = self.flat_windows(x)
+        result = self.diagonal_from_windows(wx)
 
         if self.include_rc:
-            x_rc = reverse_complement(x)
-            wx_rc = self._windows(x_rc)
-            mismatches_rc = self._count_mismatches(wx, wx_rc)
-            diag_rc = torch.diagonal(mismatches_rc, dim1=0, dim2=1)
-            diag_rc = diag_rc.permute(2, 0, 1)
-            shared_rc = table[diag_rc.long().clamp(0, self.l)]
-            result = result + shared_rc.sum(dim=(-2, -1))
+            wx_rc = self.flat_windows(reverse_complement(x))
+            rc_matches = torch.bmm(wx, wx_rc.transpose(1, 2))
+            result = result + self._apply_table(rc_matches)
 
         return result.to(x.dtype)
