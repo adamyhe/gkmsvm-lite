@@ -11,7 +11,7 @@ from gkmsvm.codec import one_hot_encode, reverse_complement
 from gkmsvm.importers.lsgkm import load_lsgkm_model
 from gkmsvm.kernels.direct import DirectGkmKernel
 from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
-from gkmsvm.reference.kernels import (
+from tests.test_reference.reference_kernels import (
     build_esttrunc_table,
     build_gkm_cnt_table,
     one_hot_encode_np,
