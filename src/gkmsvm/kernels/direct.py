@@ -70,7 +70,8 @@ class DirectGkmKernel(GkmKernel):
         Returns:
             [B, S] kernel values.
         """
-        table = self._mismatch_table.to(device=mismatches.device)
+        dtype = torch.float32 if mismatches.device.type == "mps" else self._mismatch_table.dtype
+        table = self._mismatch_table.to(device=mismatches.device, dtype=dtype)
         mismatches = mismatches.long().clamp(0, self.l)
         shared = table[mismatches]
         return shared.sum(dim=(-2, -1))
@@ -98,7 +99,8 @@ class DirectGkmKernel(GkmKernel):
         mismatches = self._count_mismatches(wx, wx)  # [B, B, W, W]
         diag_mismatches = torch.diagonal(mismatches, dim1=0, dim2=1)  # [W, W, B]
         diag_mismatches = diag_mismatches.permute(2, 0, 1)  # [B, W, W]
-        table = self._mismatch_table.to(device=x.device)
+        dtype = torch.float32 if x.device.type == "mps" else self._mismatch_table.dtype
+        table = self._mismatch_table.to(device=x.device, dtype=dtype)
         shared = table[diag_mismatches.long().clamp(0, self.l)]
         result = shared.sum(dim=(-2, -1))
 

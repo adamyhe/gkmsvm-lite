@@ -1,3 +1,7 @@
+from gkmsvm._threading import pin_threading_layer
+
+pin_threading_layer()
+
 from gkmsvm.codec import (
     encode_batch,
     one_hot_decode,

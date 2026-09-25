@@ -10,6 +10,9 @@
 - [x] FASTA I/O backed by tangermeme
 - [x] Oracle validation against Dongwon-Lee/lsgkm `gkmpredict`
 - [x] 107 tests passing
+- [x] NumPy/Numba CPU reference implementation with cross-validation
+- [x] Numba/PyTorch threading layer pin (workqueue, adapted from scprism)
+- [x] 120 tests passing
 
 ## Next
 
@@ -17,6 +20,5 @@
 - [ ] **ISM utility** — exhaustive single-base mutagenesis scoring
 - [ ] **deltaSVM importer** — tab-separated `<kmer>\t<score>` linear model
 - [ ] **gkmSVM classic importer** — legacy two-file format with opposite bias sign
-- [ ] **numpy/numba/sklearn CPU reference** — independent correctness check + performance comparison
 - [ ] **Extend kernel modes** — `-t 3` (RBF), `-t 4` (center-weighted), `-t 5` (combined)
 - [ ] **Training** — C-SVM solver with kernel-capable optimizer and cache discipline
