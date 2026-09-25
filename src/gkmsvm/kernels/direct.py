@@ -14,7 +14,7 @@ from gkmsvm.kernels.base import GkmKernel
 # Numba-accelerated kernels
 # ---------------------------------------------------------------------------
 
-@njit(parallel=True, cache=True)
+@njit(parallel=True, cache=True, fastmath=True)
 def _fused_pairwise_numba(wx, wy, table):
     """Fused match-count + table-lookup + sum using float dot products."""
     B = wx.shape[0]
@@ -43,7 +43,7 @@ def _fused_pairwise_numba(wx, wy, table):
     return result
 
 
-@njit(parallel=True, cache=True)
+@njit(parallel=True, cache=True, fastmath=True)
 def _fused_pairwise_idx_numba(bx, by, table):
     """Fused pairwise using int8 base-index comparison (4x fewer ops)."""
     B = bx.shape[0]
@@ -67,7 +67,7 @@ def _fused_pairwise_idx_numba(bx, by, table):
     return result
 
 
-@njit(parallel=True, cache=True)
+@njit(parallel=True, cache=True, fastmath=True)
 def _fused_diagonal_idx_numba(bx, table):
     """Self-kernel diagonal from base index windows."""
     B = bx.shape[0]
@@ -87,7 +87,7 @@ def _fused_diagonal_idx_numba(bx, table):
     return result
 
 
-@njit(parallel=True, cache=True)
+@njit(parallel=True, cache=True, fastmath=True)
 def _fused_cross_diagonal_idx_numba(bx, bx_rc, table):
     """Cross-kernel diagonal (fwd vs RC) from base index windows."""
     B = bx.shape[0]
@@ -190,6 +190,7 @@ void fused_pairwise_idx(
         const signed char* bx_row = bx + (b * Wx + i) * l;
         for (int j = 0; j < Wy; j++) {
             int matches = 0;
+            #pragma unroll
             for (int k = 0; k < l; k++) {
                 matches += (bx_row[k] == by_t[k * WyS + j * S + s]);
             }
