@@ -15,7 +15,7 @@ from __future__ import annotations
 import gzip
 from pathlib import Path
 
-import torch
+import numpy as np
 
 from gkmsvm.codec import one_hot_encode
 from gkmsvm.svm import GkmSVM
@@ -44,12 +44,7 @@ def _open_auto(path: Path):
 
 
 def parse_lsgkm_header(path: str | Path) -> dict:
-    """Parse the header of an LS-GKM model file without loading SVs.
-
-    Returns a dict with keys: svm_type, kernel_type, L, k, d, norc,
-    nr_class, total_sv, rho, and optionally gamma, M, H, label, nr_sv,
-    probA, probB.
-    """
+    """Parse the header of an LS-GKM model file without loading SVs."""
     path = Path(path)
     header = {"norc": 0}
 
@@ -98,7 +93,7 @@ def parse_lsgkm_header(path: str | Path) -> dict:
 def load_lsgkm_model(
     path: str | Path,
     *,
-    dtype: torch.dtype = torch.float32,
+    dtype: np.dtype | type = np.float32,
     sv_chunk_size: int | None = None,
 ) -> GkmSVM:
     """Load an LS-GKM model file and return a GkmSVM instance.
@@ -107,7 +102,7 @@ def load_lsgkm_model(
 
     Args:
         path: Path to the .model.txt or .model.txt.gz file.
-        dtype: Tensor dtype for model weights.
+        dtype: Array dtype for model weights.
         sv_chunk_size: Optional chunk size for batched inference over SVs.
 
     Returns:
@@ -171,8 +166,8 @@ def load_lsgkm_model(
             f"got lengths: {sorted(lengths)}"
         )
 
-    support_sequences = torch.stack(encoded)
-    coef_tensor = torch.tensor(coefficients, dtype=dtype)
+    support_sequences = np.stack(encoded)
+    coef_array = np.array(coefficients, dtype=dtype)
 
     bias = -rho
 
@@ -193,7 +188,7 @@ def load_lsgkm_model(
 
     return GkmSVM(
         support_sequences=support_sequences,
-        coefficients=coef_tensor,
+        coefficients=coef_array,
         bias=bias,
         kernel_type=kernel_type_str,
         kernel_params=kernel_params,

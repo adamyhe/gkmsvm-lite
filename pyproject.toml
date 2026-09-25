@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gkmsvm-lite"
-version = "0.1.0"
-description = "A modern, PyTorch-based implementation of gapped k-mer SVMs"
+version = "0.2.0"
+description = "Gapped k-mer SVMs for DNA sequence classification"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
@@ -13,13 +13,14 @@ authors = [
     {name = "Adam Youlin He", email = "ayhe@stanford.edu"},
 ]
 dependencies = [
-    "torch>=2.0",
     "numpy",
     "numba>=0.57",
-    "tangermeme>=1.4",
 ]
 
 [project.optional-dependencies]
+gpu = [
+    "cupy>=12.0",
+]
 dev = [
     "pytest",
     "pytest-cov",

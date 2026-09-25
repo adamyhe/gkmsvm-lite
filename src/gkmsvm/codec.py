@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-import torch
+import numpy as np
+
+from gkmsvm.backend import get_array_module
 
 BASES = "ACGT"
 _BASE_TO_INDEX = {b: i for i, b in enumerate(BASES)}
@@ -10,10 +12,10 @@ _BASE_TO_INDEX.update({b.lower(): i for i, b in enumerate(BASES)})
 def one_hot_encode(
     sequence: str,
     *,
-    dtype: torch.dtype = torch.float32,
+    dtype: np.dtype | type = np.float32,
     allow_n: bool = False,
-) -> torch.Tensor:
-    """Encode a DNA string to a [4, L] one-hot tensor.
+) -> np.ndarray:
+    """Encode a DNA string to a [4, L] one-hot array.
 
     Channel order: A=0, C=1, G=2, T=3. Case-insensitive.
 
@@ -24,53 +26,58 @@ def one_hot_encode(
     if L == 0:
         raise ValueError("Sequence must be non-empty")
 
-    tensor = torch.zeros(4, L, dtype=dtype)
+    arr = np.zeros((4, L), dtype=dtype)
     for i, base in enumerate(sequence):
         idx = _BASE_TO_INDEX.get(base)
         if idx is not None:
-            tensor[idx, i] = 1.0
+            arr[idx, i] = 1.0
         elif allow_n and base in "Nn":
             pass
         else:
             raise ValueError(
                 f"Invalid base '{base}' at position {i}. Only A, C, G, T are accepted."
             )
-    return tensor
+    return arr
 
 
-def one_hot_decode(tensor: torch.Tensor) -> str:
-    """Decode a [4, L] one-hot tensor to a DNA string."""
-    if tensor.ndim != 2 or tensor.shape[0] != 4:
-        raise ValueError(f"Expected shape [4, L], got {list(tensor.shape)}")
-    indices = tensor.argmax(dim=0)
-    return "".join(BASES[i] for i in indices.tolist())
+def one_hot_decode(arr: np.ndarray) -> str:
+    """Decode a [4, L] one-hot array to a DNA string."""
+    if arr.ndim != 2 or arr.shape[0] != 4:
+        raise ValueError(f"Expected shape [4, L], got {list(arr.shape)}")
+    xp = get_array_module(arr)
+    indices = xp.argmax(arr, axis=0)
+    if xp is not np:
+        indices = indices.get()
+    return "".join(BASES[i] for i in indices)
 
 
-def reverse_complement(tensor: torch.Tensor) -> torch.Tensor:
-    """Reverse complement a one-hot DNA tensor.
+def reverse_complement(arr: np.ndarray) -> np.ndarray:
+    """Reverse complement a one-hot DNA array.
 
     Works on [4, L] or [B, 4, L]. Flips channel order (A<->T, C<->G)
     and reverses the sequence dimension.
     """
-    if tensor.ndim not in (2, 3):
-        raise ValueError(f"Expected 2D or 3D tensor, got {tensor.ndim}D")
-    if tensor.shape[-2] != 4:
-        raise ValueError(f"Channel dimension must be 4, got {tensor.shape[-2]}")
-    return tensor.flip(-2, -1)
+    if arr.ndim not in (2, 3):
+        raise ValueError(f"Expected 2D or 3D array, got {arr.ndim}D")
+    if arr.shape[-2] != 4:
+        raise ValueError(f"Channel dimension must be 4, got {arr.shape[-2]}")
+    xp = get_array_module(arr)
+    return xp.flip(xp.flip(arr, axis=-2), axis=-1).copy()
 
 
-def validate(tensor: torch.Tensor) -> None:
-    """Validate that a tensor is a proper one-hot DNA encoding.
+def validate(arr: np.ndarray) -> None:
+    """Validate that an array is a proper one-hot DNA encoding.
 
     Checks shape [..., 4, L], each position sums to 1.0, and each position
     has exactly one nonzero entry. Raises ValueError on failure.
     """
-    if tensor.shape[-2] != 4:
-        raise ValueError(f"Channel dimension must be 4, got {tensor.shape[-2]}")
-    sums = tensor.sum(dim=-2)
-    if not torch.allclose(sums, torch.ones_like(sums)):
+    if arr.shape[-2] != 4:
+        raise ValueError(f"Channel dimension must be 4, got {arr.shape[-2]}")
+    xp = get_array_module(arr)
+    sums = arr.sum(axis=-2)
+    if not xp.allclose(sums, xp.ones_like(sums)):
         raise ValueError("Each position must sum to 1.0")
-    nonzero_per_pos = (tensor != 0).sum(dim=-2)
+    nonzero_per_pos = (arr != 0).sum(axis=-2)
     if not (nonzero_per_pos == 1).all():
         raise ValueError("Each position must have exactly one nonzero entry")
 
@@ -78,14 +85,14 @@ def validate(tensor: torch.Tensor) -> None:
 def encode_batch(
     sequences: list[str],
     *,
-    dtype: torch.dtype = torch.float32,
+    dtype: np.dtype | type = np.float32,
     pad_value: float = 0.0,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[np.ndarray, np.ndarray]:
     """Encode multiple DNA sequences into a padded batch.
 
     Returns:
-        tensors: [B, 4, L_max] one-hot tensor, padded with pad_value.
-        mask: [B, L_max] boolean tensor, True at valid positions.
+        arrays: [B, 4, L_max] one-hot array, padded with pad_value.
+        mask: [B, L_max] boolean array, True at valid positions.
     """
     if not sequences:
         raise ValueError("Sequence list must be non-empty")
@@ -95,8 +102,8 @@ def encode_batch(
     L_max = max(lengths)
     B = len(sequences)
 
-    batch = torch.full((B, 4, L_max), pad_value, dtype=dtype)
-    mask = torch.zeros(B, L_max, dtype=torch.bool)
+    batch = np.full((B, 4, L_max), pad_value, dtype=dtype)
+    mask = np.zeros((B, L_max), dtype=np.bool_)
 
     for i, (t, length) in enumerate(zip(encoded, lengths)):
         batch[i, :, :length] = t

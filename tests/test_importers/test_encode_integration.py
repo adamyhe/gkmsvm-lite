@@ -11,8 +11,8 @@ import gzip
 import random
 from pathlib import Path
 
+import numpy as np
 import pytest
-import torch
 
 from gkmsvm.codec import one_hot_encode, reverse_complement
 from gkmsvm.importers.lsgkm import load_lsgkm_model, parse_lsgkm_header
@@ -57,61 +57,59 @@ class TestEncodeModelLoad:
 
 class TestEncodeModelInference:
     def test_score_random_sequence(self, model):
-        torch.manual_seed(42)
+        rng = np.random.RandomState(42)
         seq_len = 300
-        idx = torch.randint(0, 4, (seq_len,))
-        x = torch.zeros(4, seq_len)
-        x[idx, torch.arange(seq_len)] = 1.0
-        x = x.unsqueeze(0)
+        idx = rng.randint(0, 4, size=(seq_len,))
+        x = np.zeros((4, seq_len), dtype=np.float32)
+        x[idx, np.arange(seq_len)] = 1.0
+        x = x[np.newaxis]
 
         score = model(x)
         assert score.shape == (1, 1)
-        assert torch.isfinite(score).all()
+        assert np.isfinite(score).all()
 
     def test_score_support_vector(self, model):
         sv = model.support_sequences[0:1]
         score = model(sv)
-        assert torch.isfinite(score).all()
-        # The score should be nonzero since this SV has coefficient 1.0
-        assert score.abs().item() > 0.01
+        assert np.isfinite(score).all()
+        assert abs(float(score.item())) > 0.01
 
     def test_rc_invariance(self, model):
         sv = model.support_sequences[0:1]
         sv_rc = reverse_complement(sv)
         score_fwd = model(sv)
         score_rc = model(sv_rc)
-        assert torch.allclose(score_fwd, score_rc, atol=1e-4)
+        np.testing.assert_allclose(score_fwd, score_rc, atol=1e-4)
 
     def test_batch_scoring(self, model):
         batch = model.support_sequences[:3]
         scores = model(batch)
         assert scores.shape == (3, 1)
-        assert torch.isfinite(scores).all()
+        assert np.isfinite(scores).all()
 
     def test_chunked_matches_full(self, model):
         model_chunked = load_lsgkm_model(FIXTURE, sv_chunk_size=3)
         sv = model.support_sequences[0:1]
         score_full = model(sv)
         score_chunked = model_chunked(sv)
-        assert torch.allclose(score_full, score_chunked, atol=1e-5)
+        np.testing.assert_allclose(score_full, score_chunked, atol=1e-5)
 
     def test_variant_scoring(self, model):
-        ref = model.support_sequences[0:1].clone()
-        alt = ref.clone()
-        # Mutate position 50: A -> C
+        ref = model.support_sequences[0:1].copy()
+        alt = ref.copy()
         alt[0, :, 50] = 0
         alt[0, 1, 50] = 1  # C
         delta = model.score_variants(ref, alt)
         assert delta.shape == (1, 1)
-        assert torch.isfinite(delta).all()
+        assert np.isfinite(delta).all()
 
     def test_different_query_lengths(self, model):
-        short = one_hot_encode("ACGTACGTACGTACGTACGT").unsqueeze(0)
-        long = one_hot_encode("ACGT" * 50).unsqueeze(0)
+        short = one_hot_encode("ACGTACGTACGTACGTACGT")[np.newaxis]
+        long = one_hot_encode("ACGT" * 50)[np.newaxis]
         s1 = model(short)
         s2 = model(long)
-        assert torch.isfinite(s1).all()
-        assert torch.isfinite(s2).all()
+        assert np.isfinite(s1).all()
+        assert np.isfinite(s2).all()
 
 
 class TestEncodeOracleScores:
@@ -150,8 +148,8 @@ class TestEncodeOracleScores:
 
     def test_matches_gkmpredict(self, model, queries):
         for name, seq in queries.items():
-            x = one_hot_encode(seq).unsqueeze(0)
-            score = model(x).item()
+            x = one_hot_encode(seq)[np.newaxis]
+            score = float(model(x).item())
             expected = self.ORACLE[name]
             assert score == pytest.approx(expected, abs=1e-4), (
                 f"{name}: expected {expected}, got {score}"

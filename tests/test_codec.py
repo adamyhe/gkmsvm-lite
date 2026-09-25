@@ -1,5 +1,5 @@
+import numpy as np
 import pytest
-import torch
 
 from gkmsvm.codec import (
     encode_batch,
@@ -14,9 +14,9 @@ class TestOneHotEncode:
     def test_basic(self):
         t = one_hot_encode("ACGT")
         assert t.shape == (4, 4)
-        assert t.dtype == torch.float32
-        expected = torch.eye(4, dtype=torch.float32)
-        assert torch.equal(t, expected)
+        assert t.dtype == np.float32
+        expected = np.eye(4, dtype=np.float32)
+        np.testing.assert_array_equal(t, expected)
 
     def test_single_base(self):
         for i, base in enumerate("ACGT"):
@@ -29,8 +29,8 @@ class TestOneHotEncode:
         upper = one_hot_encode("ACGT")
         lower = one_hot_encode("acgt")
         mixed = one_hot_encode("AcGt")
-        assert torch.equal(upper, lower)
-        assert torch.equal(upper, mixed)
+        np.testing.assert_array_equal(upper, lower)
+        np.testing.assert_array_equal(upper, mixed)
 
     def test_invalid_base_raises(self):
         with pytest.raises(ValueError, match="Invalid base 'N'"):
@@ -41,8 +41,8 @@ class TestOneHotEncode:
             one_hot_encode("")
 
     def test_dtype(self):
-        t = one_hot_encode("ACGT", dtype=torch.float64)
-        assert t.dtype == torch.float64
+        t = one_hot_encode("ACGT", dtype=np.float64)
+        assert t.dtype == np.float64
 
 
 class TestOneHotDecode:
@@ -52,11 +52,11 @@ class TestOneHotDecode:
 
     def test_wrong_shape_raises(self):
         with pytest.raises(ValueError, match="shape"):
-            one_hot_decode(torch.zeros(3, 4))
+            one_hot_decode(np.zeros((3, 4)))
 
     def test_3d_raises(self):
         with pytest.raises(ValueError, match="shape"):
-            one_hot_decode(torch.zeros(2, 4, 4))
+            one_hot_decode(np.zeros((2, 4, 4)))
 
 
 class TestReverseComplement:
@@ -77,7 +77,7 @@ class TestReverseComplement:
     def test_double_rc_is_identity(self):
         seq = "ACGTACGT"
         t = one_hot_encode(seq)
-        assert torch.equal(reverse_complement(reverse_complement(t)), t)
+        np.testing.assert_array_equal(reverse_complement(reverse_complement(t)), t)
 
     def test_batch(self):
         batch, _ = encode_batch(["AAAC", "TTTG"])
@@ -88,11 +88,11 @@ class TestReverseComplement:
 
     def test_wrong_ndim_raises(self):
         with pytest.raises(ValueError, match="2D or 3D"):
-            reverse_complement(torch.zeros(4))
+            reverse_complement(np.zeros(4))
 
     def test_wrong_channels_raises(self):
         with pytest.raises(ValueError, match="Channel dimension must be 4"):
-            reverse_complement(torch.zeros(3, 10))
+            reverse_complement(np.zeros((3, 10)))
 
 
 class TestValidate:
@@ -106,10 +106,10 @@ class TestValidate:
 
     def test_wrong_channels(self):
         with pytest.raises(ValueError, match="Channel dimension"):
-            validate(torch.zeros(3, 10))
+            validate(np.zeros((3, 10)))
 
     def test_not_one_hot(self):
-        t = torch.zeros(4, 4)
+        t = np.zeros((4, 4))
         with pytest.raises(ValueError):
             validate(t)
 

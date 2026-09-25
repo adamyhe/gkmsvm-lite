@@ -1,4 +1,4 @@
-"""Cross-validation tests: NumPy/Numba reference vs PyTorch implementation."""
+"""Cross-validation tests: NumPy/Numba reference vs main implementation."""
 
 import gzip
 import random
@@ -6,7 +6,6 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-import torch
 
 from gkmsvm.codec import one_hot_encode, reverse_complement
 from gkmsvm.importers.lsgkm import load_lsgkm_model
@@ -29,44 +28,44 @@ def _random_seq(length, rng):
 
 
 class TestWeightTables:
-    def test_gkm_cnt_matches_torch(self):
+    def test_gkm_cnt_matches(self):
         for l, k in [(7, 4), (11, 7), (5, 3), (10, 5)]:
             kernel = DirectGkmKernel(l, k, normalize=False, include_rc=False)
-            torch_table = kernel._mismatch_table.numpy()
+            main_table = kernel._mismatch_table
             np_table = build_gkm_cnt_table(l, k)
-            np.testing.assert_allclose(np_table, torch_table)
+            np.testing.assert_allclose(np_table, main_table)
 
-    def test_esttrunc_matches_torch(self):
+    def test_esttrunc_matches(self):
         for l, k, d in [(11, 7, 3), (7, 4, 2), (9, 5, 4)]:
             kernel = EstTruncGkmKernel(l, k, d=d, normalize=False, include_rc=False)
-            torch_table = kernel._mismatch_table.numpy()
+            main_table = kernel._mismatch_table
             np_table = build_esttrunc_table(l, k, d, truncate=True)
-            np.testing.assert_allclose(np_table, torch_table)
+            np.testing.assert_allclose(np_table, main_table)
 
-    def test_estfull_matches_torch(self):
+    def test_estfull_matches(self):
         kernel = EstTruncGkmKernel(11, 7, d=3, normalize=False, include_rc=False, truncate=False)
-        torch_table = kernel._mismatch_table.numpy()
+        main_table = kernel._mismatch_table
         np_table = build_esttrunc_table(11, 7, d=3, truncate=False)
-        np.testing.assert_allclose(np_table, torch_table)
+        np.testing.assert_allclose(np_table, main_table)
 
 
 class TestCodec:
-    def test_one_hot_matches_torch(self):
+    def test_one_hot_matches(self):
         seq = "ACGTACGTAATTCCGG"
         np_enc = one_hot_encode_np(seq)
-        torch_enc = one_hot_encode(seq).numpy()
-        np.testing.assert_array_equal(np_enc, torch_enc)
+        main_enc = one_hot_encode(seq).astype(np.float64)
+        np.testing.assert_array_equal(np_enc, main_enc)
 
-    def test_rc_matches_torch(self):
+    def test_rc_matches(self):
         seq = "ACGTACGTAATTCCGG"
         np_enc = one_hot_encode_np(seq)
         np_rc = reverse_complement_np(np_enc)
-        torch_rc = reverse_complement(one_hot_encode(seq)).numpy()
-        np.testing.assert_array_equal(np_rc, torch_rc)
+        main_rc = reverse_complement(one_hot_encode(seq)).astype(np.float64)
+        np.testing.assert_array_equal(np_rc, main_rc)
 
 
 class TestKernelCrossValidation:
-    """Verify reference kernel values match PyTorch for both -t 0 and -t 2."""
+    """Verify reference kernel values match main implementation for both -t 0 and -t 2."""
 
     @pytest.fixture
     def seqs(self):
@@ -76,48 +75,48 @@ class TestKernelCrossValidation:
     def _to_np(self, seqs):
         return np.stack([one_hot_encode_np(s) for s in seqs])
 
-    def _to_torch(self, seqs):
-        return torch.stack([one_hot_encode(s) for s in seqs])
+    def _to_main(self, seqs):
+        return np.stack([one_hot_encode(s) for s in seqs])
 
     def test_gkm_cnt_no_rc_no_norm(self, seqs):
         l, k = 7, 4
         X_np, Y_np = self._to_np(seqs[:2]), self._to_np(seqs[2:])
-        X_t, Y_t = self._to_torch(seqs[:2]), self._to_torch(seqs[2:])
+        X_m, Y_m = self._to_main(seqs[:2]), self._to_main(seqs[2:])
         table = build_gkm_cnt_table(l, k)
         K_np = pairwise(X_np, Y_np, l, table, include_rc=False, normalize=False)
         kernel = DirectGkmKernel(l, k, normalize=False, include_rc=False)
-        K_t = kernel.pairwise(X_t, Y_t).numpy()
-        np.testing.assert_allclose(K_np, K_t, rtol=1e-10)
+        K_m = kernel.pairwise(X_m, Y_m)
+        np.testing.assert_allclose(K_np, K_m, rtol=1e-10)
 
     def test_gkm_cnt_with_rc_normalized(self, seqs):
         l, k = 7, 4
         X_np, Y_np = self._to_np(seqs[:2]), self._to_np(seqs[2:])
-        X_t, Y_t = self._to_torch(seqs[:2]), self._to_torch(seqs[2:])
+        X_m, Y_m = self._to_main(seqs[:2]), self._to_main(seqs[2:])
         table = build_gkm_cnt_table(l, k)
         K_np = pairwise(X_np, Y_np, l, table, include_rc=True, normalize=True)
         kernel = DirectGkmKernel(l, k, normalize=True, include_rc=True)
-        K_t = kernel.pairwise(X_t, Y_t).numpy()
-        np.testing.assert_allclose(K_np, K_t, rtol=1e-6)
+        K_m = kernel.pairwise(X_m, Y_m)
+        np.testing.assert_allclose(K_np, K_m, rtol=1e-6)
 
     def test_esttrunc_no_rc_no_norm(self, seqs):
         l, k, d = 11, 7, 3
         X_np, Y_np = self._to_np(seqs[:2]), self._to_np(seqs[2:])
-        X_t, Y_t = self._to_torch(seqs[:2]), self._to_torch(seqs[2:])
+        X_m, Y_m = self._to_main(seqs[:2]), self._to_main(seqs[2:])
         table = build_esttrunc_table(l, k, d, truncate=True)
         K_np = pairwise(X_np, Y_np, l, table, include_rc=False, normalize=False)
         kernel = EstTruncGkmKernel(l, k, d=d, normalize=False, include_rc=False)
-        K_t = kernel.pairwise(X_t, Y_t).numpy()
-        np.testing.assert_allclose(K_np, K_t, rtol=1e-6)
+        K_m = kernel.pairwise(X_m, Y_m)
+        np.testing.assert_allclose(K_np, K_m, rtol=1e-6)
 
     def test_esttrunc_with_rc_normalized(self, seqs):
         l, k, d = 11, 7, 3
         X_np, Y_np = self._to_np(seqs[:2]), self._to_np(seqs[2:])
-        X_t, Y_t = self._to_torch(seqs[:2]), self._to_torch(seqs[2:])
+        X_m, Y_m = self._to_main(seqs[:2]), self._to_main(seqs[2:])
         table = build_esttrunc_table(l, k, d, truncate=True)
         K_np = pairwise(X_np, Y_np, l, table, include_rc=True, normalize=True)
         kernel = EstTruncGkmKernel(l, k, d=d, normalize=True, include_rc=True)
-        K_t = kernel.pairwise(X_t, Y_t).numpy()
-        np.testing.assert_allclose(K_np, K_t, rtol=1e-6)
+        K_m = kernel.pairwise(X_m, Y_m)
+        np.testing.assert_allclose(K_np, K_m, rtol=1e-6)
 
     def test_variable_length_sequences(self, seqs):
         rng = random.Random(456)
@@ -126,19 +125,19 @@ class TestKernelCrossValidation:
         l, k = 7, 4
         X_np = np.stack([one_hot_encode_np(short)])
         Y_np = np.stack([one_hot_encode_np(long)])
-        X_t = one_hot_encode(short).unsqueeze(0)
-        Y_t = one_hot_encode(long).unsqueeze(0)
+        X_m = one_hot_encode(short)[np.newaxis]
+        Y_m = one_hot_encode(long)[np.newaxis]
         table = build_gkm_cnt_table(l, k)
         K_np = pairwise(X_np, Y_np, l, table, include_rc=True, normalize=True)
         kernel = DirectGkmKernel(l, k, normalize=True, include_rc=True)
-        K_t = kernel.pairwise(X_t, Y_t).numpy()
-        np.testing.assert_allclose(K_np, K_t, rtol=1e-6)
+        K_m = kernel.pairwise(X_m, Y_m)
+        np.testing.assert_allclose(K_np, K_m, rtol=1e-6)
 
 
 class TestSVMScoring:
-    """Verify reference SVM scoring matches PyTorch GkmSVM."""
+    """Verify reference SVM scoring matches main GkmSVM."""
 
-    def test_score_matches_torch_gkm_cnt(self):
+    def test_score_matches_gkm_cnt(self):
         rng = random.Random(789)
         l, k = 7, 4
         sv_seqs = [_random_seq(30, rng) for _ in range(5)]
@@ -153,15 +152,15 @@ class TestSVMScoring:
 
         from gkmsvm.svm import GkmSVM
 
-        sv_t = torch.from_numpy(SV_np).float()
-        coefs_t = torch.from_numpy(coefs).float()
-        model = GkmSVM(sv_t, coefs_t, bias, "gkm_cnt", {"L": l, "k": k, "include_rc": True})
-        X_t = torch.from_numpy(X_np).float()
-        scores_t = model(X_t).squeeze(1).detach().numpy()
+        sv_arr = SV_np.astype(np.float32)
+        coefs_arr = coefs.astype(np.float32)
+        model = GkmSVM(sv_arr, coefs_arr, bias, "gkm_cnt", {"L": l, "k": k, "include_rc": True})
+        X_arr = X_np.astype(np.float32)
+        scores_main = model(X_arr).squeeze(1)
 
-        np.testing.assert_allclose(scores_np, scores_t, atol=1e-4)
+        np.testing.assert_allclose(scores_np, scores_main, atol=1e-4)
 
-    def test_score_matches_torch_esttrunc(self):
+    def test_score_matches_esttrunc(self):
         rng = random.Random(101)
         l, k, d = 11, 7, 3
         sv_seqs = [_random_seq(30, rng) for _ in range(5)]
@@ -176,16 +175,16 @@ class TestSVMScoring:
 
         from gkmsvm.svm import GkmSVM
 
-        sv_t = torch.from_numpy(SV_np).float()
-        coefs_t = torch.from_numpy(coefs).float()
+        sv_arr = SV_np.astype(np.float32)
+        coefs_arr = coefs.astype(np.float32)
         model = GkmSVM(
-            sv_t, coefs_t, bias, "gkm_esttrunc",
+            sv_arr, coefs_arr, bias, "gkm_esttrunc",
             {"L": l, "k": k, "d": d, "include_rc": True},
         )
-        X_t = torch.from_numpy(X_np).float()
-        scores_t = model(X_t).squeeze(1).detach().numpy()
+        X_arr = X_np.astype(np.float32)
+        scores_main = model(X_arr).squeeze(1)
 
-        np.testing.assert_allclose(scores_np, scores_t, atol=1e-4)
+        np.testing.assert_allclose(scores_np, scores_main, atol=1e-4)
 
 
 class TestEncodeOracle:
@@ -201,8 +200,8 @@ class TestEncodeOracle:
     @pytest.fixture
     def model_data(self):
         model = load_lsgkm_model(FIXTURE)
-        sv_np = model.support_sequences.numpy().astype(np.float64)
-        coefs_np = model.coefficients.numpy().astype(np.float64)
+        sv_np = model.support_sequences.astype(np.float64)
+        coefs_np = model.coefficients.astype(np.float64)
         bias = model.bias
         return sv_np, coefs_np, bias
 

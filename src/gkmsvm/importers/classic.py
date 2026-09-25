@@ -17,11 +17,11 @@ from __future__ import annotations
 import gzip
 from pathlib import Path
 
-import torch
+import numpy as np
 
 from gkmsvm.codec import one_hot_encode
 from gkmsvm.fasta import read_fasta
-from gkmsvm.importers.lsgkm import KERNEL_TYPE_MAP, KERNEL_TYPE_REVERSE
+from gkmsvm.importers.lsgkm import KERNEL_TYPE_MAP
 from gkmsvm.svm import GkmSVM
 
 CLASSIC_KERNEL_TYPE_MAP = {
@@ -46,12 +46,7 @@ def _open_auto(path: Path):
 
 
 def _parse_classic_file(f) -> tuple[dict, bool, list[str]]:
-    """Parse a classic model file, returning header, SV flag, and trailing lines.
-
-    Reads until SV marker or EOF. Returns the header dict, whether an SV
-    marker was found, and any lines after the header (either after SV
-    marker or non-header lines at end of file).
-    """
+    """Parse a classic model file, returning header, SV flag, and trailing lines."""
     header = {"norc": 0}
     found_sv = False
     trailing: list[str] = []
@@ -66,7 +61,6 @@ def _parse_classic_file(f) -> tuple[dict, bool, list[str]]:
 
         parts = line.split(None, 1)
         if len(parts) < 2:
-            # Single value — likely an alpha coefficient after header
             trailing.append(line)
             continue
 
@@ -107,18 +101,15 @@ def load_classic_model(
     model_path: str | Path,
     *,
     svseq_path: str | Path | None = None,
-    dtype: torch.dtype = torch.float32,
+    dtype: np.dtype | type = np.float32,
     sv_chunk_size: int | None = None,
 ) -> GkmSVM:
     """Load a classic gkmSVM model.
 
     Args:
-        model_path: Path to the model file (header + alphas, or
-            single-file with embedded SVs).
+        model_path: Path to the model file.
         svseq_path: Path to FASTA file with support vector sequences.
-            If None, SVs must be embedded in model_path (LS-GKM-style
-            layout with opposite bias sign).
-        dtype: Tensor dtype for model weights.
+        dtype: Array dtype for model weights.
         sv_chunk_size: Optional chunk size for batched SV inference.
 
     Returns:
@@ -189,14 +180,14 @@ def load_classic_model(
             f"got lengths: {sorted(lengths)}"
         )
 
-    support_sequences = torch.stack(encoded)
-    coef_tensor = torch.tensor(coefficients, dtype=dtype)
+    support_sequences = np.stack(encoded)
+    coef_array = np.array(coefficients, dtype=dtype)
 
     rho_values = header.get("rho")
     if rho_values is None:
         raise ValueError("Model file missing rho field")
     rho = rho_values[0]
-    bias = rho  # classic: bias = +rho (opposite of LS-GKM's -rho)
+    bias = rho
 
     kernel_type = header.get("kernel_type")
     if kernel_type is None:
@@ -219,7 +210,7 @@ def load_classic_model(
 
     return GkmSVM(
         support_sequences=support_sequences,
-        coefficients=coef_tensor,
+        coefficients=coef_array,
         bias=bias,
         kernel_type=kernel_type,
         kernel_params=kernel_params,

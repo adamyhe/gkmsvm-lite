@@ -1,5 +1,4 @@
 import pytest
-import torch
 
 from gkmsvm.codec import one_hot_encode
 
