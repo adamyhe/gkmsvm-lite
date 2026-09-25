@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gkmsvm-lite"
+version = "0.1.0"
+description = "A modern, PyTorch-based implementation of gapped k-mer SVMs"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    {name = "Adam Youlin He", email = "ayhe@stanford.edu"},
+]
+dependencies = [
+    "torch>=2.0",
+    "numpy",
+    "tangermeme>=1.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["gkmsvm*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

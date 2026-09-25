@@ -1,3 +1,18 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# AI agents / editors
+.claude/
+.cursor/
+.cursorignore
+.cursorindexingignore
+.codex/
+.gemini/
+.aider*
+.copilot/
+agent_notes/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
