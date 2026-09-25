@@ -295,10 +295,10 @@ def run_full_kernel_benchmark(
     print(f"  Extrapolated time for all {n_total} variants: {n_total*2/max(1,n*2/scoring_time):.0f}s")
 
     # ISM benchmark
-    ism_results = run_ism_benchmark(model, ref_seqs[:ism_seqs], device)
+    ism_results = run_ism_benchmark(model, ref_seqs[:ism_seqs], device) if ism_seqs > 0 else {}
 
     # GkmExplain benchmark
-    explain_results = run_explain_benchmark(model, ref_seqs[:ism_seqs], device)
+    explain_results = run_explain_benchmark(model, ref_seqs[:ism_seqs], device) if ism_seqs > 0 else {}
 
     return {
         "scoring_time": scoring_time,

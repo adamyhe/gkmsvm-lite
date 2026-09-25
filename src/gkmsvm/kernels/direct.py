@@ -161,7 +161,7 @@ _FUSED_PAIRWISE_IDX_CUDA = r"""
 extern "C" __global__
 void fused_pairwise_idx(
     const signed char* __restrict__ bx,
-    const signed char* __restrict__ by,
+    const signed char* __restrict__ by_t,
     const double* __restrict__ table,
     double* __restrict__ result,
     const int total_pairs,
@@ -170,6 +170,8 @@ void fused_pairwise_idx(
     const int Wy,
     const int l
 ) {
+    // by_t layout: [l, Wy, S] — adjacent threads (consecutive s) read
+    // adjacent bytes, giving coalesced 32B memory transactions.
     extern __shared__ double s_table[];
     for (int i = threadIdx.x; i <= l; i += blockDim.x) {
         s_table[i] = table[i];
@@ -182,14 +184,14 @@ void fused_pairwise_idx(
     const int b = idx / S;
     const int s = idx % S;
 
+    const int WyS = Wy * S;
     double acc = 0.0;
     for (int i = 0; i < Wx; i++) {
         const signed char* bx_row = bx + (b * Wx + i) * l;
         for (int j = 0; j < Wy; j++) {
-            const signed char* by_row = by + (s * Wy + j) * l;
             int matches = 0;
             for (int k = 0; k < l; k++) {
-                matches += (bx_row[k] == by_row[k]);
+                matches += (bx_row[k] == by_t[k * WyS + j * S + s]);
             }
             acc += s_table[l - matches];
         }
@@ -238,7 +240,11 @@ def _fused_pairwise_gpu(wx, wy, table):
 
 
 def _fused_pairwise_idx_gpu(bx, by, table):
-    """Launch fused pairwise CUDA kernel (int8 index path)."""
+    """Launch fused pairwise CUDA kernel (int8 index path).
+
+    Transposes by from [S, Wy, l] to [l, Wy, S] so adjacent threads
+    (consecutive s values) read adjacent bytes — coalesced access.
+    """
     global _cupy_fused_idx_kernel
     import cupy as cp
 
@@ -252,7 +258,7 @@ def _fused_pairwise_idx_gpu(bx, by, table):
     S, Wy, _ = by.shape
 
     bx_i8 = cp.ascontiguousarray(bx, dtype=cp.int8)
-    by_i8 = cp.ascontiguousarray(by, dtype=cp.int8)
+    by_t = cp.ascontiguousarray(by.transpose(2, 1, 0), dtype=cp.int8)
     table_gpu = cp.asarray(table, dtype=cp.float64)
     result = cp.empty(B * S, dtype=cp.float64)
 
@@ -262,7 +268,7 @@ def _fused_pairwise_idx_gpu(bx, by, table):
 
     _cupy_fused_idx_kernel(
         (grid,), (block,),
-        (bx_i8, by_i8, table_gpu, result,
+        (bx_i8, by_t, table_gpu, result,
          np.int32(total), np.int32(S), np.int32(Wx), np.int32(Wy),
          np.int32(l)),
         shared_mem=(l + 1) * 8,
