@@ -198,13 +198,11 @@ def _partial_pairwise(kernel, wx_A, wy, chunk_size):
     S = wy.shape[0]
     B = wx_A.shape[0]
     if chunk_size is None or chunk_size >= S:
-        matches = xp.einsum("bif,sjf->bsij", wx_A, wy)
-        return kernel._apply_table(matches)
+        return kernel.pairwise_from_windows(wx_A, wy)
     result = xp.zeros((B, S), dtype=np.float64)
     for s in range(0, S, chunk_size):
         e = min(s + chunk_size, S)
-        matches = xp.einsum("bif,sjf->bsij", wx_A, wy[s:e])
-        result[:, s:e] = kernel._apply_table(matches)
+        result[:, s:e] = kernel.pairwise_from_windows(wx_A, wy[s:e])
     return result
 
 

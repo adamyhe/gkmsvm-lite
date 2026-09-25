@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gkmsvm-lite"
-version = "0.2.0"
+version = "0.1.0"
 description = "Gapped k-mer SVMs for DNA sequence classification"
 readme = "README.md"
 license = "MIT"

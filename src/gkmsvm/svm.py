@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from gkmsvm.backend import get_array_module, is_gpu, to_cpu, to_gpu
+from gkmsvm.codec import reverse_complement
 from gkmsvm.kernels.base import GkmKernel
 from gkmsvm.kernels.direct import DirectGkmKernel
 from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
@@ -112,6 +113,8 @@ class GkmSVM:
         self.kernel = _build_kernel(kernel_type, kernel_params)
         self.sv_chunk_size = sv_chunk_size
         self._cached_sv_diag: np.ndarray | None = None
+        self._sv_idx_windows: np.ndarray | None = None
+        self._sv_rc_idx_windows: np.ndarray | None = None
         self._on_gpu = False
 
     @property
@@ -122,11 +125,16 @@ class GkmSVM:
     def kernel_params(self) -> dict:
         return dict(self._kernel_params)
 
+    def _invalidate_caches(self):
+        self._cached_sv_diag = None
+        self._sv_idx_windows = None
+        self._sv_rc_idx_windows = None
+
     def cuda(self) -> GkmSVM:
         """Move model arrays to GPU (CuPy)."""
         self.support_sequences = to_gpu(self.support_sequences)
         self.coefficients = to_gpu(self.coefficients)
-        self._cached_sv_diag = None
+        self._invalidate_caches()
         self._on_gpu = True
         return self
 
@@ -134,7 +142,7 @@ class GkmSVM:
         """Move model arrays to CPU (NumPy)."""
         self.support_sequences = to_cpu(self.support_sequences)
         self.coefficients = to_cpu(self.coefficients)
-        self._cached_sv_diag = None
+        self._invalidate_caches()
         self._on_gpu = False
         return self
 
@@ -145,6 +153,23 @@ class GkmSVM:
                 return self._cached_sv_diag
         self._cached_sv_diag = self.kernel._raw_diagonal(sv, chunk_size=1000)
         return self._cached_sv_diag
+
+    def _get_sv_index_windows(self):
+        """Lazily compute and cache SV base-index windows (fwd + RC).
+
+        Uses int8 indices (230 MB for 72K SVs) instead of float32 flat
+        windows (3.68 GB).
+        """
+        if self._sv_idx_windows is None:
+            kernel = self.kernel
+            self._sv_idx_windows = kernel.base_index_windows(
+                self.support_sequences
+            )
+            if kernel.include_rc:
+                self._sv_rc_idx_windows = kernel.base_index_windows(
+                    reverse_complement(self.support_sequences)
+                )
+        return self._sv_idx_windows, self._sv_rc_idx_windows
 
     def __call__(self, x: np.ndarray) -> np.ndarray:
         """Compute SVM decision values.
@@ -165,13 +190,18 @@ class GkmSVM:
             diag_x = kernel._raw_diagonal(x)
             diag_sv = self._get_sv_diag()
 
-        if chunk is None or chunk >= S:
-            raw = kernel._raw_pairwise(x, self.support_sequences)
+        if hasattr(kernel, "pairwise_from_indices") and (chunk is None or chunk >= S):
+            sv_idx, sv_rc_idx = self._get_sv_index_windows()
+            bx = kernel.base_index_windows(x)
+            raw = kernel.pairwise_from_indices(bx, sv_idx)
+            if kernel.include_rc:
+                raw = raw + kernel.pairwise_from_indices(bx, sv_rc_idx)
+            raw = raw.astype(x.dtype)
             if do_norm:
                 norm = xp.sqrt(diag_x[:, None] * diag_sv[None, :])
                 raw = raw / xp.clip(norm, 1e-10, None)
             scores = (raw * self.coefficients).sum(axis=1, keepdims=True)
-        else:
+        elif chunk is not None and chunk < S:
             scores = xp.zeros((x.shape[0], 1), dtype=x.dtype)
             for start in range(0, S, chunk):
                 end = min(start + chunk, S)
@@ -186,6 +216,12 @@ class GkmSVM:
                 scores += (raw * self.coefficients[start:end]).sum(
                     axis=1, keepdims=True
                 )
+        else:
+            raw = kernel._raw_pairwise(x, self.support_sequences)
+            if do_norm:
+                norm = xp.sqrt(diag_x[:, None] * diag_sv[None, :])
+                raw = raw / xp.clip(norm, 1e-10, None)
+            scores = (raw * self.coefficients).sum(axis=1, keepdims=True)
 
         return scores + self.bias
 
