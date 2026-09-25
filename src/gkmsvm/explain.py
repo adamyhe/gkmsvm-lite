@@ -66,7 +66,7 @@ def gkmexplain(
 
     result = xp.zeros((B, 4, seqlen), dtype=np.float64)
 
-    cs = chunk if chunk is not None else S
+    cs = chunk if chunk is not None else min(S, 2000)
     for sv_start in range(0, S, cs):
         sv_end = min(sv_start + cs, S)
         sv_c = sv[sv_start:sv_end]
