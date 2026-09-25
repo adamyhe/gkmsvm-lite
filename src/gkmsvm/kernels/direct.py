@@ -60,9 +60,9 @@ class DirectGkmKernel(GkmKernel):
             [...] tensor with window dimensions summed out.
         """
         dtype = (
-            torch.float32
-            if matches.device.type == "mps"
-            else self._mismatch_table.dtype
+            self._mismatch_table.dtype
+            if matches.device.type == "cpu"
+            else torch.float32
         )
         table = self._mismatch_table.to(device=matches.device, dtype=dtype)
         if matches.device.type in ("cuda", "mps"):
@@ -83,11 +83,9 @@ class DirectGkmKernel(GkmKernel):
             matches.shape[:-2], dtype=table.dtype, device=matches.device
         )
         for m in range(self.l + 1):
-            w = table[m].item()
-            if w == 0.0:
-                continue
-            count = (rounded == (self.l - m)).sum(dim=(-2, -1))
-            result = result + w * count.to(table.dtype)
+            w = table[m]
+            count = (rounded == (self.l - m)).to(table.dtype).sum(dim=(-2, -1))
+            result = result + w * count
         return result
 
     def pairwise_from_windows(self, wx: torch.Tensor, wy: torch.Tensor) -> torch.Tensor:
@@ -128,13 +126,21 @@ class DirectGkmKernel(GkmKernel):
 
         return result.to(x.dtype)
 
-    def _raw_diagonal(self, x: torch.Tensor) -> torch.Tensor:
-        wx = self.flat_windows(x)
-        result = self.diagonal_from_windows(wx)
+    def _raw_diagonal(
+        self, x: torch.Tensor, *, chunk_size: int | None = None
+    ) -> torch.Tensor:
+        B = x.shape[0]
+        if chunk_size is None or chunk_size >= B:
+            wx = self.flat_windows(x)
+            result = self.diagonal_from_windows(wx)
+            if self.include_rc:
+                wx_rc = self.flat_windows(reverse_complement(x))
+                rc_matches = torch.bmm(wx, wx_rc.transpose(1, 2))
+                result = result + self._apply_table(rc_matches)
+            return result.to(x.dtype)
 
-        if self.include_rc:
-            wx_rc = self.flat_windows(reverse_complement(x))
-            rc_matches = torch.bmm(wx, wx_rc.transpose(1, 2))
-            result = result + self._apply_table(rc_matches)
-
-        return result.to(x.dtype)
+        result = torch.empty(B, dtype=x.dtype, device=x.device)
+        for start in range(0, B, chunk_size):
+            end = min(start + chunk_size, B)
+            result[start:end] = self._raw_diagonal(x[start:end])
+        return result

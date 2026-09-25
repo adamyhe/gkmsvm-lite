@@ -163,7 +163,7 @@ def load_lsgkm_model(
     if len(sequences) != total_sv:
         raise ValueError(f"Expected {total_sv} support vectors, got {len(sequences)}")
 
-    encoded = [one_hot_encode(seq, dtype=dtype) for seq in sequences]
+    encoded = [one_hot_encode(seq, dtype=dtype, allow_n=True) for seq in sequences]
     lengths = {t.shape[1] for t in encoded}
     if len(lengths) > 1:
         raise ValueError(

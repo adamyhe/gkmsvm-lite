@@ -20,6 +20,11 @@
 - [x] Classic gkmSVM importer — legacy two-file format with opposite bias sign
 - [x] Extended kernel modes — `-t 3` (RBF), `-t 4` (center-weighted), `-t 5` (combined)
 - [x] 219 tests passing
+- [x] GPU float32 compute — float32 on CUDA/MPS (24x faster on RTX 3080), float64 on CPU
+- [x] Pre-cached SV diagonal — avoid recomputing `_raw_diagonal(sv)` on every forward call
+- [x] `model.compile()` — torch.compile fuses einsum + histogram into single Triton kernel (15x speedup, 3.3x faster than LS-GKM C)
+- [x] bf16 tensor core support — `compile(dtype=torch.bfloat16)` gives 5.3x faster than LS-GKM C on Ampere+
 
 ## Next
+- [ ] **NumPy/CuPy backend** — drop PyTorch dependency; NumPy+Numba CPU, CuPy GPU (optional `[gpu]` extra)
 - [ ] **Training** — C-SVM solver with kernel-capable optimizer and cache discipline

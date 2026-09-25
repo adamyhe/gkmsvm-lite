@@ -59,7 +59,7 @@ def gkmexplain(
     do_norm = kernel.normalize
     do_rc = kernel.include_rc
 
-    compute_dtype = torch.float32 if device.type == "mps" else torch.float64
+    compute_dtype = torch.float64 if device.type == "cpu" else torch.float32
     alpha_table = _build_alpha_table(kernel._mismatch_table, l, d).to(
         device=device, dtype=compute_dtype
     )
@@ -72,9 +72,10 @@ def gkmexplain(
     wx = kernel.flat_windows(x)
     wx_4l = wx.reshape(B, W, 4, l)
 
+    diag_chunk = chunk if chunk is not None else 1000
     if do_norm:
         diag_x = kernel._raw_diagonal(x)
-        diag_sv = kernel._raw_diagonal(sv)
+        diag_sv = kernel._raw_diagonal(sv, chunk_size=diag_chunk)
         norm = torch.sqrt(diag_x.unsqueeze(1) * diag_sv.unsqueeze(0)).clamp(min=1e-10)
 
     result = torch.zeros(B, 4, seqlen, dtype=compute_dtype, device=device)

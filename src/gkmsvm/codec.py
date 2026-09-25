@@ -8,28 +8,33 @@ _BASE_TO_INDEX.update({b.lower(): i for i, b in enumerate(BASES)})
 
 
 def one_hot_encode(
-    sequence: str, *, dtype: torch.dtype = torch.float32
+    sequence: str,
+    *,
+    dtype: torch.dtype = torch.float32,
+    allow_n: bool = False,
 ) -> torch.Tensor:
     """Encode a DNA string to a [4, L] one-hot tensor.
 
     Channel order: A=0, C=1, G=2, T=3. Case-insensitive.
-    Raises ValueError on any non-ACGT character.
+
+    Args:
+        allow_n: If True, N bases encode as all-zero (no channel set).
     """
     L = len(sequence)
     if L == 0:
         raise ValueError("Sequence must be non-empty")
 
-    indices = torch.empty(L, dtype=torch.long)
+    tensor = torch.zeros(4, L, dtype=dtype)
     for i, base in enumerate(sequence):
         idx = _BASE_TO_INDEX.get(base)
-        if idx is None:
+        if idx is not None:
+            tensor[idx, i] = 1.0
+        elif allow_n and base in "Nn":
+            pass
+        else:
             raise ValueError(
                 f"Invalid base '{base}' at position {i}. Only A, C, G, T are accepted."
             )
-        indices[i] = idx
-
-    tensor = torch.zeros(4, L, dtype=dtype)
-    tensor.scatter_(0, indices.unsqueeze(0), 1.0)
     return tensor
 
 

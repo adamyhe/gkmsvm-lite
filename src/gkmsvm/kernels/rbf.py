@@ -35,9 +35,12 @@ class RbfGkmKernel(GkmKernel):
     def _raw_pairwise(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         K_xy = self._base._raw_pairwise(x, y)
         K_xx = self._base._raw_diagonal(x)
-        K_yy = self._base._raw_diagonal(y)
+        cs = 1000 if y.shape[0] > self._DIAG_CHUNK_THRESHOLD else None
+        K_yy = self._base._raw_diagonal(y, chunk_size=cs)
         dist_sq = K_xx.unsqueeze(1) + K_yy.unsqueeze(0) - 2 * K_xy
         return torch.exp(-self.gamma * torch.clamp(dist_sq, min=0))
 
-    def _raw_diagonal(self, x: torch.Tensor) -> torch.Tensor:
+    def _raw_diagonal(
+        self, x: torch.Tensor, *, chunk_size: int | None = None
+    ) -> torch.Tensor:
         return torch.ones(x.shape[0], dtype=x.dtype, device=x.device)
