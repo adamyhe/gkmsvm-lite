@@ -1,6 +1,6 @@
 import pytest
 
-from gkmsvm.io.fasta import read_fasta, write_fasta
+from gkmsvm.fasta import read_fasta, write_fasta
 
 
 class TestReadFasta:
