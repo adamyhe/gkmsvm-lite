@@ -21,10 +21,15 @@ hyp_scores = gkmexplain(model, x, mode=1)     # [B, 4, L]
 ```
 
 ### ISM (in-silico mutagenesis)
-Exhaustively score all single-base mutations. Evaluation-based, no gradients needed. Slower but exact. Can leverage tangermeme.ersatz.substitute for sequence manipulation.
+Exhaustively score all single-base mutations. Evaluation-based, no gradients needed. Uses window-delta optimization: when a single base changes, only ~l affected windows are recomputed rather than the full kernel.
+
+```python
+from gkmsvm import ism
+deltas = ism(model, x)  # [B, 4, L] score deltas
+```
 
 ### Paired REF/ALT scoring
-`score(ALT) - score(REF)` for variant effect prediction. Evaluation-based. For VCF-scale scoring, use `tangermeme.variant_effect.substitution_effect` which accepts any `nn.Module`.
+`score(ALT) - score(REF)` for variant effect prediction. Evaluation-based.
 
 Note: `score(ALT) - score(REF)` is NOT identical to deltaSVM's k-mer-weight approximation — deltaSVM is a linear approximation.
 
@@ -33,6 +38,5 @@ For sequence design tasks. Works because it only requires score evaluation, not 
 
 ## tangermeme utilities
 
-- `tangermeme.ersatz`: substitute, shuffle, dinucleotide_shuffle, randomize — all accept `[B, 4, L]` tensors
-- `tangermeme.variant_effect`: substitution_effect, deletion_effect, insertion_effect — work with any nn.Module
+- `tangermeme.ersatz`: substitute, shuffle, dinucleotide_shuffle, randomize — all accept `[B, 4, L]` arrays
 - `tangermeme.match.extract_matching_loci`: GC-matched negative loci generation for training

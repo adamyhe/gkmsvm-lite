@@ -16,7 +16,7 @@ from gkmsvm.importers.classic import load_classic_model
 from gkmsvm.importers.deltasvm import load_deltasvm_weights
 from gkmsvm.importers.lsgkm import load_lsgkm_model
 from gkmsvm.ism import ism
-from gkmsvm.svm import GkmSVM
+from gkmsvm.svm import KERNEL_ALIASES, GkmSVM, resolve_kernel_type
 
 __all__ = [
     "one_hot_encode",
@@ -25,6 +25,8 @@ __all__ = [
     "validate",
     "encode_batch",
     "GkmSVM",
+    "KERNEL_ALIASES",
+    "resolve_kernel_type",
     "DeltaSVM",
     "load_lsgkm_model",
     "load_classic_model",

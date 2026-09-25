@@ -10,23 +10,12 @@ same difference computed via full kernel evaluation.
 
 from __future__ import annotations
 
-import gzip
 from pathlib import Path
 
 import numpy as np
 
 from gkmsvm.deltasvm import DeltaSVM, _kmer_to_index
-
-
-def _open_auto(path: Path):
-    """Open a file, auto-detecting gzip compression."""
-    try:
-        f = gzip.open(path, "rt")
-        f.readline()
-        f.seek(0)
-        return f
-    except gzip.BadGzipFile:
-        return open(path, "r")
+from gkmsvm.importers import _open_auto
 
 
 def load_deltasvm_weights(

@@ -13,6 +13,14 @@ from gkmsvm.kernels.weighted import (
     CenterWeightedRbfGkmKernel,
 )
 
+# Kernel modes:
+#   -t 0  gkm_cnt       / direct          Exact gapped k-mer count
+#   -t 1  gkm_estfull   / estimated_full  Estimated l-mer kernel, full
+#   -t 2  gkm_esttrunc  / estimated       Estimated l-mer kernel, truncated (default)
+#   -t 3  gkmrbf        / rbf             RBF on estimated kernel
+#   -t 4  wgkm          / weighted        Center-weighted gapped k-mer
+#   -t 5  wgkmrbf       / weighted_rbf    Center-weighted RBF
+
 KERNEL_BUILDERS = {
     "gkm_cnt": lambda p: DirectGkmKernel(
         l=p["L"], k=p["k"], normalize=True, include_rc=p.get("include_rc", True)
@@ -60,16 +68,49 @@ KERNEL_BUILDERS = {
     ),
 }
 
+KERNEL_ALIASES: dict[str | int, str] = {
+    "direct":         "gkm_cnt",
+    "estimated":      "gkm_esttrunc",
+    "estimated_full": "gkm_estfull",
+    "rbf":            "gkmrbf",
+    "weighted":       "wgkm",
+    "weighted_rbf":   "wgkmrbf",
+    0: "gkm_cnt",
+    1: "gkm_estfull",
+    2: "gkm_esttrunc",
+    3: "gkmrbf",
+    4: "wgkm",
+    5: "wgkmrbf",
+}
 
-def _build_kernel(kernel_type: str, kernel_params: dict) -> GkmKernel:
-    builder = KERNEL_BUILDERS.get(kernel_type)
-    if builder is None:
-        supported = ", ".join(KERNEL_BUILDERS)
-        raise NotImplementedError(
-            f"Kernel type '{kernel_type}' is not yet implemented. "
-            f"Supported: {supported}"
-        )
-    return builder(kernel_params)
+
+def resolve_kernel_type(kernel_type: str | int) -> str:
+    """Resolve a kernel type alias or ``-t N`` integer to the internal name.
+
+    Accepts: internal names (``gkm_cnt``), aliases (``direct``),
+    or LS-GKM ``-t`` integers (``0``).
+    """
+    if isinstance(kernel_type, int):
+        canonical = KERNEL_ALIASES.get(kernel_type)
+        if canonical is None:
+            raise ValueError(
+                f"Unknown kernel type integer {kernel_type}. "
+                f"Valid: 0-5 (LS-GKM -t flag)"
+            )
+        return canonical
+    if kernel_type in KERNEL_BUILDERS:
+        return kernel_type
+    canonical = KERNEL_ALIASES.get(kernel_type)
+    if canonical is not None:
+        return canonical
+    supported = ", ".join(
+        f"{a!r}" for a in KERNEL_ALIASES if isinstance(a, str)
+    )
+    raise NotImplementedError(
+        f"Unknown kernel type {kernel_type!r}. "
+        f"Aliases: {supported}. "
+        f"Internal names: {', '.join(KERNEL_BUILDERS)}"
+    )
 
 
 class GkmSVM:
@@ -86,7 +127,7 @@ class GkmSVM:
         support_sequences: np.ndarray,
         coefficients: np.ndarray,
         bias: float,
-        kernel_type: str,
+        kernel_type: str | int,
         kernel_params: dict,
         *,
         sv_chunk_size: int | None = None,
@@ -108,9 +149,9 @@ class GkmSVM:
         self.support_sequences = support_sequences
         self.coefficients = coefficients
         self.bias = bias
-        self.kernel_type = kernel_type
+        self.kernel_type = resolve_kernel_type(kernel_type)
         self._kernel_params = kernel_params
-        self.kernel = _build_kernel(kernel_type, kernel_params)
+        self.kernel = KERNEL_BUILDERS[self.kernel_type](kernel_params)
         self.sv_chunk_size = sv_chunk_size
         self._cached_sv_diag: np.ndarray | None = None
         self._sv_idx_windows: np.ndarray | None = None
@@ -155,11 +196,7 @@ class GkmSVM:
         return self._cached_sv_diag
 
     def _get_sv_index_windows(self):
-        """Lazily compute and cache SV base-index windows (fwd + RC).
-
-        Uses int8 indices (230 MB for 72K SVs) instead of float32 flat
-        windows (3.68 GB).
-        """
+        """Lazily compute and cache int8 base-index windows for SVs (fwd + RC)."""
         if self._sv_idx_windows is None:
             kernel = self.kernel
             self._sv_idx_windows = kernel.base_index_windows(
@@ -226,7 +263,7 @@ class GkmSVM:
         return scores + self.bias
 
     def score_variants(self, ref: np.ndarray, alt: np.ndarray) -> np.ndarray:
-        """Compute variant effect scores as score(alt) - score(ref).
+        """Variant effect scores: score(alt) - score(ref).
 
         Args:
             ref: [B, 4, L] reference sequences.

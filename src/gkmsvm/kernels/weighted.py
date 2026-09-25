@@ -8,7 +8,16 @@ from gkmsvm.kernels.base import GkmKernel
 
 
 def _center_weights(l: int, M: int, H: float) -> np.ndarray:
-    """Position weights for center-weighted kernels."""
+    """Per-position weights for center-weighted kernels.
+
+    Args:
+        l: Window length.
+        M: Width of the flat center region.
+        H: Half-life for exponential decay from center.
+
+    Returns:
+        [l] array of position weights (1.0 at center, decaying to edges).
+    """
     weights = np.zeros(l, dtype=np.float64)
     center = (l - 1) / 2.0
     half_M = M / 2.0
@@ -37,15 +46,15 @@ def _weighted_kernel_from_matches(
     pos_weights: np.ndarray,
     k: int,
 ) -> np.ndarray:
-    """Compute weighted gapped k-mer kernel from per-position matches.
+    """Weighted gapped k-mer kernel via elementary symmetric polynomial DP.
 
     Args:
         matches: [..., W1, W2, l] per-position match indicators.
         pos_weights: [l] position weights.
-        k: number of informative positions.
+        k: Number of informative positions.
 
     Returns:
-        [...] array with window and position dimensions reduced.
+        [...] kernel values with window and position dims reduced.
     """
     xp = get_array_module(matches)
     weighted = matches * pos_weights
@@ -87,7 +96,7 @@ class CenterWeightedGkmKernel(GkmKernel):
     def _per_position_matches(
         self, x: np.ndarray, y: np.ndarray
     ) -> np.ndarray:
-        """Compute per-position match indicators between all window pairs.
+        """Per-position match indicators between all window pairs.
 
         Returns:
             [B, S, Wx, Wy, l] binary match indicators.

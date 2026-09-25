@@ -206,7 +206,7 @@ _cupy_fused_idx_kernel = None
 
 
 def _fused_pairwise_gpu(wx, wy, table):
-    """Launch fused pairwise CUDA kernel (float path)."""
+    """Fused pairwise CUDA kernel (float dot-product path)."""
     global _cupy_fused_kernel
     import cupy as cp
 
@@ -241,11 +241,7 @@ def _fused_pairwise_gpu(wx, wy, table):
 
 
 def _fused_pairwise_idx_gpu(bx, by, table):
-    """Launch fused pairwise CUDA kernel (int8 index path).
-
-    Transposes by from [S, Wy, l] to [l, Wy, S] so adjacent threads
-    (consecutive s values) read adjacent bytes — coalesced access.
-    """
+    """Fused pairwise CUDA kernel (int8 index path, coalesced SV access)."""
     global _cupy_fused_idx_kernel
     import cupy as cp
 
@@ -300,13 +296,13 @@ class DirectGkmKernel(GkmKernel):
         )
 
     def flat_windows(self, x: np.ndarray) -> np.ndarray:
-        """Extract length-l windows and flatten channels for matmul.
+        """Extract length-l sliding windows, flattened across channels.
 
         Args:
-            x: [B, 4, L] one-hot array.
+            x: [B, 4, L] one-hot encoded sequences.
 
         Returns:
-            [B, W, 4*l] array where W = L - l + 1.
+            [B, W, 4*l] where W = L - l + 1.
         """
         xp = get_array_module(x)
         B, C, L = x.shape
@@ -326,7 +322,7 @@ class DirectGkmKernel(GkmKernel):
         """Extract base indices for sliding windows.
 
         Args:
-            x: [B, 4, L] one-hot array.
+            x: [B, 4, L] one-hot encoded sequences.
 
         Returns:
             [B, W, l] int8 array of base indices (0-3).
@@ -346,7 +342,7 @@ class DirectGkmKernel(GkmKernel):
         return xp.ascontiguousarray(bw)
 
     def _apply_table(self, matches: np.ndarray) -> np.ndarray:
-        """Look up weight table from match counts, sum over window dims."""
+        """Look up mismatch table from match counts and sum over window dims."""
         xp = get_array_module(matches)
         table = xp.asarray(self._mismatch_table)
         mismatches = xp.clip(xp.rint(self.l - matches).astype(np.int64), 0, self.l)
@@ -376,7 +372,7 @@ class DirectGkmKernel(GkmKernel):
     def pairwise_from_indices(
         self, bx: np.ndarray, by: np.ndarray
     ) -> np.ndarray:
-        """Raw kernel from base-index windows (4x fewer ops than float path).
+        """Raw kernel from base-index windows (no RC, no normalization).
 
         Args:
             bx: [B, Wx, l] int8 base indices from query sequences.

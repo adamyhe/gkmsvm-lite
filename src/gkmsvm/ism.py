@@ -47,6 +47,7 @@ def ism(
 
 
 def _ism_index(model, x, chunk):
+    """ISM via int8 base-index comparison (DirectGkmKernel fast path)."""
     xp = get_array_module(x)
     B, C, L = x.shape
     kernel = model.kernel
@@ -104,8 +105,11 @@ def _ism_index(model, x, chunk):
 
 
 def _build_idx_mutations(bx_cpu, L, W, l, B):
-    # Sentinel -1: never matches any base (0-3), so all l positions
-    # mismatch → table[l] = C(0, k) = 0 contribution for padding.
+    """Build ref/mutant int8 window tensors for all positions.
+
+    Sentinel -1 pads variable-length affected windows: never matches
+    any base (0-3), so table[l] = C(0, k) = 0 contribution.
+    """
     all_old = np.full((L, B, l, l), -1, dtype=np.int8)
     all_new = np.full((4, L, B, l, l), -1, dtype=np.int8)
 
@@ -125,6 +129,7 @@ def _build_idx_mutations(bx_cpu, L, W, l, B):
 
 
 def _mutate_index_windows(bx_A, offsets, bases):
+    """Apply each of 4 base substitutions to affected int8 windows."""
     result = np.broadcast_to(bx_A[None], (4, *bx_A.shape)).copy()
     for a_idx, off in enumerate(offsets):
         for vi, base in enumerate(bases):
@@ -133,6 +138,7 @@ def _mutate_index_windows(bx_A, offsets, bases):
 
 
 def _partial_pairwise_idx(kernel, bx_A, by, chunk_size):
+    """Chunked pairwise from int8 index windows."""
     xp = get_array_module(bx_A)
     S = by.shape[0]
     B = bx_A.shape[0]
@@ -168,6 +174,7 @@ def _mutated_diagonals(kernel, x, xp):
 
 
 def _ism_float(model, x, chunk):
+    """ISM via float32 flat windows (fallback for non-DirectGkmKernel)."""
     xp = get_array_module(x)
     B, C, L = x.shape
     kernel = model.kernel
@@ -242,6 +249,7 @@ def _ism_float(model, x, chunk):
 
 
 def _build_float_mutations(wx_cpu, L, W, l, B, F, dtype):
+    """Build ref/mutant flat-window tensors and full mutated windows."""
     all_old = np.zeros((L, B, l, F), dtype=dtype)
     all_new = np.zeros((4, L, B, l, F), dtype=dtype)
     all_wx_full = np.broadcast_to(wx_cpu[None], (4 * L, B, W, F)).copy()
@@ -267,6 +275,7 @@ def _build_float_mutations(wx_cpu, L, W, l, B, F, dtype):
 
 
 def _build_rc_float_mutations(wx_rc_cpu, ranges, L, W, l, B, F, dtype):
+    """Build mutated reverse-complement flat windows for normalization."""
     all_wx_rc_full = np.broadcast_to(wx_rc_cpu[None], (4 * L, B, W, F)).copy()
 
     for p in range(L):
@@ -285,6 +294,7 @@ def _build_rc_float_mutations(wx_rc_cpu, ranges, L, W, l, B, F, dtype):
 
 
 def _batched_self_kernel(kernel, all_wx_full, L, B, W, F, group_sz=200):
+    """Self-kernel diagonals for mutated sequences (float path)."""
     xp = get_array_module(all_wx_full)
     total = 4 * L
     diag = xp.zeros(total * B, dtype=all_wx_full.dtype)
@@ -302,6 +312,7 @@ def _batched_self_kernel(kernel, all_wx_full, L, B, W, F, group_sz=200):
 def _batched_cross_kernel(
     kernel, all_wx_full, all_wx_rc_full, L, B, W, F, group_sz=200
 ):
+    """Cross-kernel diagonals (fwd × RC) for mutated sequences (float path)."""
     xp = get_array_module(all_wx_full)
     total = 4 * L
     diag = xp.zeros(total * B, dtype=all_wx_full.dtype)
@@ -317,6 +328,7 @@ def _batched_cross_kernel(
 
 
 def _mutate_float_windows(wx_A, offsets, l, bases):
+    """Apply each of 4 base substitutions to affected flat windows."""
     result = np.broadcast_to(wx_A[None], (4, *wx_A.shape)).copy()
     for a_idx, off in enumerate(offsets):
         for c in range(4):
@@ -327,6 +339,7 @@ def _mutate_float_windows(wx_A, offsets, l, bases):
 
 
 def _partial_pairwise(kernel, wx_A, wy, chunk_size):
+    """Chunked pairwise from flat windows."""
     xp = get_array_module(wx_A)
     S = wy.shape[0]
     B = wx_A.shape[0]
@@ -340,6 +353,7 @@ def _partial_pairwise(kernel, wx_A, wy, chunk_size):
 
 
 def _raw_pairwise_chunked(kernel, x, sv, chunk_size):
+    """Full pairwise with optional SV chunking."""
     xp = get_array_module(x)
     S = sv.shape[0]
     B = x.shape[0]

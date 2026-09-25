@@ -28,7 +28,8 @@ pytest tests/ -k "test_rc"       # pattern match
 - `model.cuda()` moves arrays to GPU, `model.cpu()` moves back
 - Kernel normalization on by default, RC equivalence on by default
 - Score = `Σ coef_i × K(x, sv_i) + bias` where `bias = -rho` (LS-GKM) or `+rho` (classic gkmSVM)
-- Kernel modes: `-t 0` (direct), `-t 1` (est full), `-t 2` (est trunc, default), `-t 3` (RBF), `-t 4` (center-weighted), `-t 5` (center-weighted RBF)
+- Kernel modes (LS-GKM name / alias): `-t 0` gkm_cnt/direct, `-t 1` gkm_estfull/estimated_full, `-t 2` gkm_esttrunc/estimated (default), `-t 3` gkmrbf/rbf, `-t 4` wgkm/weighted, `-t 5` wgkmrbf/weighted_rbf. `GkmSVM` accepts any of these or the integer.
+- `resolve_kernel_type()` maps aliases and integers to canonical internal names
 - ISM via `ism(model, x)` returns `[B, 4, L]` score deltas using window-delta optimization
 - GkmExplain via `gkmexplain(model, x, mode=0|1)` returns `[B, 4, L]` attribution scores, 20-30x faster than ISM
 - Gradient-based methods (DeepLIFT, SHAP, captum) are incompatible — use GkmExplain or ISM
