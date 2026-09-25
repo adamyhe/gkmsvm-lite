@@ -36,10 +36,7 @@ On by default (`norc=0` in LS-GKM). Scores must be invariant under RC. When enab
 
 ## Kernel computation: matmul + table lookup
 
-Window match counts are computed via matmul on flattened one-hot windows (`[B, W, 4*l]`), avoiding a 6D broadcast intermediate that is 440x larger. The `_apply_table` step (match counts → weighted kernel values) dispatches by device:
-
-- **CPU**: eager gather — `table[mismatches].sum()`. Fastest on CPU due to PyTorch's optimized gather. Further 3–14x speedup available via `torch.compile(model, backend="inductor")`, which fuses the 6-op chain (subtract → round → long → clamp → gather → sum) into a single kernel.
-- **GPU (CUDA/MPS)**: histogram loop — iterates over nonzero weight entries (4 for d=3) and counts matching window pairs per mismatch level. Avoids materializing the full `[B, S, Wx, Wy]` gather result (17x less peak intermediate memory), preventing OOM on large models. 1.4–1.7x faster than eager on MPS.
+Window match counts are computed via matmul on flattened one-hot windows (`[B, W, 4*l]`), avoiding a 6D broadcast intermediate that is 440x larger. The `_apply_table` step uses eager gather: `table[mismatches].sum()`. Both NumPy (CPU) and CuPy (GPU) use the same code path since CuPy mirrors NumPy's fancy indexing.
 
 ## Chunked SV inference
 
@@ -67,17 +64,18 @@ Header key-value pairs until `SV` marker, then `<signed_coef> <DNA_sequence>` pe
 
 Original gkmSVM (Ghandi et al. 2014) uses OPPOSITE sign convention: `bias = +rho`. Supports both embedded SVs (single file) and two-file format (model + FASTA). Integer kernel types (0-5) are mapped to string names. Load via `load_classic_model(model_path, svseq_path=...)`.
 
-## GPU compute precision
+## SV diagonal cache
 
-Kernel computation uses float32 on GPU (CUDA and MPS), float64 on CPU. Consumer NVIDIA GPUs have severely degraded float64 throughput (1:64 FP64:FP32 on Ampere). Since gkm kernel match counts are small integers (≤ l) and the mismatch table has at most d+1 nonzero entries, float32 is exact where it matters and negligible-error everywhere else. On Ampere+, float32 matmuls automatically use TF32 (19-bit mantissa tensor cores), which is also exact for these integer dot products. See `docs/performance.md` for the full analysis.
+The SVM caches the support-vector self-kernel diagonal (`_raw_diagonal(sv)`) after first computation, avoiding a chunked recomputation on every call.
 
-The SVM caches the support-vector self-kernel diagonal (`_raw_diagonal(sv)`) after first computation, avoiding a chunked recomputation on every forward call.
+## NumPy + CuPy (no PyTorch)
 
-`model.compile()` uses `torch.compile` to fuse the einsum + histogram table lookup into a single Triton GPU kernel — 15x faster pairwise computation. With `compile(dtype=torch.bfloat16)`, the flat windows are converted to bf16 before the fused kernel, using Ampere+ tensor cores for ~60% additional throughput (5.3x faster than LS-GKM C). Match counts are exact in bf16 (integers ≤ 15). See `docs/performance.md`.
+gkm-SVMs are not differentiable — autograd provides no value. The array operations (matmul, einsum, fancy indexing) are identical in NumPy and CuPy, so a single codebase handles both CPU and GPU via `gkmsvm.backend.get_array_module()`.
 
-## PyTorch over cuML/CuPy
+CPU: NumPy arrays + Numba `@njit(parallel=True)` for reference kernels.
+GPU: CuPy arrays (optional `[gpu]` extra). `model.cuda()` moves data to GPU.
 
-PyTorch chosen for compatibility with the S2F ecosystem (tangermeme). All sequence manipulation and variant effect scoring uses tangermeme utilities. Note: ledidi requires differentiable models and does not work with gkm-SVMs.
+tangermeme interop is vendored — only `extract_loci` (pyfaidx) and FASTA I/O are needed. ledidi requires differentiable models and does not work with gkm-SVMs.
 
 ## References
 

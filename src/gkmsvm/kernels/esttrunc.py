@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from math import comb
 
-import torch
+import numpy as np
 
 from gkmsvm.kernels.direct import DirectGkmKernel
 
@@ -31,25 +31,19 @@ class EstTruncGkmKernel(DirectGkmKernel):
         super().__init__(l, k, normalize=normalize, include_rc=include_rc)
         self.d = d
         table = _build_estlmer_table(l, k, truncate)
-        # LS-GKM's tree traversal only considers window pairs with at most
-        # d mismatches, so zero out entries beyond d.
         if d < l:
             table[d + 1 :] = 0.0
         self._mismatch_table = table
 
 
-def _build_estlmer_table(l: int, k: int, truncate: bool) -> torch.Tensor:
+def _build_estlmer_table(l: int, k: int, truncate: bool) -> np.ndarray:
     """Build the weight table for the estimated l-mer kernel.
 
     Ported from calc_gkm_kernel_lmerest_wt in Dongwon-Lee/lsgkm
-    src/libsvm_gkm.c. Three-step computation:
-    1. DP for position-independent mismatch probabilities (wm)
-    2. Intermediate per-mismatch kernel values
-    3. Final weight table via triple convolution
+    src/libsvm_gkm.c.
     """
-    b = 4  # DNA alphabet size
+    b = 4
 
-    # Step 1: DP for wm[i], i=0..k
     wLp = [[1.0] * (k + 1) for _ in range(k + 1)]
     wL = [[1.0] * (k + 1) for _ in range(k + 1)]
 
@@ -63,7 +57,6 @@ def _build_estlmer_table(l: int, k: int, truncate: bool) -> torch.Tensor:
     nnorm = comb(l, k) * (b**l)
     wm = [wLp[k][i] / nnorm for i in range(k + 1)]
 
-    # Step 2: intermediate kernel values per mismatch count
     kernel = [0.0] * (l + 1)
     for m in range(l + 1):
         ub = min(m, k)
@@ -73,7 +66,6 @@ def _build_estlmer_table(l: int, k: int, truncate: bool) -> torch.Tensor:
                 val += wm[i] * comb(l - m, k - i) * comb(m, i)
         kernel[m] = val
 
-    # Step 3: truncation (type 2) or full (type 1)
     if truncate:
         kernel_tr = [0.0] * (l + 1)
         active = True
@@ -84,7 +76,6 @@ def _build_estlmer_table(l: int, k: int, truncate: bool) -> torch.Tensor:
     else:
         kernel_tr = list(kernel)
 
-    # Step 4: final weight table via triple sum
     res = [0.0] * (l + 1)
     for m in range(l + 1):
         w = 0.0
@@ -115,4 +106,4 @@ def _build_estlmer_table(l: int, k: int, truncate: bool) -> torch.Tensor:
                     w += cc * kt_m1 * kt_m2
         res[l - m] = w
 
-    return torch.tensor(res, dtype=torch.float64)
+    return np.array(res, dtype=np.float64)

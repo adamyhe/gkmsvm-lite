@@ -1,9 +1,8 @@
 """Pin Numba's threading layer before anything can pick a crashing one.
 
-Numba's default OpenMP threading layer and PyTorch's OpenMP runtime load
-distinct copies of LLVM's libomp, and whichever initializes second crashes
-the process with SIGSEGV. Since torch is a required dependency of gkmsvm,
-we always pin to ``workqueue`` which avoids OpenMP entirely.
+Numba's default OpenMP threading layer can conflict with other OpenMP
+runtimes. Since we use Numba for parallel CPU compute, we pin to
+``workqueue`` which avoids OpenMP entirely.
 
 Adapted from scprism._threading (see scprism PR #8).
 """
@@ -34,7 +33,7 @@ def pin_threading_layer() -> str:
         if current == "omp":
             warnings.warn(
                 "Numba's threading layer is already initialized as 'omp'; "
-                "Numba prange calls may segfault alongside PyTorch. "
+                "Numba prange calls may conflict with other OpenMP runtimes. "
                 "Set NUMBA_THREADING_LAYER=workqueue, or import gkmsvm before "
                 "any code that initializes Numba.",
                 RuntimeWarning,

@@ -11,9 +11,9 @@ from __future__ import annotations
 
 from itertools import combinations
 
-import torch
-from torch import nn
+import numpy as np
 
+from gkmsvm.backend import get_array_module
 from gkmsvm.codec import reverse_complement
 
 _BASE_MAP = {"A": 0, "C": 1, "G": 2, "T": 3}
@@ -35,7 +35,7 @@ def _index_to_kmer(idx: int, k: int) -> str:
     return "".join(reversed(chars))
 
 
-class DeltaSVM(nn.Module):
+class DeltaSVM:
     """Linear gapped k-mer scoring model.
 
     Stores a weight table of size 4^k and scores sequences by summing
@@ -46,42 +46,33 @@ class DeltaSVM(nn.Module):
 
     def __init__(
         self,
-        weights: torch.Tensor,
+        weights: np.ndarray,
         l: int,
         k: int,
         *,
         include_rc: bool = True,
         bias: float = 0.0,
     ):
-        super().__init__()
         expected = 4**k
         if weights.shape != (expected,):
             raise ValueError(f"weights must be [{expected}], got {list(weights.shape)}")
         if k > l:
             raise ValueError(f"k ({k}) must be <= l ({l})")
 
-        self.register_buffer("weights", weights)
-        self.register_buffer("_bias", torch.tensor(bias, dtype=weights.dtype))
+        self.weights = weights
+        self.bias = bias
         self.l = l
         self.k = k
         self.include_rc = include_rc
 
-        combos = list(combinations(range(l), k))
-        self.register_buffer(
-            "_combos", torch.tensor(combos, dtype=torch.long)
-        )
-        powers = 4 ** torch.arange(k - 1, -1, -1, dtype=torch.long)
-        self.register_buffer("_powers", powers)
-
-    @property
-    def bias(self) -> float:
-        return self._bias.item()
+        self._combos = np.array(list(combinations(range(l), k)), dtype=np.int64)
+        self._powers = 4 ** np.arange(k - 1, -1, -1, dtype=np.int64)
 
     @property
     def num_kmers(self) -> int:
-        return int((self.weights != 0).sum().item())
+        return int((self.weights != 0).sum())
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def __call__(self, x: np.ndarray) -> np.ndarray:
         """Score sequences by summing gapped k-mer weights.
 
         Args:
@@ -93,31 +84,32 @@ class DeltaSVM(nn.Module):
         score = self._score_strand(x)
         if self.include_rc:
             score = score + self._score_strand(reverse_complement(x))
-        return score + self._bias
+        return score + self.bias
 
-    def _score_strand(self, x: torch.Tensor) -> torch.Tensor:
+    def _score_strand(self, x: np.ndarray) -> np.ndarray:
         """Score one strand."""
+        xp = get_array_module(x)
         B, C, L = x.shape
         W = L - self.l + 1
         if W < 1:
-            return torch.zeros(B, 1, dtype=x.dtype, device=x.device)
+            return xp.zeros((B, 1), dtype=x.dtype)
 
-        windows = x.unfold(2, self.l, 1)
-        base_idx = windows.argmax(dim=1)
+        # Sliding windows
+        sx = x.strides
+        windows = xp.lib.stride_tricks.as_strided(
+            x, shape=(B, C, W, self.l), strides=(sx[0], sx[1], sx[2], sx[2])
+        )
+        base_idx = xp.argmax(windows, axis=1)  # [B, W, l]
 
-        selected = base_idx[:, :, self._combos]
-        kmer_idx = (selected * self._powers).sum(dim=-1)
-        scores = self.weights[kmer_idx].sum(dim=(1, 2))
-        return scores.unsqueeze(1)
+        combos = xp.asarray(self._combos)
+        powers = xp.asarray(self._powers)
+        weights = xp.asarray(self.weights)
 
-    def score_variants(self, ref: torch.Tensor, alt: torch.Tensor) -> torch.Tensor:
-        """Compute variant effect scores as score(alt) - score(ref).
+        selected = base_idx[:, :, combos]  # [B, W, n_combos, k]
+        kmer_idx = (selected * powers).sum(axis=-1)  # [B, W, n_combos]
+        scores = weights[kmer_idx].sum(axis=(1, 2))
+        return scores[:, None]
 
-        Args:
-            ref: [B, 4, L] reference sequences.
-            alt: [B, 4, L] alternate sequences.
-
-        Returns:
-            [B, 1] score differences.
-        """
-        return self.forward(alt) - self.forward(ref)
+    def score_variants(self, ref: np.ndarray, alt: np.ndarray) -> np.ndarray:
+        """Compute variant effect scores as score(alt) - score(ref)."""
+        return self(alt) - self(ref)

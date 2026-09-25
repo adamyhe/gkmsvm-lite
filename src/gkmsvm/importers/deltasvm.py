@@ -13,7 +13,7 @@ from __future__ import annotations
 import gzip
 from pathlib import Path
 
-import torch
+import numpy as np
 
 from gkmsvm.deltasvm import DeltaSVM, _kmer_to_index
 
@@ -35,7 +35,7 @@ def load_deltasvm_weights(
     *,
     include_rc: bool = True,
     bias: float = 0.0,
-    dtype: torch.dtype = torch.float32,
+    dtype: np.dtype | type = np.float32,
 ) -> DeltaSVM:
     """Load deltaSVM k-mer weights from a tab-separated file.
 
@@ -47,7 +47,7 @@ def load_deltasvm_weights(
         l: Window length (l-mer size). Must match the model's L parameter.
         include_rc: Whether to score both strands.
         bias: Optional bias term added to scores.
-        dtype: Tensor dtype for weights.
+        dtype: Array dtype for weights.
 
     Returns:
         A DeltaSVM instance.
@@ -101,7 +101,7 @@ def load_deltasvm_weights(
     if l < k:
         raise ValueError(f"l ({l}) must be >= k ({k})")
 
-    weights = torch.zeros(4**k, dtype=dtype)
+    weights = np.zeros(4**k, dtype=dtype)
     for kmer, w in kmer_weights.items():
         weights[_kmer_to_index(kmer)] = w
 

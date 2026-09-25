@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from math import comb
 
-import torch
+import numpy as np
 
+from gkmsvm.backend import get_array_module
 from gkmsvm.codec import reverse_complement
 from gkmsvm.kernels.base import GkmKernel
 
@@ -23,75 +24,53 @@ class DirectGkmKernel(GkmKernel):
         self, l: int, k: int, *, normalize: bool = True, include_rc: bool = True
     ):
         super().__init__(l, k, normalize=normalize, include_rc=include_rc)
-        self._mismatch_table = torch.tensor(
+        self._mismatch_table = np.array(
             [comb(l - m, k) if l - m >= k else 0 for m in range(l + 1)],
-            dtype=torch.float64,
+            dtype=np.float64,
         )
 
-    def flat_windows(self, x: torch.Tensor) -> torch.Tensor:
+    def flat_windows(self, x: np.ndarray) -> np.ndarray:
         """Extract length-l windows and flatten channels for matmul.
 
         Args:
-            x: [B, 4, L] one-hot tensor.
+            x: [B, 4, L] one-hot array.
 
         Returns:
-            [B, W, 4*l] tensor where W = L - l + 1.
+            [B, W, 4*l] array where W = L - l + 1.
         """
+        xp = get_array_module(x)
         B, C, L = x.shape
         if L < self.l:
             raise ValueError(
                 f"Sequence length {L} is shorter than window length {self.l}"
             )
-        wx = x.unfold(2, self.l, 1)  # [B, 4, W, l]
-        wx = wx.permute(0, 2, 1, 3)  # [B, W, 4, l]
-        return wx.reshape(B, -1, C * self.l)  # [B, W, 4*l]
+        W = L - self.l + 1
+        # Sliding window: extract [B, 4, W, l] then reshape to [B, W, 4*l]
+        strides = x.strides
+        shape = (B, C, W, self.l)
+        new_strides = (strides[0], strides[1], strides[2], strides[2])
+        wx = xp.lib.stride_tricks.as_strided(x, shape=shape, strides=new_strides)
+        wx = xp.ascontiguousarray(wx.transpose(0, 2, 1, 3))  # [B, W, 4, l]
+        return wx.reshape(B, W, C * self.l)
 
-    def _apply_table(self, matches: torch.Tensor) -> torch.Tensor:
+    def _apply_table(self, matches: np.ndarray) -> np.ndarray:
         """Look up weight table from match counts, sum over window dims.
 
-        On GPU, uses a histogram loop that avoids materializing the full
-        [B, S, Wx, Wy] gather result — 17x less peak memory, preventing OOM
-        on large models. On CPU, uses direct gather which is faster.
-
         Args:
-            matches: [..., Wx, Wy] float tensor of per-window-pair match counts.
+            matches: [..., Wx, Wy] float array of per-window-pair match counts.
 
         Returns:
-            [...] tensor with window dimensions summed out.
+            [...] array with window dimensions summed out.
         """
-        dtype = (
-            self._mismatch_table.dtype
-            if matches.device.type == "cpu"
-            else torch.float32
-        )
-        table = self._mismatch_table.to(device=matches.device, dtype=dtype)
-        if matches.device.type in ("cuda", "mps"):
-            return self._apply_table_histogram(matches, table)
-        return self._apply_table_eager(matches, table)
+        xp = get_array_module(matches)
+        table = xp.asarray(self._mismatch_table)
+        mismatches = xp.clip(xp.rint(self.l - matches).astype(np.int64), 0, self.l)
+        return table[mismatches].sum(axis=(-2, -1))
 
-    def _apply_table_eager(
-        self, matches: torch.Tensor, table: torch.Tensor
-    ) -> torch.Tensor:
-        mismatches = (self.l - matches).round().long().clamp(0, self.l)
-        return table[mismatches].sum(dim=(-2, -1))
-
-    def _apply_table_histogram(
-        self, matches: torch.Tensor, table: torch.Tensor
-    ) -> torch.Tensor:
-        rounded = matches.round()
-        result = torch.zeros(
-            matches.shape[:-2], dtype=table.dtype, device=matches.device
-        )
-        for m in range(self.l + 1):
-            w = table[m]
-            count = (rounded == (self.l - m)).to(table.dtype).sum(dim=(-2, -1))
-            result = result + w * count
-        return result
-
-    def pairwise_from_windows(self, wx: torch.Tensor, wy: torch.Tensor) -> torch.Tensor:
+    def pairwise_from_windows(
+        self, wx: np.ndarray, wy: np.ndarray
+    ) -> np.ndarray:
         """Raw kernel from pre-extracted flat windows (no RC, no normalization).
-
-        Useful for training where windows can be cached across iterations.
 
         Args:
             wx: [B, Wx, F] flat windows from query sequences.
@@ -100,10 +79,11 @@ class DirectGkmKernel(GkmKernel):
         Returns:
             [B, S] raw kernel values.
         """
-        matches = torch.einsum("bif,sjf->bsij", wx, wy)
+        xp = get_array_module(wx)
+        matches = xp.einsum("bif,sjf->bsij", wx, wy)
         return self._apply_table(matches)
 
-    def diagonal_from_windows(self, wx: torch.Tensor) -> torch.Tensor:
+    def diagonal_from_windows(self, wx: np.ndarray) -> np.ndarray:
         """Raw self-kernel from pre-extracted flat windows (no RC, no normalization).
 
         Args:
@@ -112,10 +92,12 @@ class DirectGkmKernel(GkmKernel):
         Returns:
             [B] raw self-kernel values.
         """
-        self_matches = torch.bmm(wx, wx.transpose(1, 2))
+        xp = get_array_module(wx)
+        # bmm: [B, W, F] @ [B, F, W] -> [B, W, W]
+        self_matches = xp.matmul(wx, wx.transpose(0, 2, 1))
         return self._apply_table(self_matches)
 
-    def _raw_pairwise(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    def _raw_pairwise(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
         wx = self.flat_windows(x)
         wy = self.flat_windows(y)
         result = self.pairwise_from_windows(wx, wy)
@@ -124,22 +106,23 @@ class DirectGkmKernel(GkmKernel):
             wy_rc = self.flat_windows(reverse_complement(y))
             result = result + self.pairwise_from_windows(wx, wy_rc)
 
-        return result.to(x.dtype)
+        return result.astype(x.dtype)
 
     def _raw_diagonal(
-        self, x: torch.Tensor, *, chunk_size: int | None = None
-    ) -> torch.Tensor:
+        self, x: np.ndarray, *, chunk_size: int | None = None
+    ) -> np.ndarray:
+        xp = get_array_module(x)
         B = x.shape[0]
         if chunk_size is None or chunk_size >= B:
             wx = self.flat_windows(x)
             result = self.diagonal_from_windows(wx)
             if self.include_rc:
                 wx_rc = self.flat_windows(reverse_complement(x))
-                rc_matches = torch.bmm(wx, wx_rc.transpose(1, 2))
+                rc_matches = xp.matmul(wx, wx_rc.transpose(0, 2, 1))
                 result = result + self._apply_table(rc_matches)
-            return result.to(x.dtype)
+            return result.astype(x.dtype)
 
-        result = torch.empty(B, dtype=x.dtype, device=x.device)
+        result = xp.empty(B, dtype=x.dtype)
         for start in range(0, B, chunk_size):
             end = min(start + chunk_size, B)
             result[start:end] = self._raw_diagonal(x[start:end])

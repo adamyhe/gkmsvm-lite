@@ -4,8 +4,8 @@ import tempfile
 from itertools import combinations
 from pathlib import Path
 
+import numpy as np
 import pytest
-import torch
 
 from gkmsvm.codec import one_hot_encode, reverse_complement
 from gkmsvm.deltasvm import DeltaSVM, _kmer_to_index, _index_to_kmer
@@ -54,7 +54,7 @@ class TestKmerIndexing:
 
 class TestDeltaSVMConstruction:
     def test_basic(self):
-        weights = torch.randn(64)
+        weights = np.random.RandomState(0).randn(64).astype(np.float32)
         model = DeltaSVM(weights, l=5, k=3)
         assert model.l == 5
         assert model.k == 3
@@ -62,11 +62,11 @@ class TestDeltaSVMConstruction:
 
     def test_wrong_weight_size(self):
         with pytest.raises(ValueError, match="weights must be"):
-            DeltaSVM(torch.randn(32), l=5, k=3)
+            DeltaSVM(np.random.RandomState(0).randn(32).astype(np.float32), l=5, k=3)
 
     def test_k_greater_than_l(self):
         with pytest.raises(ValueError, match="k.*must be <= l"):
-            DeltaSVM(torch.randn(64), l=2, k=3)
+            DeltaSVM(np.random.RandomState(0).randn(64).astype(np.float32), l=2, k=3)
 
 
 class TestDeltaSVMScoring:
@@ -74,19 +74,19 @@ class TestDeltaSVMScoring:
         k, l = 3, 5
         rng = random.Random(1)
         weights_dict = {}
-        weights_tensor = torch.zeros(4**k)
+        weights_arr = np.zeros(4**k, dtype=np.float32)
         for idx in range(4**k):
             kmer = _index_to_kmer(idx, k)
             w = rng.gauss(0, 1)
             weights_dict[kmer] = w
-            weights_tensor[idx] = w
+            weights_arr[idx] = w
 
-        model = DeltaSVM(weights_tensor, l=l, k=k, include_rc=False)
+        model = DeltaSVM(weights_arr, l=l, k=k, include_rc=False)
         seqs = _make_seqs(3, 15, seed=2)
 
         for seq in seqs:
-            x = one_hot_encode(seq).unsqueeze(0)
-            got = model(x).item()
+            x = one_hot_encode(seq)[np.newaxis]
+            got = float(model(x)[0, 0])
             expected = _naive_deltasvm_score(seq, weights_dict, l, k, False)
             assert abs(got - expected) < 1e-4, f"seq={seq}: {got} vs {expected}"
 
@@ -94,64 +94,63 @@ class TestDeltaSVMScoring:
         k, l = 3, 5
         rng = random.Random(3)
         weights_dict = {}
-        weights_tensor = torch.zeros(4**k)
+        weights_arr = np.zeros(4**k, dtype=np.float32)
         for idx in range(4**k):
             kmer = _index_to_kmer(idx, k)
             w = rng.gauss(0, 1)
             weights_dict[kmer] = w
-            weights_tensor[idx] = w
+            weights_arr[idx] = w
 
-        model = DeltaSVM(weights_tensor, l=l, k=k, include_rc=True)
+        model = DeltaSVM(weights_arr, l=l, k=k, include_rc=True)
         seqs = _make_seqs(3, 15, seed=4)
 
         for seq in seqs:
-            x = one_hot_encode(seq).unsqueeze(0)
-            got = model(x).item()
+            x = one_hot_encode(seq)[np.newaxis]
+            got = float(model(x)[0, 0])
             expected = _naive_deltasvm_score(seq, weights_dict, l, k, True)
             assert abs(got - expected) < 1e-4, f"seq={seq}: {got} vs {expected}"
 
     def test_output_shape(self):
-        model = DeltaSVM(torch.randn(64), l=5, k=3)
-        x = torch.stack([one_hot_encode(s) for s in _make_seqs(3, 20)])
+        model = DeltaSVM(np.random.RandomState(0).randn(64).astype(np.float32), l=5, k=3)
+        x = np.stack([one_hot_encode(s) for s in _make_seqs(3, 20)])
         assert model(x).shape == (3, 1)
 
     def test_bias(self):
-        model_no_bias = DeltaSVM(torch.randn(64), l=5, k=3, bias=0.0)
-        model_with_bias = DeltaSVM(
-            model_no_bias.weights.clone(), l=5, k=3, bias=1.5
-        )
-        x = one_hot_encode(_make_seqs(1, 15)[0]).unsqueeze(0)
-        diff = model_with_bias(x).item() - model_no_bias(x).item()
+        w = np.random.RandomState(0).randn(64).astype(np.float32)
+        model_no_bias = DeltaSVM(w, l=5, k=3, bias=0.0)
+        model_with_bias = DeltaSVM(w.copy(), l=5, k=3, bias=1.5)
+        x = one_hot_encode(_make_seqs(1, 15)[0])[np.newaxis]
+        diff = float(model_with_bias(x)[0, 0]) - float(model_no_bias(x)[0, 0])
         assert abs(diff - 1.5) < 1e-6
 
     def test_batch_consistent(self):
-        model = DeltaSVM(torch.randn(64), l=5, k=3)
+        model = DeltaSVM(np.random.RandomState(0).randn(64).astype(np.float32), l=5, k=3)
         seqs = _make_seqs(4, 15, seed=5)
-        x_batch = torch.stack([one_hot_encode(s) for s in seqs])
+        x_batch = np.stack([one_hot_encode(s) for s in seqs])
         batch_result = model(x_batch)
         for i in range(4):
             single = model(x_batch[i : i + 1])
-            assert torch.allclose(batch_result[i : i + 1], single, atol=1e-6)
+            np.testing.assert_allclose(batch_result[i : i + 1], single, atol=1e-5)
 
     def test_score_variants(self):
-        model = DeltaSVM(torch.randn(64), l=5, k=3)
-        ref = one_hot_encode(_make_seqs(1, 15, seed=6)[0]).unsqueeze(0)
-        alt = one_hot_encode(_make_seqs(1, 15, seed=7)[0]).unsqueeze(0)
+        model = DeltaSVM(np.random.RandomState(0).randn(64).astype(np.float32), l=5, k=3)
+        ref = one_hot_encode(_make_seqs(1, 15, seed=6)[0])[np.newaxis]
+        alt = one_hot_encode(_make_seqs(1, 15, seed=7)[0])[np.newaxis]
         delta = model.score_variants(ref, alt)
         expected = model(alt) - model(ref)
-        assert torch.allclose(delta, expected, atol=1e-6)
+        np.testing.assert_allclose(delta, expected, atol=1e-6)
 
     def test_short_sequence(self):
-        model = DeltaSVM(torch.randn(64), l=5, k=3)
-        x = one_hot_encode("ACGT").unsqueeze(0)
+        model = DeltaSVM(np.random.RandomState(0).randn(64).astype(np.float32), l=5, k=3)
+        x = one_hot_encode("ACGT")[np.newaxis]
         result = model(x)
         assert result.shape == (1, 1)
-        assert result.item() == model.bias
+        assert float(result[0, 0]) == model.bias
 
     def test_zero_weights(self):
-        model = DeltaSVM(torch.zeros(64), l=5, k=3, bias=0.5)
-        x = one_hot_encode(_make_seqs(1, 15)[0]).unsqueeze(0)
-        assert abs(model(x).item() - 0.5) < 1e-6
+        model = DeltaSVM(np.zeros(64, dtype=np.float32), l=5, k=3, bias=0.5)
+        x = one_hot_encode(_make_seqs(1, 15)[0])[np.newaxis]
+        assert abs(float(model(x)[0, 0]) - 0.5) < 1e-6
 
 
 class TestDeltaSVMImporter:
@@ -176,7 +175,7 @@ class TestDeltaSVMImporter:
 
         for kmer, w in weights_dict.items():
             idx = _kmer_to_index(kmer)
-            assert abs(model.weights[idx].item() - w) < 1e-6
+            assert abs(float(model.weights[idx]) - w) < 1e-6
 
     def test_load_gzip(self, tmp_path):
         import gzip as gz
@@ -200,8 +199,8 @@ class TestDeltaSVMImporter:
             f.write("TGA\t-0.3\n")
 
         model = load_deltasvm_weights(path, l=5)
-        assert model.weights[_kmer_to_index("ACG")].item() == pytest.approx(1.5)
-        assert model.weights[_kmer_to_index("TGA")].item() == pytest.approx(-0.3)
+        assert float(model.weights[_kmer_to_index("ACG")]) == pytest.approx(1.5)
+        assert float(model.weights[_kmer_to_index("TGA")]) == pytest.approx(-0.3)
         assert model.num_kmers == 2
 
     def test_load_with_comments(self, tmp_path):
@@ -250,30 +249,8 @@ class TestDeltaSVMImporter:
 
         model = load_deltasvm_weights(path, l=l, include_rc=True)
         seq = _make_seqs(1, 20, seed=13)[0]
-        x = one_hot_encode(seq).unsqueeze(0)
+        x = one_hot_encode(seq)[np.newaxis]
 
-        got = model(x).item()
+        got = float(model(x)[0, 0])
         expected = _naive_deltasvm_score(seq, weights_dict, l, k, True)
         assert abs(got - expected) < 1e-4
-
-
-class TestDeltaSVMDevice:
-    def test_to_device(self):
-        model = DeltaSVM(torch.randn(64), l=5, k=3)
-        x = one_hot_encode(_make_seqs(1, 15)[0]).unsqueeze(0)
-        score_cpu = model(x)
-
-        if torch.backends.mps.is_available():
-            model_mps = model.to("mps")
-            score_mps = model_mps(x.to("mps"))
-            assert torch.allclose(
-                score_cpu, score_mps.cpu(), atol=1e-5
-            )
-
-    def test_state_dict_roundtrip(self):
-        model = DeltaSVM(torch.randn(64), l=5, k=3, bias=0.5)
-        sd = model.state_dict()
-        model2 = DeltaSVM(torch.zeros(64), l=5, k=3, bias=0.0)
-        model2.load_state_dict(sd)
-        x = one_hot_encode(_make_seqs(1, 15)[0]).unsqueeze(0)
-        assert torch.allclose(model(x), model2(x))

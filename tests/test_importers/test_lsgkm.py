@@ -1,8 +1,8 @@
 import gzip
 import textwrap
 
+import numpy as np
 import pytest
-import torch
 
 from gkmsvm.codec import one_hot_encode
 from gkmsvm.importers.lsgkm import load_lsgkm_model, parse_lsgkm_header
@@ -96,8 +96,8 @@ class TestLoadModel:
 
     def test_coefficients(self, model_path):
         model = load_lsgkm_model(model_path)
-        expected = torch.tensor([0.5, 0.3, -0.8])
-        assert torch.allclose(model.coefficients, expected)
+        expected = np.array([0.5, 0.3, -0.8])
+        np.testing.assert_allclose(model.coefficients, expected)
 
     def test_gzip(self, model_path_gz):
         model = load_lsgkm_model(model_path_gz)
@@ -109,25 +109,24 @@ class TestLoadModel:
 
     def test_forward_runs(self, model_path):
         model = load_lsgkm_model(model_path)
-        query = one_hot_encode("ACGT").unsqueeze(0)
+        query = one_hot_encode("ACGT")[np.newaxis]
         score = model(query)
         assert score.shape == (1, 1)
-        assert torch.isfinite(score).all()
+        assert np.isfinite(score).all()
 
     def test_end_to_end_score(self, model_path):
         """Verify loaded model produces correct scores vs. hand computation."""
         model = load_lsgkm_model(model_path)
-        query = one_hot_encode("ACGT").unsqueeze(0)
+        query = one_hot_encode("ACGT")[np.newaxis]
 
-        # Manually compute: K(query, sv_i) * coef_i summed, then + bias
         kernel = DirectGkmKernel(l=3, k=2, normalize=True, include_rc=True)
         svs = model.support_sequences
         K = kernel.pairwise(query, svs)  # [1, 3]
         coefs = model.coefficients
-        manual_score = (K * coefs).sum(dim=1, keepdim=True) + model._bias
+        manual_score = (K * coefs).sum(axis=1, keepdims=True) + model.bias
 
         model_score = model(query)
-        assert torch.allclose(model_score, manual_score, atol=1e-6)
+        np.testing.assert_allclose(model_score, manual_score, atol=1e-6)
 
 
 class TestLoadEstTruncModel:
@@ -169,10 +168,10 @@ class TestLoadEstTruncModel:
             -0.3 TGCA
         """))
         model = load_lsgkm_model(p)
-        query = one_hot_encode("ACGT").unsqueeze(0)
+        query = one_hot_encode("ACGT")[np.newaxis]
         score = model(query)
         assert score.shape == (1, 1)
-        assert torch.isfinite(score).all()
+        assert np.isfinite(score).all()
 
 
 class TestLoadModelErrors:

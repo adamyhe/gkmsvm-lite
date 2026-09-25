@@ -1,8 +1,8 @@
 """Tests for the classic gkmSVM model importer."""
 import random
 
+import numpy as np
 import pytest
-import torch
 
 from gkmsvm.codec import one_hot_encode
 from gkmsvm.importers.classic import load_classic_model
@@ -116,8 +116,8 @@ class TestClassicImporterEmbedded:
         classic = load_classic_model(classic_path)
         lsgkm = load_lsgkm_model(lsgkm_path)
 
-        x = one_hot_encode(_make_seqs(1, 15, seed=100)[0]).unsqueeze(0)
-        diff = classic(x).item() - lsgkm(x).item()
+        x = one_hot_encode(_make_seqs(1, 15, seed=100)[0])[np.newaxis]
+        diff = float(classic(x).item()) - float(lsgkm(x).item())
         assert diff == pytest.approx(2 * rho, abs=1e-5)
 
     def test_integer_kernel_type(self, tmp_path):
@@ -173,8 +173,8 @@ class TestClassicImporterTwoFile:
         embedded = load_classic_model(embedded_path)
         twofile = load_classic_model(model_path, svseq_path=svseq_path)
 
-        x = one_hot_encode(_make_seqs(1, 15, seed=200)[0]).unsqueeze(0)
-        assert torch.allclose(embedded(x), twofile(x), atol=1e-6)
+        x = one_hot_encode(_make_seqs(1, 15, seed=200)[0])[np.newaxis]
+        np.testing.assert_allclose(embedded(x), twofile(x), atol=1e-6)
 
     def test_alphas_without_sv_marker(self, tmp_path):
         """Alpha file without SV marker (just header + coefficients)."""
@@ -300,9 +300,9 @@ class TestClassicImporterKernelModes:
 
         model = load_classic_model(path)
         assert model.kernel_type == "gkmrbf"
-        x = one_hot_encode(_make_seqs(1, 15, seed=300)[0]).unsqueeze(0)
+        x = one_hot_encode(_make_seqs(1, 15, seed=300)[0])[np.newaxis]
         score = model(x)
-        assert torch.isfinite(score).all()
+        assert np.isfinite(score).all()
 
     def test_kernel_type_4_wgkm(self, tmp_path):
         svs = _make_seqs(3, 11, seed=31)
@@ -324,9 +324,9 @@ class TestClassicImporterKernelModes:
 
         model = load_classic_model(path)
         assert model.kernel_type == "wgkm"
-        x = one_hot_encode(_make_seqs(1, 15, seed=301)[0]).unsqueeze(0)
+        x = one_hot_encode(_make_seqs(1, 15, seed=301)[0])[np.newaxis]
         score = model(x)
-        assert torch.isfinite(score).all()
+        assert np.isfinite(score).all()
 
     def test_kernel_type_5_wgkmrbf(self, tmp_path):
         svs = _make_seqs(3, 11, seed=32)
@@ -349,6 +349,6 @@ class TestClassicImporterKernelModes:
 
         model = load_classic_model(path)
         assert model.kernel_type == "wgkmrbf"
-        x = one_hot_encode(_make_seqs(1, 15, seed=302)[0]).unsqueeze(0)
+        x = one_hot_encode(_make_seqs(1, 15, seed=302)[0])[np.newaxis]
         score = model(x)
-        assert torch.isfinite(score).all()
+        assert np.isfinite(score).all()

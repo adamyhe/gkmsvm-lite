@@ -1,18 +1,15 @@
 from __future__ import annotations
 
-import torch
+import numpy as np
 
+from gkmsvm.backend import get_array_module
 from gkmsvm.codec import reverse_complement
 from gkmsvm.kernels.base import GkmKernel
 
 
-def _center_weights(l: int, M: int, H: float) -> torch.Tensor:
-    """Position weights for center-weighted kernels.
-
-    Positions within M/2 of center get weight 1.0. Beyond that, weight
-    decays as 2^(-distance/H), floored at 0.001.
-    """
-    weights = torch.zeros(l, dtype=torch.float64)
+def _center_weights(l: int, M: int, H: float) -> np.ndarray:
+    """Position weights for center-weighted kernels."""
+    weights = np.zeros(l, dtype=np.float64)
     center = (l - 1) / 2.0
     half_M = M / 2.0
     for i in range(l):
@@ -24,27 +21,23 @@ def _center_weights(l: int, M: int, H: float) -> torch.Tensor:
     return weights
 
 
-def _elementary_symmetric_k(weights: torch.Tensor, k: int) -> float:
+def _elementary_symmetric_k(weights: np.ndarray, k: int) -> float:
     """k-th elementary symmetric polynomial of weights via DP."""
     n = len(weights)
-    dp = torch.zeros(k + 1, dtype=torch.float64)
+    dp = np.zeros(k + 1, dtype=np.float64)
     dp[0] = 1.0
     for i in range(n):
         for j in range(min(i + 1, k), 0, -1):
             dp[j] = dp[j] + weights[i] * dp[j - 1]
-    return dp[k].item()
+    return float(dp[k])
 
 
 def _weighted_kernel_from_matches(
-    matches: torch.Tensor,
-    pos_weights: torch.Tensor,
+    matches: np.ndarray,
+    pos_weights: np.ndarray,
     k: int,
-) -> torch.Tensor:
+) -> np.ndarray:
     """Compute weighted gapped k-mer kernel from per-position matches.
-
-    For each element in the batch dimensions, computes the k-th elementary
-    symmetric polynomial of (w_p * match_p) for p in 0..l-1, then sums
-    over all window pairs.
 
     Args:
         matches: [..., W1, W2, l] per-position match indicators.
@@ -52,35 +45,28 @@ def _weighted_kernel_from_matches(
         k: number of informative positions.
 
     Returns:
-        [...] tensor with window and position dimensions reduced.
+        [...] array with window and position dimensions reduced.
     """
+    xp = get_array_module(matches)
     weighted = matches * pos_weights
     l = matches.shape[-1]
     batch_shape = matches.shape[:-1]
 
-    dp = matches.new_zeros(*batch_shape, k + 1)
+    dp = xp.zeros((*batch_shape, k + 1), dtype=matches.dtype)
     dp[..., 0] = 1.0
     for p in range(l):
         v = weighted[..., p]
         for j in range(min(p + 1, k), 0, -1):
             dp[..., j] = dp[..., j] + v * dp[..., j - 1]
 
-    return dp[..., k].sum(dim=(-2, -1))
+    return dp[..., k].sum(axis=(-2, -1))
 
 
 class CenterWeightedGkmKernel(GkmKernel):
     """Center-weighted gapped k-mer kernel (-t 4 / wgkm).
 
     Positions near the center of the l-mer window contribute more to
-    the kernel than positions at the edges. Each gapped k-mer with
-    informative positions {p1,...,pk} has weight prod(w[pi]).
-
-    Uses per-position match computation with an elementary symmetric
-    polynomial DP to compute exact position-weighted kernel values.
-
-    Parameters M and H control the weight profile:
-    - M: number of fully-weighted center positions
-    - H: half-life for exponential decay beyond the center region
+    the kernel than positions at the edges.
     """
 
     def __init__(
@@ -99,39 +85,54 @@ class CenterWeightedGkmKernel(GkmKernel):
         self._pos_weights = _center_weights(l, M, H)
 
     def _per_position_matches(
-        self, x: torch.Tensor, y: torch.Tensor
-    ) -> torch.Tensor:
+        self, x: np.ndarray, y: np.ndarray
+    ) -> np.ndarray:
         """Compute per-position match indicators between all window pairs.
-
-        Args:
-            x: [B, 4, Lx] one-hot sequences.
-            y: [S, 4, Ly] one-hot sequences.
 
         Returns:
             [B, S, Wx, Wy, l] binary match indicators.
         """
-        wx = x.unfold(2, self.l, 1)  # [B, 4, Wx, l]
-        wy = y.unfold(2, self.l, 1)  # [S, 4, Wy, l]
-        wx = wx.permute(0, 2, 3, 1)  # [B, Wx, l, 4]
-        wy = wy.permute(0, 2, 3, 1)  # [S, Wy, l, 4]
-        matches = torch.einsum("bplc,sqlc->bspql", wx, wy)
-        return matches
+        xp = get_array_module(x)
+        B, C, Lx = x.shape
+        S, _, Ly = y.shape
+        Wx = Lx - self.l + 1
+        Wy = Ly - self.l + 1
 
-    def _per_position_self_matches(self, x: torch.Tensor) -> torch.Tensor:
+        # Sliding windows: [B, 4, Wx, l] -> [B, Wx, l, 4]
+        sx = x.strides
+        wx = xp.lib.stride_tricks.as_strided(
+            x, shape=(B, C, Wx, self.l), strides=(sx[0], sx[1], sx[2], sx[2])
+        )
+        wx = xp.ascontiguousarray(wx.transpose(0, 2, 3, 1))
+
+        sy = y.strides
+        wy = xp.lib.stride_tricks.as_strided(
+            y, shape=(S, C, Wy, self.l), strides=(sy[0], sy[1], sy[2], sy[2])
+        )
+        wy = xp.ascontiguousarray(wy.transpose(0, 2, 3, 1))
+
+        return xp.einsum("bplc,sqlc->bspql", wx, wy)
+
+    def _per_position_self_matches(self, x: np.ndarray) -> np.ndarray:
         """Compute per-position match indicators for self-kernel.
-
-        Args:
-            x: [B, 4, L] one-hot sequences.
 
         Returns:
             [B, W, W, l] binary match indicators.
         """
-        wx = x.unfold(2, self.l, 1).permute(0, 2, 3, 1)  # [B, W, l, 4]
-        matches = torch.einsum("bplc,bqlc->bpql", wx, wx)
-        return matches
+        xp = get_array_module(x)
+        B, C, L = x.shape
+        W = L - self.l + 1
 
-    def _raw_pairwise(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        pw = self._pos_weights.to(device=x.device, dtype=x.dtype)
+        sx = x.strides
+        wx = xp.lib.stride_tricks.as_strided(
+            x, shape=(B, C, W, self.l), strides=(sx[0], sx[1], sx[2], sx[2])
+        )
+        wx = xp.ascontiguousarray(wx.transpose(0, 2, 3, 1))  # [B, W, l, 4]
+        return xp.einsum("bplc,bqlc->bpql", wx, wx)
+
+    def _raw_pairwise(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        xp = get_array_module(x)
+        pw = xp.asarray(self._pos_weights).astype(x.dtype)
         matches = self._per_position_matches(x, y)
         result = _weighted_kernel_from_matches(matches, pw, self.k)
 
@@ -143,37 +144,46 @@ class CenterWeightedGkmKernel(GkmKernel):
         return result
 
     def _raw_diagonal(
-        self, x: torch.Tensor, *, chunk_size: int | None = None
-    ) -> torch.Tensor:
+        self, x: np.ndarray, *, chunk_size: int | None = None
+    ) -> np.ndarray:
+        xp = get_array_module(x)
         B = x.shape[0]
         if chunk_size is not None and chunk_size < B:
-            result = torch.empty(B, dtype=x.dtype, device=x.device)
+            result = xp.empty(B, dtype=x.dtype)
             for start in range(0, B, chunk_size):
                 end = min(start + chunk_size, B)
                 result[start:end] = self._raw_diagonal(x[start:end])
             return result
 
-        pw = self._pos_weights.to(device=x.device, dtype=x.dtype)
+        pw = xp.asarray(self._pos_weights).astype(x.dtype)
         matches = self._per_position_self_matches(x)
         result = _weighted_kernel_from_matches(matches, pw, self.k)
 
         if self.include_rc:
             x_rc = reverse_complement(x)
-            wx = x.unfold(2, self.l, 1).permute(0, 2, 3, 1)
-            wx_rc = x_rc.unfold(2, self.l, 1).permute(0, 2, 3, 1)
-            rc_matches = torch.einsum("bplc,bqlc->bpql", wx, wx_rc)
+
+            sx = x.strides
+            B, C, L = x.shape
+            W = L - self.l + 1
+            wx = xp.lib.stride_tricks.as_strided(
+                x, shape=(B, C, W, self.l), strides=(sx[0], sx[1], sx[2], sx[2])
+            )
+            wx = xp.ascontiguousarray(wx.transpose(0, 2, 3, 1))
+
+            sxr = x_rc.strides
+            wx_rc = xp.lib.stride_tricks.as_strided(
+                x_rc, shape=(B, C, W, self.l), strides=(sxr[0], sxr[1], sxr[2], sxr[2])
+            )
+            wx_rc = xp.ascontiguousarray(wx_rc.transpose(0, 2, 3, 1))
+
+            rc_matches = xp.einsum("bplc,bqlc->bpql", wx, wx_rc)
             result = result + _weighted_kernel_from_matches(rc_matches, pw, self.k)
 
         return result
 
 
 class CenterWeightedRbfGkmKernel(GkmKernel):
-    """Center-weighted RBF gapped k-mer kernel (-t 5 / wgkmrbf).
-
-    Combines center-weighted position importance with RBF distance
-    transformation. Uses the center-weighted kernel as the base for
-    computing squared distances, then applies exp(-gamma * dist²).
-    """
+    """Center-weighted RBF gapped k-mer kernel (-t 5 / wgkmrbf)."""
 
     def __init__(
         self,
@@ -194,15 +204,17 @@ class CenterWeightedRbfGkmKernel(GkmKernel):
             l, k, M=M, H=H, normalize=False, include_rc=include_rc
         )
 
-    def _raw_pairwise(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    def _raw_pairwise(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        xp = get_array_module(x)
         K_xy = self._base._raw_pairwise(x, y)
         K_xx = self._base._raw_diagonal(x)
         cs = 1000 if y.shape[0] > self._DIAG_CHUNK_THRESHOLD else None
         K_yy = self._base._raw_diagonal(y, chunk_size=cs)
-        dist_sq = K_xx.unsqueeze(1) + K_yy.unsqueeze(0) - 2 * K_xy
-        return torch.exp(-self.gamma * torch.clamp(dist_sq, min=0))
+        dist_sq = K_xx[:, None] + K_yy[None, :] - 2 * K_xy
+        return xp.exp(-self.gamma * xp.clip(dist_sq, 0, None))
 
     def _raw_diagonal(
-        self, x: torch.Tensor, *, chunk_size: int | None = None
-    ) -> torch.Tensor:
-        return torch.ones(x.shape[0], dtype=x.dtype, device=x.device)
+        self, x: np.ndarray, *, chunk_size: int | None = None
+    ) -> np.ndarray:
+        xp = get_array_module(x)
+        return xp.ones(x.shape[0], dtype=x.dtype)
