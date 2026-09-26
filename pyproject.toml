@@ -16,6 +16,7 @@ dependencies = [
     "numpy",
     "numba>=0.57",
     "tqdm",
+    "libsvm-official>=3.30",
 ]
 
 [project.optional-dependencies]

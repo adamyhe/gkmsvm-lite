@@ -191,6 +191,33 @@ class GkmSVM:
         self._on_gpu = False
         return self
 
+    def save(self, path: str, *, format: str | None = None) -> None:
+        """Save model to disk.
+
+        Format is auto-detected from extension unless overridden:
+            - ``.npz`` — fast native format
+            - ``.txt``, ``.txt.gz`` — LS-GKM text format (interop)
+
+        Args:
+            path: Output file path.
+            format: ``"npz"`` or ``"lsgkm"``. Auto-detected if None.
+        """
+        from gkmsvm.serialization import save_lsgkm, save_npz
+
+        if format is None:
+            name = str(path).lower()
+            if name.endswith(".npz"):
+                format = "npz"
+            else:
+                format = "lsgkm"
+
+        if format == "npz":
+            save_npz(self, path)
+        elif format == "lsgkm":
+            save_lsgkm(self, path)
+        else:
+            raise ValueError(f"Unknown format {format!r}. Use 'npz' or 'lsgkm'.")
+
     def _get_sv_diag(self) -> np.ndarray:
         sv = self.support_sequences
         if self._cached_sv_diag is not None:

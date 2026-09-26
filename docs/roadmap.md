@@ -34,8 +34,15 @@
 - [x] Packed SV window caching (CPU + GPU, eliminates redundant packing)
 - [x] tqdm progress bars for inference, ISM, GkmExplain
 - [x] dsQTL benchmark replication (AP=0.19, r=0.73, GPU 337 seq/s, CPU 28 seq/s at 19bp)
-- [x] 215 tests passing
+- [x] Training via sklearn SVC with precomputed gkm kernel matrix
+- [x] Tiled Gram matrix computation with symmetry exploitation
+- [x] Model serialization: npz (native) and LS-GKM text (interop) formats
+- [x] `GkmSVM.save()` with auto-format detection
+- [x] `load_model()` unified loader (npz + LS-GKM auto-detect)
+- [x] Column-cached SMO solver (`solver="smo"`) — LRU-cached kernel columns, no N×N Gram matrix, scales to ATAC/ChIP-scale (80K+ sequences)
+- [x] `train_gkmsvm()` solver selection: `auto` / `smo` / `sklearn`
+- [x] 255 tests passing
 
 ## Next
 
-- [ ] **Training** — C-SVM solver with kernel-capable optimizer and cache discipline
+- [ ] **CLI** — command-line interface for training, scoring, and variant effect prediction
