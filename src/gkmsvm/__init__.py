@@ -18,7 +18,7 @@ from gkmsvm.importers.lsgkm import load_lsgkm_model
 from gkmsvm.ism import ism
 from gkmsvm.serialization import load_model
 from gkmsvm.svm import KERNEL_ALIASES, GkmSVM, resolve_kernel_type
-from gkmsvm.train import train_gkmsvm
+from gkmsvm.train import train_gkmsvm, train_gkmsvr
 
 __all__ = [
     "one_hot_encode",
@@ -39,5 +39,6 @@ __all__ = [
     "ism",
     "gkmexplain",
     "train_gkmsvm",
+    "train_gkmsvr",
     "load_model",
 ]

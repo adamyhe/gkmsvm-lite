@@ -267,3 +267,123 @@ class TestSmoSolve:
                 ["ACGT" * 5] * 5, ["TGCA" * 5] * 5,
                 kernel_type="direct", l=7, k=5, solver="bad",
             )
+
+
+class TestTrainGkmsvr:
+    def test_svr_basic(self):
+        """SVR trains and produces predictions correlated with labels."""
+        from gkmsvm import train_gkmsvr
+
+        rng = np.random.default_rng(42)
+        n = 40
+        seqs = []
+        labels = []
+        for i in range(n):
+            a_frac = i / (n - 1)
+            probs = [a_frac * 0.6 + 0.1, 0.1, 0.1, (1 - a_frac) * 0.6 + 0.1]
+            idx = rng.choice(4, size=20, p=probs)
+            x = np.zeros((4, 20), dtype=np.float64)
+            x[idx, np.arange(20)] = 1.0
+            seqs.append(x)
+            labels.append(float(i) / n)
+
+        X = np.stack(seqs)
+        model = train_gkmsvr(
+            X, labels, kernel_type="direct", l=7, k=5, C=10.0, epsilon=0.05,
+        )
+
+        assert model.num_support_vectors > 0
+        preds = np.array([model(X[i:i+1]).item() for i in range(n)])
+        corr = np.corrcoef(preds, labels)[0, 1]
+        assert corr > 0.5
+
+    def test_svr_string_input(self):
+        """SVR accepts string sequences."""
+        from gkmsvm import train_gkmsvr
+
+        seqs = [
+            "AAAAAAAAAAAAAAACCCCC",
+            "AAAAAAAAAAAAAACCCCCG",
+            "AAAAAAAAAAAAACCCCGGG",
+            "TTTTTTTTTTTTTTTGGGGG",
+            "TTTTTTTTTTTTTGGGGGGC",
+            "TTTTTTTTTTTTGGGGGCCC",
+        ]
+        labels = [1.0, 0.8, 0.6, -1.0, -0.8, -0.6]
+
+        model = train_gkmsvr(
+            seqs, labels, kernel_type="direct", l=7, k=5, C=1.0,
+        )
+        assert model.num_support_vectors > 0
+
+    def test_svr_label_mismatch_raises(self):
+        """Mismatched sequence/label counts raise ValueError."""
+        from gkmsvm import train_gkmsvr
+
+        seqs = ["ACGT" * 5] * 10
+        labels = [1.0] * 5
+
+        with pytest.raises(ValueError, match="must match"):
+            train_gkmsvr(seqs, labels, kernel_type="direct", l=7, k=5)
+
+    def test_svr_epsilon_effect(self):
+        """Larger epsilon produces fewer support vectors (wider tube)."""
+        from gkmsvm import train_gkmsvr
+
+        rng = np.random.default_rng(99)
+        seqs = _biased_seqs(30, 20, rng, bias_base=0)
+        labels = np.linspace(0, 1, 30).tolist()
+
+        model_tight = train_gkmsvr(
+            seqs, labels, kernel_type="direct", l=7, k=5,
+            C=10.0, epsilon=0.01,
+        )
+        model_wide = train_gkmsvr(
+            seqs, labels, kernel_type="direct", l=7, k=5,
+            C=10.0, epsilon=0.3,
+        )
+        assert model_tight.num_support_vectors >= model_wide.num_support_vectors
+
+    def test_svr_save_load_roundtrip(self):
+        """SVR model can be saved and loaded with identical predictions."""
+        import tempfile
+
+        from gkmsvm import train_gkmsvr
+        from gkmsvm.serialization import load_model
+
+        seqs = [
+            "AAAAAAAAAAAAAAACCCCC",
+            "AAAAAAAAAAAAAACCCCCG",
+            "TTTTTTTTTTTTTTTGGGGG",
+            "TTTTTTTTTTTTTGGGGGGC",
+        ]
+        labels = [1.0, 0.8, -1.0, -0.8]
+
+        model = train_gkmsvr(
+            seqs, labels, kernel_type="direct", l=7, k=5, C=1.0,
+        )
+
+        from gkmsvm.codec import one_hot_encode
+        test_x = one_hot_encode("AAAAAAAAAAAAAAACCCCC")[None, ...]
+        score_before = model(test_x).item()
+
+        with tempfile.NamedTemporaryFile(suffix=".npz", delete=False) as f:
+            model.save(f.name)
+            loaded = load_model(f.name)
+
+        score_after = loaded(test_x).item()
+        assert score_before == pytest.approx(score_after, abs=1e-10)
+
+    def test_svr_esttrunc(self):
+        """SVR works with esttrunc kernel."""
+        from gkmsvm import train_gkmsvr
+
+        rng = np.random.default_rng(42)
+        seqs = _random_seqs(20, 20, rng)
+        labels = np.linspace(-1, 1, 20).tolist()
+
+        model = train_gkmsvr(
+            seqs, labels, kernel_type="estimated", l=7, k=5, d=3,
+            C=1.0, epsilon=0.1,
+        )
+        assert model.num_support_vectors > 0

@@ -1,4 +1,4 @@
-"""Training: fit a C-SVM with gapped k-mer kernel."""
+"""Training: fit gkm-SVM (classification) and gkm-SVR (regression)."""
 
 from __future__ import annotations
 
@@ -7,6 +7,11 @@ import numpy as np
 from gkmsvm.backend import get_array_module
 from gkmsvm.codec import one_hot_encode
 from gkmsvm.svm import KERNEL_BUILDERS, GkmSVM, resolve_kernel_type
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 
 def train_gkmsvm(
@@ -30,7 +35,7 @@ def train_gkmsvm(
     gram_chunk_size: int = 1000,
     verbose: bool = False,
 ) -> GkmSVM:
-    """Train a gapped k-mer SVM on positive and negative sequences.
+    """Train a gapped k-mer SVM classifier on positive and negative sequences.
 
     Args:
         pos_seqs: Positive sequences — list of DNA strings or [N+, 4, L] array.
@@ -62,19 +67,9 @@ def train_gkmsvm(
     X = np.concatenate([X_pos, X_neg], axis=0)
     y = np.array([1] * X_pos.shape[0] + [-1] * X_neg.shape[0])
 
-    kernel_type = resolve_kernel_type(kernel_type)
-    kernel_params = {"L": l, "k": k, "include_rc": include_rc}
-    if kernel_type in ("gkm_esttrunc", "gkm_estfull", "gkmrbf"):
-        kernel_params["d"] = d
-    if kernel_type in ("gkmrbf", "wgkmrbf"):
-        kernel_params["gamma"] = gamma
-    if kernel_type in ("wgkm", "wgkmrbf"):
-        if M is None or H is None:
-            raise ValueError("M and H are required for weighted kernels (-t 4/-t 5)")
-        kernel_params["M"] = M
-        kernel_params["H"] = H
-
-    kernel = KERNEL_BUILDERS[kernel_type](kernel_params)
+    kernel, kernel_type, kernel_params = _build_kernel(
+        kernel_type, l, k, d, gamma, M, H, include_rc,
+    )
 
     if solver == "auto":
         use_smo = not _gram_fits_in_memory(X.shape[0], get_array_module(X))
@@ -96,17 +91,104 @@ def train_gkmsvm(
             cache_size=cache_size, tol=tol, max_iter=max_iter,
             sv_chunk_size=sv_chunk_size, verbose=verbose,
         )
-    return _train_libsvm(
-        kernel, X, y, C, kernel_type, kernel_params,
+    return _fit_libsvm(
+        kernel, X, y, f"-s 0 -c {C}",
+        kernel_type, kernel_params,
         gram_chunk_size=gram_chunk_size,
         sv_chunk_size=sv_chunk_size, verbose=verbose,
     )
 
 
-def _train_libsvm(
-    kernel, X, y, C, kernel_type, kernel_params, *,
+def train_gkmsvr(
+    sequences,
+    labels,
+    *,
+    kernel_type: str | int = "estimated",
+    l: int = 11,
+    k: int = 7,
+    d: int = 3,
+    C: float = 1.0,
+    epsilon: float = 0.1,
+    gamma: float = 1.0,
+    M: int | None = None,
+    H: float | None = None,
+    include_rc: bool = True,
+    sv_chunk_size: int | None = None,
+    gram_chunk_size: int = 1000,
+    verbose: bool = False,
+) -> GkmSVM:
+    """Train a gapped k-mer SVR (epsilon-SVR) for regression.
+
+    Predicts continuous values from DNA sequences using the gapped
+    k-mer kernel with LIBSVM's epsilon-SVR solver.
+
+    Args:
+        sequences: DNA sequences — list of strings or [N, 4, L] array.
+        labels: [N] continuous target values (list or array).
+        kernel_type: Kernel mode — alias, internal name, or -t integer.
+        l: L-mer window length.
+        k: Number of informative positions.
+        d: Maximum mismatch depth.
+        C: Regularization parameter.
+        epsilon: Epsilon-tube width — errors within ±epsilon are ignored.
+        gamma: RBF gamma (for -t 3, -t 5).
+        M: Center-weight window size (for -t 4, -t 5).
+        H: Center-weight decay (for -t 4, -t 5).
+        include_rc: Include reverse complement in kernel.
+        sv_chunk_size: Chunk size for inference on the returned model.
+        gram_chunk_size: Tile size for Gram matrix computation.
+        verbose: Show progress.
+
+    Returns:
+        A trained GkmSVM model. Scores are predicted continuous values.
+    """
+    X = _to_onehot(sequences)
+    y = np.asarray(labels, dtype=np.float64)
+    if y.shape[0] != X.shape[0]:
+        raise ValueError(
+            f"Number of labels ({y.shape[0]}) must match "
+            f"number of sequences ({X.shape[0]})"
+        )
+
+    kernel, kernel_type, kernel_params = _build_kernel(
+        kernel_type, l, k, d, gamma, M, H, include_rc,
+    )
+
+    return _fit_libsvm(
+        kernel, X, y, f"-s 3 -c {C} -p {epsilon}",
+        kernel_type, kernel_params,
+        gram_chunk_size=gram_chunk_size,
+        sv_chunk_size=sv_chunk_size, verbose=verbose,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _build_kernel(kernel_type, l, k, d, gamma, M, H, include_rc):
+    """Resolve kernel type, build params dict, instantiate kernel."""
+    kernel_type = resolve_kernel_type(kernel_type)
+    kernel_params = {"L": l, "k": k, "include_rc": include_rc}
+    if kernel_type in ("gkm_esttrunc", "gkm_estfull", "gkmrbf"):
+        kernel_params["d"] = d
+    if kernel_type in ("gkmrbf", "wgkmrbf"):
+        kernel_params["gamma"] = gamma
+    if kernel_type in ("wgkm", "wgkmrbf"):
+        if M is None or H is None:
+            raise ValueError("M and H are required for weighted kernels (-t 4/-t 5)")
+        kernel_params["M"] = M
+        kernel_params["H"] = H
+    kernel = KERNEL_BUILDERS[kernel_type](kernel_params)
+    return kernel, kernel_type, kernel_params
+
+
+def _fit_libsvm(
+    kernel, X, y, libsvm_opts, kernel_type, kernel_params, *,
     gram_chunk_size, sv_chunk_size, verbose,
 ) -> GkmSVM:
+    """Compute Gram matrix and fit with LIBSVM's C solver."""
     from libsvm.svmutil import svm_train
 
     from gkmsvm.gram import compute_gram
@@ -123,11 +205,11 @@ def _train_libsvm(
     quiet = "" if verbose else " -q"
     if verbose:
         print("Fitting SVM...")
-    model = svm_train(y.tolist(), x_train, f"-s 0 -t 4 -c {C}{quiet}")
+    model = svm_train(y.tolist(), x_train, f"-t 4 {libsvm_opts}{quiet}")
 
     n_sv = model.l
     sv_indices = np.array(
-        [model.sv_indices[i] - 1 for i in range(n_sv)]
+        [model.sv_indices[i] - 1 for i in range(n_sv)], dtype=np.intp,
     )
     coefficients = np.array(
         [model.sv_coef[0][i] for i in range(n_sv)],
@@ -136,12 +218,7 @@ def _train_libsvm(
     bias = float(-model.rho[0])
 
     if verbose:
-        n_pos = int((coefficients > 0).sum())
-        n_neg = int((coefficients <= 0).sum())
-        print(
-            f"Training complete: {n_sv} support vectors "
-            f"({n_pos} pos, {n_neg} neg)"
-        )
+        print(f"Training complete: {n_sv} support vectors")
 
     return GkmSVM(
         support_sequences=X[sv_indices],
