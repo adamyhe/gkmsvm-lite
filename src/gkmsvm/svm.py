@@ -248,11 +248,22 @@ class GkmSVM:
                 self._sv_rc_idx_windows = kernel.base_index_windows(
                     reverse_complement(self.support_sequences)
                 )
-            if hasattr(kernel, '_min_matches') and not is_mlx(self._sv_idx_windows):
+            if hasattr(kernel, '_min_matches'):
                 from gkmsvm.kernels.direct import (
                     _pack_windows_cpu, _pack_windows_uint32,
                 )
-                if self._on_gpu:
+                if is_mlx(self._sv_idx_windows):
+                    xp = get_array_module(self._sv_idx_windows)
+                    self._sv_packed_t = xp.asarray(_pack_windows_cpu(
+                        np.ascontiguousarray(to_cpu(self._sv_idx_windows))
+                    ))
+                    if self._sv_rc_idx_windows is not None:
+                        self._sv_rc_packed_t = xp.asarray(_pack_windows_cpu(
+                            np.ascontiguousarray(
+                                to_cpu(self._sv_rc_idx_windows)
+                            )
+                        ))
+                elif self._on_gpu:
                     xp = get_array_module(self._sv_idx_windows)
                     packed = _pack_windows_uint32(self._sv_idx_windows, xp)
                     self._sv_packed_t = xp.ascontiguousarray(packed.T)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from gkmsvm.backend import get_array_module
+from gkmsvm.backend import get_array_module, to_cpu
 from gkmsvm.codec import reverse_complement
 from gkmsvm.kernels.base import GkmKernel
 
@@ -44,7 +44,7 @@ def compute_gram(
 
     use_fast = hasattr(kernel, "pairwise_from_indices")
 
-    gram = xp.zeros((N, M), dtype=np.float64)
+    gram = np.zeros((N, M), dtype=np.float64)
 
     row_ranges = list(range(0, N, chunk_size))
     col_ranges = list(range(0, M, chunk_size))
@@ -86,10 +86,11 @@ def compute_gram(
         else:
             tile = kernel.pairwise(X[r_start:r_end], Y[c_start:c_end])
 
-        gram[r_start:r_end, c_start:c_end] = tile
+        tile_np = to_cpu(tile)
+        gram[r_start:r_end, c_start:c_end] = tile_np
 
         if symmetric and r_start != c_start:
-            gram[c_start:c_end, r_start:r_end] = tile.T
+            gram[c_start:c_end, r_start:r_end] = tile_np.T
 
     return gram
 
