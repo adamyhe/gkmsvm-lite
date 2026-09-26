@@ -44,7 +44,9 @@ Two computation paths, selected automatically:
 
 **Packed uint32 path** (default forward pass, ISM): Each l-mer window is packed into a uint32 (2 bits per base). Match counting uses XOR + popcount on the packed representation instead of per-base comparisons. See "Packed uint32 comparison" below for details.
 
-**Float one-hot path** (GkmExplain, weighted kernels): Window match counts via matmul on flattened one-hot windows (`[B, W, 4*l]`). Both NumPy and CuPy use the same code path since CuPy mirrors NumPy's fancy indexing.
+**Float one-hot path** (weighted kernels): Window match counts via matmul on flattened one-hot windows (`[B, W, 4*l]`). Both NumPy and CuPy use the same code path since CuPy mirrors NumPy's fancy indexing.
+
+**GkmExplain sparse path**: Uses packed uint32 pre-filtering to identify the ~0.12% of window pairs with ≤ d mismatches (same min-matches skip as the forward pass), then decomposes only those pairs per-position. Per-position base identity is extracted directly from packed uint32 via bit shifts (`(packed >> 2k) & 3`), eliminating all float intermediate arrays. CPU: fused Numba `@njit(parallel=True)` kernel parallelized over (batch, SV) pairs. GPU: fused CuPy RawKernel with one thread per (b, s) pair — coalesced SV reads via transposed `[Wy, S]` layout, coalesced output writes with S as the last dimension, shared-memory caching of weight tables and query packed windows, no atomics needed (each thread owns its output slice). Falls back to the dense float path for kernels without a min-matches threshold (weighted kernels).
 
 ## Fused pairwise kernels
 

@@ -62,7 +62,7 @@ src/gkmsvm/
 
 ## Key implementation details
 
-- Forward pass and ISM use the packed uint32 path (XOR + popcount). GkmExplain and weighted kernels use the float one-hot path.
+- Forward pass and ISM use the packed uint32 path (XOR + popcount). GkmExplain uses packed pre-filter + bit extraction from packed uint32 (no float intermediates). CPU: fused Numba kernel. GPU: fused CuPy RawKernel with coalesced access and shared memory. Weighted kernels use the float one-hot path.
 - Packed SV windows are cached on the model for both CPU and GPU. First call packs; subsequent calls reuse.
 - Min-matches skip: for esttrunc l=11 k=7 d=3, `min_matches=8`. 99.88% of window pairs skipped.
 - CPU inner loop: Numba `@njit(parallel=True, fastmath=True)`. GPU inner loop: CuPy RawKernel with shared-memory caching.
