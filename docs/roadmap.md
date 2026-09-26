@@ -28,6 +28,12 @@
 - [x] Pre-cached SV diagonal and int8 index windows
 - [x] Descriptive kernel aliases (`direct`, `estimated`, `rbf`, `weighted`, etc.)
 - [x] `resolve_kernel_type()` for alias/integer resolution
+- [x] Packed uint32 comparison (XOR + popcount, ~3x CPU / ~9x GPU over int8 loop)
+- [x] Min-matches skip (mismatch table sparsity, 99.88% skip for esttrunc default)
+- [x] Shared-memory query caching in CUDA kernel
+- [x] Packed SV window caching (CPU + GPU, eliminates redundant packing)
+- [x] tqdm progress bars for inference, ISM, GkmExplain
+- [x] dsQTL benchmark replication (AP=0.19, r=0.73, GPU 337 seq/s, CPU 28 seq/s at 19bp)
 - [x] 215 tests passing
 
 ## Next

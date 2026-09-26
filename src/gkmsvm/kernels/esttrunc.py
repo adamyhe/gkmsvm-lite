@@ -34,6 +34,7 @@ class EstTruncGkmKernel(DirectGkmKernel):
         if d < l:
             table[d + 1 :] = 0.0
         self._mismatch_table = table
+        self._min_matches = self._get_min_matches()
 
 
 def _build_estlmer_table(l: int, k: int, truncate: bool) -> np.ndarray:

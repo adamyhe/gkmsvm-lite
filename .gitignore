@@ -1,3 +1,6 @@
+# benchmarking
+benchmarks/data/
+
 # OS
 .DS_Store
 Thumbs.db

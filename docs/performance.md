@@ -6,7 +6,7 @@ Fused Numba kernels (`@njit(parallel=True, fastmath=True)`) combine match-count,
 
 Two kernel paths:
 - **Float path** (`pairwise_from_windows`): flattened one-hot dot products. Used by GkmExplain and weighted kernels.
-- **Int8 index path** (`pairwise_from_indices`): base-index comparison. 4x fewer ops, 16x less memory. Used by default forward pass and ISM.
+- **Packed uint32 path** (`pairwise_from_indices`): base indices packed to uint32, match counting via XOR + popcount. ~3x faster than the previous int8 loop. Used by default forward pass and ISM.
 
 Numba's threading layer is pinned to `workqueue` on import to avoid OpenMP conflicts.
 
@@ -14,7 +14,8 @@ Numba's threading layer is pinned to `workqueue` on import to avoid OpenMP confl
 
 CuPy RawKernel CUDA code with:
 - **Coalesced memory access**: SV int8 windows are transposed from `[S, Wy, l]` to `[l, Wy, S]` so adjacent threads (consecutive `s` values) read adjacent bytes.
-- **Shared-memory table caching**: the mismatch weight table is loaded into shared memory once per thread block.
+- **Shared-memory table + bx caching**: the mismatch weight table and query sequence windows are loaded into shared memory once per thread block. For S >> blockDim (typical), all threads in a block share the same query index, eliminating redundant global reads of query data.
+- **Min-matches skip**: window pairs below `min_matches` (derived from mismatch table sparsity) skip the table lookup entirely. For esttrunc l=11 k=7 d=3, 99.88% of random window pairs are skipped.
 - **`--use_fast_math`**: enables fast math intrinsics and implicit loop unrolling.
 
 GPU uses float32 accumulation for the float path. The int8 path accumulates in float64 (same as CPU). Score differences between CPU and GPU are <3e-3 due to the float32 diagonal computation on GPU.
@@ -27,13 +28,14 @@ GPU uses float32 accumulation for the float path. The int8 path accumulates in f
 
 When a single base changes, only ~l of the W = L - l + 1 windows are affected. ISM computes the delta from affected windows only, rather than recomputing the full kernel. Variable-length affected windows are padded with sentinel value -1 (never matches any base, so table[l] = C(0,k) = 0).
 
-## Throughput (ENCODE ENCFF579AOX, 72K SVs, 300bp, RTX 3080)
+## Throughput (ENCODE ENCFF579AOX, 72K SVs, RTX 3080)
 
-| Implementation | seq/s |
-|---|---|
-| gkmsvm-lite GPU (CuPy) | ~48 |
-| gkmsvm-lite CPU (Numba) | ~15 |
-| LS-GKM C (`gkmpredict`) | ~1.25 |
+| Sequence length | GPU (CuPy) | CPU (Numba) | LS-GKM C |
+|---|---|---|---|
+| 19bp (dsQTL variants) | 336.6 seq/s | 27.7 seq/s | — |
+| 300bp (ENCODE peaks) | ~10 seq/s | ~0.6 seq/s | ~1.25 seq/s |
+
+GPU throughput is measured steady-state (packed SV windows cached on both CPU and GPU). First call includes a one-time packing step. CPU uses all available cores via Numba parallel threading. LS-GKM C is single-threaded.
 
 ## Bottleneck: gkm kernel vs RBF kernel
 
