@@ -15,6 +15,7 @@ authors = [
 dependencies = [
     "numpy",
     "numba>=0.57",
+    "tqdm",
 ]
 
 [project.optional-dependencies]

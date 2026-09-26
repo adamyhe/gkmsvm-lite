@@ -20,6 +20,7 @@ def gkmexplain(
     *,
     mode: int = 0,
     sv_chunk_size: int | None = None,
+    verbose: bool = False,
 ) -> np.ndarray:
     """Compute GkmExplain attribution scores.
 
@@ -28,6 +29,7 @@ def gkmexplain(
         x: [B, 4, L] one-hot encoded sequences.
         mode: 0 = importance scores, 1 = hypothetical importance scores.
         sv_chunk_size: Chunk size for SV processing.
+        verbose: Show tqdm progress bar over SV chunks.
 
     Returns:
         [B, 4, L] attribution scores.
@@ -67,7 +69,11 @@ def gkmexplain(
     result = xp.zeros((B, 4, seqlen), dtype=np.float64)
 
     cs = chunk if chunk is not None else min(S, 2000)
-    for sv_start in range(0, S, cs):
+    sv_iter = range(0, S, cs)
+    if verbose:
+        from tqdm import tqdm
+        sv_iter = tqdm(sv_iter, desc="GkmExplain", total=(S + cs - 1) // cs)
+    for sv_start in sv_iter:
         sv_end = min(sv_start + cs, S)
         sv_c = sv[sv_start:sv_end]
         S_c = sv_end - sv_start

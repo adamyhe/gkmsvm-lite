@@ -87,9 +87,13 @@ GPU: CuPy arrays (optional `[gpu]` extra) + CuPy RawKernel CUDA code. `model.cud
 
 tangermeme interop is vendored — only `extract_loci` (pyfaidx) and FASTA I/O are needed. ledidi requires differentiable models and does not work with gkm-SVMs.
 
-## Int8 index path
+## Packed uint32 comparison
 
-The default pairwise kernel uses int8 base-index comparison instead of float32 one-hot dot products. For window length l=11: 11 int8 comparisons vs 44 float32 multiplications — 4x fewer ops, 16x less memory. SV index windows are cached on the model (`_get_sv_index_windows`). ISM uses this path via `pairwise_from_indices`.
+Each l-mer window is packed into a uint32 (2 bits per base, 22 bits for l=11). Match counting uses XOR + popcount on 2-bit fields instead of l individual byte comparisons. This replaces 11 strided memory reads with a single contiguous uint32 read per window pair. On GPU, the SV array goes from `[l, Wy, S]` int8 (229MB for 72K SVs at 300bp) to `[Wy, S]` uint32 (84MB) — 2.8x memory reduction plus drastically better cache locality. On CPU, ~3x faster than the int8 loop. SV packed windows are cached on the model for both CPU and GPU, avoiding redundant packing on repeated calls.
+
+## Mismatch table sparsity
+
+The mismatch table has zero entries for high-mismatch counts. For esttrunc l=11 k=7 d=3, only m=0..3 are non-zero (min_matches=8). For random DNA, P(match)=0.25, so P(>=8 matches out of 11) ≈ 0.12% — 99.88% of window pairs contribute nothing. Both CPU and GPU paths skip the table lookup for pairs below min_matches. On GPU, shared memory caches the query sequence's packed windows so all threads in a block share a single load from global memory.
 
 ## References
 

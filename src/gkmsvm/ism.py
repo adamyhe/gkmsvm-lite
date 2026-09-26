@@ -22,6 +22,7 @@ def ism(
     x: np.ndarray,
     *,
     sv_chunk_size: int | None = None,
+    verbose: bool = False,
 ) -> np.ndarray:
     """Compute score change for every single-base substitution.
 
@@ -29,16 +30,24 @@ def ism(
         model: A GkmSVM model.
         x: [B, 4, L] one-hot encoded reference sequences.
         sv_chunk_size: Chunk size for SV pairwise computation.
+        verbose: Show tqdm progress bar over sequences.
 
     Returns:
         [B, 4, L] score deltas.
     """
     kernel = model.kernel
     chunk = sv_chunk_size if sv_chunk_size is not None else model.sv_chunk_size
+    fn = _ism_index if hasattr(kernel, "pairwise_from_indices") else _ism_float
 
-    if hasattr(kernel, "pairwise_from_indices"):
-        return _ism_index(model, x, chunk)
-    return _ism_float(model, x, chunk)
+    if verbose and x.shape[0] > 1:
+        from tqdm import tqdm
+        xp = get_array_module(x)
+        results = []
+        for i in tqdm(range(x.shape[0]), desc="ISM"):
+            results.append(fn(model, x[i : i + 1], chunk))
+        return xp.concatenate(results, axis=0)
+
+    return fn(model, x, chunk)
 
 
 # -----------------------------------------------------------------------

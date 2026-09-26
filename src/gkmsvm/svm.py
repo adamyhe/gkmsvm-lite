@@ -156,6 +156,8 @@ class GkmSVM:
         self._cached_sv_diag: np.ndarray | None = None
         self._sv_idx_windows: np.ndarray | None = None
         self._sv_rc_idx_windows: np.ndarray | None = None
+        self._sv_packed_t: np.ndarray | None = None
+        self._sv_rc_packed_t: np.ndarray | None = None
         self._on_gpu = False
 
     @property
@@ -170,6 +172,8 @@ class GkmSVM:
         self._cached_sv_diag = None
         self._sv_idx_windows = None
         self._sv_rc_idx_windows = None
+        self._sv_packed_t = None
+        self._sv_rc_packed_t = None
 
     def cuda(self) -> GkmSVM:
         """Move model arrays to GPU (CuPy)."""
@@ -196,7 +200,10 @@ class GkmSVM:
         return self._cached_sv_diag
 
     def _get_sv_index_windows(self):
-        """Lazily compute and cache int8 base-index windows for SVs (fwd + RC)."""
+        """Lazily compute and cache int8 base-index windows for SVs (fwd + RC).
+
+        On GPU, also caches packed uint32 windows for the CUDA kernel.
+        """
         if self._sv_idx_windows is None:
             kernel = self.kernel
             self._sv_idx_windows = kernel.base_index_windows(
@@ -206,13 +213,37 @@ class GkmSVM:
                 self._sv_rc_idx_windows = kernel.base_index_windows(
                     reverse_complement(self.support_sequences)
                 )
+            if hasattr(kernel, '_min_matches'):
+                from gkmsvm.kernels.direct import (
+                    _pack_windows_cpu, _pack_windows_uint32,
+                )
+                if self._on_gpu:
+                    xp = get_array_module(self._sv_idx_windows)
+                    packed = _pack_windows_uint32(self._sv_idx_windows, xp)
+                    self._sv_packed_t = xp.ascontiguousarray(packed.T)
+                    if self._sv_rc_idx_windows is not None:
+                        packed_rc = _pack_windows_uint32(
+                            self._sv_rc_idx_windows, xp
+                        )
+                        self._sv_rc_packed_t = xp.ascontiguousarray(
+                            packed_rc.T
+                        )
+                else:
+                    self._sv_packed_t = _pack_windows_cpu(
+                        np.ascontiguousarray(self._sv_idx_windows)
+                    )
+                    if self._sv_rc_idx_windows is not None:
+                        self._sv_rc_packed_t = _pack_windows_cpu(
+                            np.ascontiguousarray(self._sv_rc_idx_windows)
+                        )
         return self._sv_idx_windows, self._sv_rc_idx_windows
 
-    def __call__(self, x: np.ndarray) -> np.ndarray:
+    def __call__(self, x: np.ndarray, *, verbose: bool = False) -> np.ndarray:
         """Compute SVM decision values.
 
         Args:
             x: [B, 4, L] one-hot encoded DNA sequences.
+            verbose: Show tqdm progress bar over SV chunks.
 
         Returns:
             [B, 1] uncalibrated decision values.
@@ -230,9 +261,13 @@ class GkmSVM:
         if hasattr(kernel, "pairwise_from_indices") and (chunk is None or chunk >= S):
             sv_idx, sv_rc_idx = self._get_sv_index_windows()
             bx = kernel.base_index_windows(x)
-            raw = kernel.pairwise_from_indices(bx, sv_idx)
+            raw = kernel.pairwise_from_indices(
+                bx, sv_idx, by_packed_t=self._sv_packed_t
+            )
             if kernel.include_rc:
-                raw = raw + kernel.pairwise_from_indices(bx, sv_rc_idx)
+                raw = raw + kernel.pairwise_from_indices(
+                    bx, sv_rc_idx, by_packed_t=self._sv_rc_packed_t
+                )
             raw = raw.astype(x.dtype)
             if do_norm:
                 norm = xp.sqrt(diag_x[:, None] * diag_sv[None, :])
@@ -240,7 +275,11 @@ class GkmSVM:
             scores = (raw * self.coefficients).sum(axis=1, keepdims=True)
         elif chunk is not None and chunk < S:
             scores = xp.zeros((x.shape[0], 1), dtype=x.dtype)
-            for start in range(0, S, chunk):
+            sv_iter = range(0, S, chunk)
+            if verbose:
+                from tqdm import tqdm
+                sv_iter = tqdm(sv_iter, desc="SV chunks", total=(S + chunk - 1) // chunk)
+            for start in sv_iter:
                 end = min(start + chunk, S)
                 raw = kernel._raw_pairwise(
                     x, self.support_sequences[start:end]
@@ -262,14 +301,17 @@ class GkmSVM:
 
         return scores + self.bias
 
-    def score_variants(self, ref: np.ndarray, alt: np.ndarray) -> np.ndarray:
+    def score_variants(
+        self, ref: np.ndarray, alt: np.ndarray, *, verbose: bool = False
+    ) -> np.ndarray:
         """Variant effect scores: score(alt) - score(ref).
 
         Args:
             ref: [B, 4, L] reference sequences.
             alt: [B, 4, L] alternate sequences.
+            verbose: Show tqdm progress bar.
 
         Returns:
             [B, 1] score differences.
         """
-        return self(alt) - self(ref)
+        return self(alt, verbose=verbose) - self(ref, verbose=verbose)
