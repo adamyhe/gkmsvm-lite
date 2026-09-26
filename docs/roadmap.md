@@ -43,5 +43,5 @@
 
 ## Next
 
+- [ ] **Column-cached SMO solver** — compute kernel columns on demand instead of full Gram matrix. Required for ATAC/ChIP-scale training (80K+ sequences where the N×N Gram matrix exceeds RAM). GPU-accelerated kernel column computation via existing packed uint32 kernels.
 - [ ] **CLI** — command-line interface for training, scoring, and variant effect prediction
-- [ ] **Custom SVM solver** — OHD-style GPU solver to replace sklearn for large datasets (50K+)
