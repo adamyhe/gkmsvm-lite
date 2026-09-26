@@ -39,9 +39,10 @@
 - [x] Model serialization: npz (native) and LS-GKM text (interop) formats
 - [x] `GkmSVM.save()` with auto-format detection
 - [x] `load_model()` unified loader (npz + LS-GKM auto-detect)
-- [x] 241 tests passing
+- [x] Column-cached SMO solver (`solver="smo"`) — LRU-cached kernel columns, no N×N Gram matrix, scales to ATAC/ChIP-scale (80K+ sequences)
+- [x] `train_gkmsvm()` solver selection: `auto` / `smo` / `sklearn`
+- [x] 255 tests passing
 
 ## Next
 
-- [ ] **Column-cached SMO solver** — compute kernel columns on demand instead of full Gram matrix. Required for ATAC/ChIP-scale training (80K+ sequences where the N×N Gram matrix exceeds RAM). GPU-accelerated kernel column computation via existing packed uint32 kernels.
 - [ ] **CLI** — command-line interface for training, scoring, and variant effect prediction

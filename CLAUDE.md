@@ -18,6 +18,10 @@ pytest tests/ -k "test_rc"       # pattern match
 src/gkmsvm/
 ├── __init__.py          # public API re-exports
 ├── svm.py               # GkmSVM model, scoring, chunked inference
+├── train.py             # train_gkmsvm() — sklearn or SMO solver
+├── solver.py            # KernelColumnCache, smo_solve() — column-cached SMO
+├── gram.py              # compute_gram() — tiled Gram matrix with symmetry
+├── serialization.py     # save/load npz and LS-GKM text formats
 ├── codec.py             # one-hot encode/decode, RC, validation
 ├── ism.py               # in-silico mutagenesis
 ├── explain.py           # GkmExplain attribution
@@ -61,6 +65,8 @@ src/gkmsvm/
 - Min-matches skip: for esttrunc l=11 k=7 d=3, `min_matches=8`. 99.88% of window pairs skipped.
 - CPU inner loop: Numba `@njit(parallel=True, fastmath=True)`. GPU inner loop: CuPy RawKernel with shared-memory caching.
 - SV diagonal is cached after first computation.
+- Training: `solver="auto"` uses precomputed Gram (sklearn) for N≤20K, column-cached SMO for larger. SMO uses LRU-cached kernel columns — memory is O(cache_size × N) not O(N²).
+- `KernelColumnCache` pre-packs all training windows once, computes single columns via `pairwise_from_indices(bx[1,W,l], by_all)` on cache miss.
 
 ## Gotchas
 

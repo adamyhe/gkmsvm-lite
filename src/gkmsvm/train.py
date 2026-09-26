@@ -1,11 +1,11 @@
-"""Training: fit a C-SVM with gapped k-mer kernel via sklearn."""
+"""Training: fit a C-SVM with gapped k-mer kernel."""
 
 from __future__ import annotations
 
 import numpy as np
 
+from gkmsvm.backend import get_array_module
 from gkmsvm.codec import one_hot_encode
-from gkmsvm.gram import compute_gram
 from gkmsvm.svm import KERNEL_BUILDERS, GkmSVM, resolve_kernel_type
 
 
@@ -22,13 +22,15 @@ def train_gkmsvm(
     M: int | None = None,
     H: float | None = None,
     include_rc: bool = True,
+    solver: str = "auto",
+    cache_size: int = 256,
+    tol: float = 1e-3,
+    max_iter: int = 10_000_000,
     sv_chunk_size: int | None = None,
     gram_chunk_size: int = 1000,
     verbose: bool = False,
 ) -> GkmSVM:
     """Train a gapped k-mer SVM on positive and negative sequences.
-
-    Uses sklearn's SVC with a precomputed gkm kernel matrix.
 
     Args:
         pos_seqs: Positive sequences — list of DNA strings or [N+, 4, L] array.
@@ -42,24 +44,19 @@ def train_gkmsvm(
         M: Center-weight window size (for -t 4, -t 5).
         H: Center-weight decay (for -t 4, -t 5).
         include_rc: Include reverse complement in kernel.
+        solver: ``"auto"`` (precomputed Gram if N²×8 < 50% available RAM/VRAM,
+            else SMO), ``"smo"`` (column-cached SMO), or ``"sklearn"``
+            (precomputed Gram).
+        cache_size: Number of kernel columns to cache (SMO only).
+        tol: KKT violation tolerance (SMO only).
+        max_iter: Maximum SMO iterations.
         sv_chunk_size: Chunk size for inference on the returned model.
-        gram_chunk_size: Tile size for Gram matrix computation.
-        verbose: Show progress bars.
+        gram_chunk_size: Tile size for Gram matrix computation (sklearn only).
+        verbose: Show progress.
 
     Returns:
         A trained GkmSVM model.
-
-    Raises:
-        ImportError: If scikit-learn is not installed.
     """
-    try:
-        from sklearn.svm import SVC
-    except ImportError:
-        raise ImportError(
-            "Training requires scikit-learn. "
-            "Install with: pip install gkmsvm-lite[train]"
-        )
-
     X_pos = _to_onehot(pos_seqs)
     X_neg = _to_onehot(neg_seqs)
     X = np.concatenate([X_pos, X_neg], axis=0)
@@ -78,6 +75,47 @@ def train_gkmsvm(
         kernel_params["H"] = H
 
     kernel = KERNEL_BUILDERS[kernel_type](kernel_params)
+
+    if solver == "auto":
+        use_smo = not _gram_fits_in_memory(X.shape[0], get_array_module(X))
+        if verbose and use_smo:
+            gram_gb = X.shape[0] ** 2 * 8 / 1024**3
+            print(f"Gram matrix would be {gram_gb:.1f} GB — using SMO solver")
+    elif solver == "smo":
+        use_smo = True
+    elif solver == "sklearn":
+        use_smo = False
+    else:
+        raise ValueError(
+            f"Unknown solver {solver!r}. Use 'auto', 'smo', or 'sklearn'."
+        )
+
+    if use_smo:
+        return _train_smo(
+            kernel, X, y, C, kernel_type, kernel_params,
+            cache_size=cache_size, tol=tol, max_iter=max_iter,
+            sv_chunk_size=sv_chunk_size, verbose=verbose,
+        )
+    return _train_sklearn(
+        kernel, X, y, C, kernel_type, kernel_params,
+        gram_chunk_size=gram_chunk_size,
+        sv_chunk_size=sv_chunk_size, verbose=verbose,
+    )
+
+
+def _train_sklearn(
+    kernel, X, y, C, kernel_type, kernel_params, *,
+    gram_chunk_size, sv_chunk_size, verbose,
+) -> GkmSVM:
+    try:
+        from sklearn.svm import SVC
+    except ImportError:
+        raise ImportError(
+            "sklearn solver requires scikit-learn. "
+            "Install with: pip install gkmsvm-lite[train]"
+        )
+
+    from gkmsvm.gram import compute_gram
 
     if verbose:
         n = X.shape[0]
@@ -109,6 +147,76 @@ def train_gkmsvm(
         kernel_params=kernel_params,
         sv_chunk_size=sv_chunk_size,
     )
+
+
+def _train_smo(
+    kernel, X, y, C, kernel_type, kernel_params, *,
+    cache_size, tol, max_iter, sv_chunk_size, verbose,
+) -> GkmSVM:
+    from gkmsvm.solver import smo_solve
+
+    if verbose:
+        print(f"Training with SMO solver (N={X.shape[0]}, cache={cache_size})...")
+
+    coefficients, bias = smo_solve(
+        kernel, X, y, C=C, tol=tol, max_iter=max_iter,
+        cache_size=cache_size, verbose=verbose,
+    )
+
+    sv_mask = np.abs(coefficients) > 1e-10
+    support_sequences = X[sv_mask]
+    sv_coefficients = coefficients[sv_mask].astype(support_sequences.dtype)
+
+    if verbose:
+        n_pos = int((sv_coefficients > 0).sum())
+        n_neg = int((sv_coefficients <= 0).sum())
+        print(
+            f"Training complete: {sv_mask.sum()} support vectors "
+            f"({n_pos} pos, {n_neg} neg)"
+        )
+
+    return GkmSVM(
+        support_sequences=support_sequences,
+        coefficients=sv_coefficients,
+        bias=bias,
+        kernel_type=kernel_type,
+        kernel_params=kernel_params,
+        sv_chunk_size=sv_chunk_size,
+    )
+
+
+def _available_memory(xp) -> int:
+    """Available memory in bytes on the device backing *xp*."""
+    if xp is not np:
+        try:
+            import cupy as cp
+            free, _ = cp.cuda.Device().mem_info
+            return free
+        except Exception:
+            return 0
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except (FileNotFoundError, OSError):
+        pass
+    try:
+        import os
+        pages = os.sysconf("SC_AVPHYS_PAGES")
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        if pages > 0 and page_size > 0:
+            return pages * page_size
+    except (AttributeError, ValueError, OSError):
+        pass
+    return 8 * 1024**3
+
+
+def _gram_fits_in_memory(N: int, xp) -> bool:
+    """Check if an N x N float64 Gram matrix fits in available memory."""
+    gram_bytes = N * N * 8
+    available = _available_memory(xp)
+    return gram_bytes < available * 0.5
 
 
 def _to_onehot(seqs) -> np.ndarray:
