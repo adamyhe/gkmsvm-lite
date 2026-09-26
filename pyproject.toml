@@ -22,9 +22,13 @@ dependencies = [
 gpu = [
     "cupy>=12.0",
 ]
+train = [
+    "scikit-learn>=1.0",
+]
 dev = [
     "pytest",
     "pytest-cov",
+    "scikit-learn>=1.0",
 ]
 
 [tool.setuptools.packages.find]

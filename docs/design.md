@@ -38,15 +38,19 @@ On by default (`norc=0` in LS-GKM). Scores must be invariant under RC. When enab
 
 Each kernel mode has three identifiers: LS-GKM `-t N` integer, an internal name (used in model files), and a descriptive alias. `resolve_kernel_type()` accepts any of these and returns the canonical internal name. `GkmSVM` resolves on construction — `model.kernel_type` is always the internal name.
 
-## Kernel computation: matmul + table lookup
+## Kernel computation
 
-Window match counts are computed via matmul on flattened one-hot windows (`[B, W, 4*l]`), avoiding a 6D broadcast intermediate that is 440x larger. The `_apply_table` step uses eager gather: `table[mismatches].sum()`. Both NumPy (CPU) and CuPy (GPU) use the same code path since CuPy mirrors NumPy's fancy indexing.
+Two computation paths, selected automatically:
+
+**Packed uint32 path** (default forward pass, ISM): Each l-mer window is packed into a uint32 (2 bits per base). Match counting uses XOR + popcount on the packed representation instead of per-base comparisons. See "Packed uint32 comparison" below for details.
+
+**Float one-hot path** (GkmExplain, weighted kernels): Window match counts via matmul on flattened one-hot windows (`[B, W, 4*l]`). Both NumPy and CuPy use the same code path since CuPy mirrors NumPy's fancy indexing.
 
 ## Fused pairwise kernels
 
 CPU: Numba `@njit(parallel=True, fastmath=True)` fuses match-count + table-lookup + sum into a single parallel kernel, avoiding materialization of the full `[B, S, W, W]` match tensor.
 
-GPU: CuPy RawKernel with coalesced memory access. The int8 index path transposes SV windows from `[S, Wy, l]` to `[l, Wy, S]` so adjacent CUDA threads read adjacent bytes. Uses `--use_fast_math` and shared-memory table caching.
+GPU: CuPy RawKernel with coalesced memory access. Uses `--use_fast_math` and shared-memory caching of both the mismatch weight table and query packed windows.
 
 ## Chunked SV inference
 

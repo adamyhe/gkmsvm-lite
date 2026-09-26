@@ -1,12 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
-## Project overview
-
-gkmsvm-lite is a NumPy/CuPy implementation of gapped k-mer SVMs (gkm-SVMs) for DNA sequence classification. It loads existing LS-GKM models and integrates into sequence-to-function (S2F) workflows. Scores are validated against Dongwon-Lee/lsgkm `gkmpredict` to floating-point precision.
-
-Design decisions: `docs/design.md`. Attribution methods: `docs/attribution.md`. Roadmap: `docs/roadmap.md`.
+Agent-facing reference for working on this codebase. Human-readable docs are in `docs/` and `README.md`.
 
 ## Build and test
 
@@ -18,22 +12,55 @@ pytest tests/test_codec.py       # single file
 pytest tests/ -k "test_rc"       # pattern match
 ```
 
+## Source layout
+
+```
+src/gkmsvm/
+├── __init__.py          # public API re-exports
+├── svm.py               # GkmSVM model, scoring, chunked inference
+├── codec.py             # one-hot encode/decode, RC, validation
+├── ism.py               # in-silico mutagenesis
+├── explain.py           # GkmExplain attribution
+├── deltasvm.py          # DeltaSVM linear scoring
+├── fasta.py             # FASTA I/O, extract_loci (vendored tangermeme)
+├── backend.py           # get_array_module (numpy/cupy dispatch)
+├── _threading.py        # Numba threading layer pin
+├── kernels/
+│   ├── base.py          # GkmKernel ABC
+│   ├── direct.py        # -t 0 gkm_cnt + packed uint32 fused kernels
+│   ├── esttrunc.py      # -t 1 gkm_estfull, -t 2 gkm_esttrunc
+│   ├── rbf.py           # -t 3 gkmrbf
+│   └── weighted.py      # -t 4 wgkm, -t 5 wgkmrbf
+└── importers/
+    ├── lsgkm.py         # load_lsgkm_model()
+    ├── classic.py       # load_classic_model()
+    └── deltasvm.py      # load_deltasvm_weights()
+```
+
 ## Conventions
 
-- `src/` layout, source under `src/gkmsvm/`
-- Python >=3.10, NumPy, Numba >=0.57. CuPy >=12 optional (`[gpu]` extra)
+- Python >=3.10, NumPy, Numba >=0.57, tqdm. CuPy >=12 optional (`[gpu]` extra)
 - Array format: `[batch, 4, length]` one-hot DNA, channel order A=0/C=1/G=2/T=3
 - Output: `[batch, 1]` floating-point margin scores
 - Arrays are numpy.ndarray (CPU) or cupy.ndarray (GPU)
-- `model.cuda()` moves arrays to GPU, `model.cpu()` moves back
+- `model.cuda()` / `model.cpu()` moves arrays between devices
 - Kernel normalization on by default, RC equivalence on by default
 - Score = `Σ coef_i × K(x, sv_i) + bias` where `bias = -rho` (LS-GKM) or `+rho` (classic gkmSVM)
-- Kernel modes (LS-GKM name / alias): `-t 0` gkm_cnt/direct, `-t 1` gkm_estfull/estimated_full, `-t 2` gkm_esttrunc/estimated (default), `-t 3` gkmrbf/rbf, `-t 4` wgkm/weighted, `-t 5` wgkmrbf/weighted_rbf. `GkmSVM` accepts any of these or the integer.
 - `resolve_kernel_type()` maps aliases and integers to canonical internal names
-- ISM via `ism(model, x)` returns `[B, 4, L]` score deltas using window-delta optimization
-- GkmExplain via `gkmexplain(model, x, mode=0|1)` returns `[B, 4, L]` attribution scores, 20-30x faster than ISM
-- Gradient-based methods (DeepLIFT, SHAP, captum) are incompatible — use GkmExplain or ISM
-- No PyTorch dependency. tangermeme interop is vendored (pyfaidx for FASTA extraction)
+- Kernel modes: `-t 0` gkm_cnt/direct, `-t 1` gkm_estfull/estimated_full, `-t 2` gkm_esttrunc/estimated (default), `-t 3` gkmrbf/rbf, `-t 4` wgkm/weighted, `-t 5` wgkmrbf/weighted_rbf
+- ISM: `ism(model, x)` → `[B, 4, L]` score deltas (window-delta optimization)
+- GkmExplain: `gkmexplain(model, x, mode=0|1)` → `[B, 4, L]` attribution scores
+- `verbose=True` on `model()`, `score_variants()`, `ism()`, `gkmexplain()` enables tqdm progress bars
+- No PyTorch dependency. Gradient-based methods are incompatible — use GkmExplain or ISM
+- tangermeme interop is vendored (pyfaidx for FASTA extraction)
+
+## Key implementation details
+
+- Forward pass and ISM use the packed uint32 path (XOR + popcount). GkmExplain and weighted kernels use the float one-hot path.
+- Packed SV windows are cached on the model for both CPU and GPU. First call packs; subsequent calls reuse.
+- Min-matches skip: for esttrunc l=11 k=7 d=3, `min_matches=8`. 99.88% of window pairs skipped.
+- CPU inner loop: Numba `@njit(parallel=True, fastmath=True)`. GPU inner loop: CuPy RawKernel with shared-memory caching.
+- SV diagonal is cached after first computation.
 
 ## Gotchas
 
@@ -44,3 +71,4 @@ pytest tests/ -k "test_rc"       # pattern match
 - Original gkmSVM (`.gkmmodel`) uses opposite sign convention for bias vs LS-GKM. Use `load_classic_model()` not `load_lsgkm_model()`.
 - `-t 4`/`-t 5` (wgkm/wgkmrbf) require M and H parameters; these use per-position DP, not the matmul+table path.
 - LS-GKM C is GPL v3 — cannot wrap or link against it (gkmsvm-lite is MIT).
+- GPU float32 diagonal causes <3e-3 score difference vs CPU float64.
