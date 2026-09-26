@@ -1,5 +1,9 @@
 # gkmsvm-lite
 
+[![PyPI](https://img.shields.io/pypi/v/gkmsvm-lite)](https://pypi.org/project/gkmsvm-lite/)
+[![CI](https://github.com/adamyhe/gkmsvm-lite/actions/workflows/ci.yml/badge.svg)](https://github.com/adamyhe/gkmsvm-lite/actions/workflows/ci.yml)
+[![Downloads](https://static.pepy.tech/badge/gkmsvm-lite)](https://pepy.tech/projects/gkmsvm-lite)
+
 A pure-Python implementation of gapped k-mer SVMs (gkm-SVMs) for DNA sequence analysis. Supports classification (C-SVC) and regression (epsilon-SVR), all six kernel types, GPU acceleration via CuPy, and compatibility with models from LS-GKM, classic gkmSVM, and the R gkmSVM package.
 
 ## Install
@@ -63,6 +67,19 @@ from gkmsvm import (
 ```
 
 See [docs/models.md](docs/models.md) for format details, training options, and examples.
+
+## Kernel types
+
+All six LS-GKM kernel types are supported:
+
+| `-t` | Name | Description |
+|------|------|-------------|
+| 0 | gkm | Direct gapped k-mer count |
+| 1 | gkm_estfull | Estimated full l-mer |
+| 2 | gkm_esttrunc | Estimated truncated l-mer (LS-GKM default) |
+| 3 | gkmrbf | RBF-transformed estimated |
+| 4 | wgkm | Center-weighted gapped k-mer |
+| 5 | wgkmrbf | Center-weighted RBF |
 
 ## Documentation
 
