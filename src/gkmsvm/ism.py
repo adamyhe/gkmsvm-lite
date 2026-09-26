@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from gkmsvm.backend import get_array_module, is_mlx
+from gkmsvm.backend import get_array_module, to_cpu
 from gkmsvm.codec import reverse_complement
 from gkmsvm.svm import GkmSVM
 
@@ -35,20 +35,6 @@ def ism(
     Returns:
         [B, 4, L] score deltas.
     """
-    if is_mlx(x):
-        from gkmsvm.backend import to_cpu, to_mlx
-        cpu_model = GkmSVM(
-            to_cpu(model.support_sequences),
-            to_cpu(model.coefficients),
-            model.bias,
-            model.kernel_type,
-            model._kernel_params,
-            sv_chunk_size=model.sv_chunk_size,
-        )
-        return to_mlx(
-            ism(cpu_model, to_cpu(x), sv_chunk_size=sv_chunk_size, verbose=verbose)
-        )
-
     kernel = model.kernel
     chunk = sv_chunk_size if sv_chunk_size is not None else model.sv_chunk_size
     fn = _ism_index if hasattr(kernel, "pairwise_from_indices") else _ism_float
@@ -164,29 +150,30 @@ def _partial_pairwise_idx(kernel, bx_A, by, chunk_size):
     """Chunked pairwise from int8 index windows."""
     xp = get_array_module(bx_A)
     S = by.shape[0]
-    B = bx_A.shape[0]
     if chunk_size is None or chunk_size >= S:
         return kernel.pairwise_from_indices(bx_A, by)
-    result = xp.zeros((B, S), dtype=np.float64)
+    chunks = []
     for s in range(0, S, chunk_size):
         e = min(s + chunk_size, S)
-        result[:, s:e] = kernel.pairwise_from_indices(bx_A, by[s:e])
-    return result
+        chunks.append(kernel.pairwise_from_indices(bx_A, by[s:e]))
+    return xp.concatenate(chunks, axis=1)
 
 
 def _mutated_diagonals(kernel, x, xp):
     """Self-kernel diagonals for all single-base mutations.
 
     Only 4*L*B sequences — trivially fast even for large models.
+    Mutations are built on CPU then moved to device for diagonal computation.
     """
     B, C, L = x.shape
-    x_exp = x[None, None]  # [1, 1, B, 4, L]
-    mut_x = xp.broadcast_to(x_exp, (4, L, B, C, L)).copy()
+    x_np = x if xp is np else to_cpu(x)
+    x_exp = x_np[None, None]  # [1, 1, B, 4, L]
+    mut_x = np.broadcast_to(x_exp, (4, L, B, C, L)).copy()
     for p in range(L):
         mut_x[:, p, :, :, p] = 0
         for vi in range(4):
             mut_x[vi, p, :, vi, p] = 1
-    mut_flat = mut_x.reshape(4 * L * B, C, L)
+    mut_flat = xp.asarray(mut_x.reshape(4 * L * B, C, L))
     diag = kernel._raw_diagonal(mut_flat)
     return diag.reshape(4, L, B)
 
@@ -365,25 +352,23 @@ def _partial_pairwise(kernel, wx_A, wy, chunk_size):
     """Chunked pairwise from flat windows."""
     xp = get_array_module(wx_A)
     S = wy.shape[0]
-    B = wx_A.shape[0]
     if chunk_size is None or chunk_size >= S:
         return kernel.pairwise_from_windows(wx_A, wy)
-    result = xp.zeros((B, S), dtype=np.float64)
+    chunks = []
     for s in range(0, S, chunk_size):
         e = min(s + chunk_size, S)
-        result[:, s:e] = kernel.pairwise_from_windows(wx_A, wy[s:e])
-    return result
+        chunks.append(kernel.pairwise_from_windows(wx_A, wy[s:e]))
+    return xp.concatenate(chunks, axis=1)
 
 
 def _raw_pairwise_chunked(kernel, x, sv, chunk_size):
     """Full pairwise with optional SV chunking."""
     xp = get_array_module(x)
     S = sv.shape[0]
-    B = x.shape[0]
     if chunk_size is None or chunk_size >= S:
         return kernel._raw_pairwise(x, sv)
-    result = xp.zeros((B, S), dtype=x.dtype)
+    chunks = []
     for s in range(0, S, chunk_size):
         e = min(s + chunk_size, S)
-        result[:, s:e] = kernel._raw_pairwise(x, sv[s:e])
-    return result
+        chunks.append(kernel._raw_pairwise(x, sv[s:e]))
+    return xp.concatenate(chunks, axis=1)
