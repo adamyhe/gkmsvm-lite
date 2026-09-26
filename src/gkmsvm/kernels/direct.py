@@ -5,7 +5,7 @@ from math import comb
 import numpy as np
 from numba import njit, prange
 
-from gkmsvm.backend import get_array_module
+from gkmsvm.backend import get_array_module, is_mlx
 from gkmsvm.codec import reverse_complement
 from gkmsvm.kernels.base import GkmKernel
 
@@ -411,7 +411,7 @@ class DirectGkmKernel(GkmKernel):
                 f"Sequence length {L} is shorter than window length {self.l}"
             )
         W = L - self.l + 1
-        base_idx = xp.argmax(x, axis=1).astype(np.int8)  # [B, L]
+        base_idx = xp.argmax(x, axis=1).astype(xp.int8)  # [B, L]
         strides = base_idx.strides
         shape = (B, W, self.l)
         new_strides = (strides[0], strides[1], strides[1])
@@ -422,7 +422,7 @@ class DirectGkmKernel(GkmKernel):
         """Look up mismatch table from match counts and sum over window dims."""
         xp = get_array_module(matches)
         table = xp.asarray(self._mismatch_table)
-        mismatches = xp.clip(xp.rint(self.l - matches).astype(np.int64), 0, self.l)
+        mismatches = xp.clip(xp.rint(self.l - matches).astype(xp.int64), 0, self.l)
         return table[mismatches].sum(axis=(-2, -1))
 
     def pairwise_from_windows(
@@ -444,6 +444,9 @@ class DirectGkmKernel(GkmKernel):
                 np.ascontiguousarray(wy),
                 self._mismatch_table,
             )
+        if is_mlx(wx):
+            matches = xp.einsum("bif,sjf->bsij", wx, wy)
+            return self._apply_table(matches)
         return _fused_pairwise_gpu(wx, wy, self._mismatch_table)
 
     def pairwise_from_indices(
@@ -473,6 +476,17 @@ class DirectGkmKernel(GkmKernel):
                 self._mismatch_table,
                 self.l,
                 self._min_matches,
+            )
+        if is_mlx(bx):
+            xp = get_array_module(bx)
+            B, Wx, l_dim = bx.shape
+            S, Wy, _ = by.shape
+            bases = xp.arange(4).reshape(1, 1, 1, 4)
+            bx_oh = (bx[:, :, :, None] == bases).astype(xp.float32)
+            by_oh = (by[:, :, :, None] == bases).astype(xp.float32)
+            return self.pairwise_from_windows(
+                bx_oh.reshape(B, Wx, 4 * l_dim),
+                by_oh.reshape(S, Wy, 4 * l_dim),
             )
         return _fused_pairwise_idx_gpu(
             bx, by, self._mismatch_table, self._min_matches,
@@ -510,11 +524,11 @@ class DirectGkmKernel(GkmKernel):
         B = x.shape[0]
 
         if chunk_size is not None and chunk_size < B:
-            result = xp.empty(B, dtype=x.dtype)
+            chunks = []
             for start in range(0, B, chunk_size):
                 end = min(start + chunk_size, B)
-                result[start:end] = self._raw_diagonal(x[start:end])
-            return result
+                chunks.append(self._raw_diagonal(x[start:end]))
+            return xp.concatenate(chunks)
 
         if xp is np:
             bx_packed = _pack_windows_cpu(self.base_index_windows(x))

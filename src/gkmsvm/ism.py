@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from gkmsvm.backend import get_array_module
+from gkmsvm.backend import get_array_module, is_mlx
 from gkmsvm.codec import reverse_complement
 from gkmsvm.svm import GkmSVM
 
@@ -35,6 +35,20 @@ def ism(
     Returns:
         [B, 4, L] score deltas.
     """
+    if is_mlx(x):
+        from gkmsvm.backend import to_cpu, to_mlx
+        cpu_model = GkmSVM(
+            to_cpu(model.support_sequences),
+            to_cpu(model.coefficients),
+            model.bias,
+            model.kernel_type,
+            model._kernel_params,
+            sv_chunk_size=model.sv_chunk_size,
+        )
+        return to_mlx(
+            ism(cpu_model, to_cpu(x), sv_chunk_size=sv_chunk_size, verbose=verbose)
+        )
+
     kernel = model.kernel
     chunk = sv_chunk_size if sv_chunk_size is not None else model.sv_chunk_size
     fn = _ism_index if hasattr(kernel, "pairwise_from_indices") else _ism_float
@@ -212,12 +226,12 @@ def _ism_float(model, x, chunk):
     coefs = model.coefficients
     bias = model.bias
 
-    wx_cpu = wx if not xp.__name__.startswith("cupy") else xp.asnumpy(wx)
+    wx_cpu = wx if xp is np else xp.asnumpy(wx)
     all_old, all_new, all_wx_full, ranges = _build_float_mutations(
         wx_cpu, L, W, l, B, F, wx_cpu.dtype
     )
     if do_rc and do_norm:
-        wx_rc_cpu = wx_rc if not xp.__name__.startswith("cupy") else xp.asnumpy(wx_rc)
+        wx_rc_cpu = wx_rc if xp is np else xp.asnumpy(wx_rc)
         all_wx_rc_full = _build_rc_float_mutations(wx_rc_cpu, ranges, L, W, l, B, F, wx_rc_cpu.dtype)
 
     all_old = xp.asarray(all_old)
