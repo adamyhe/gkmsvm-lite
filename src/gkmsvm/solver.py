@@ -6,7 +6,7 @@ from collections import OrderedDict
 
 import numpy as np
 
-from gkmsvm.backend import get_array_module
+from gkmsvm.backend import get_array_module, is_mlx, to_cpu
 from gkmsvm.codec import reverse_complement
 from gkmsvm.kernels.base import GkmKernel
 
@@ -43,7 +43,15 @@ class KernelColumnCache:
                     _pack_windows_uint32,
                 )
 
-                if xp is not np:
+                if is_mlx(self._idx_windows):
+                    self._packed_t = xp.asarray(_pack_windows_cpu(
+                        np.ascontiguousarray(to_cpu(self._idx_windows))
+                    ))
+                    if self._rc_idx_windows is not None:
+                        self._rc_packed_t = xp.asarray(_pack_windows_cpu(
+                            np.ascontiguousarray(to_cpu(self._rc_idx_windows))
+                        ))
+                elif xp is not np:
                     packed = _pack_windows_uint32(self._idx_windows, xp)
                     self._packed_t = xp.ascontiguousarray(packed.T)
                     if self._rc_idx_windows is not None:
@@ -67,7 +75,11 @@ class KernelColumnCache:
             self._packed_t = None
             self._rc_packed_t = None
 
-        self._diag = kernel._raw_diagonal(X).astype(np.float64)
+        self._mlx = is_mlx(X)
+        diag = kernel._raw_diagonal(X)
+        if self._mlx:
+            diag = to_cpu(diag)
+        self._diag = diag.astype(np.float64)
         self._cache: OrderedDict[int, np.ndarray] = OrderedDict()
         self._max = max_columns
         self.hits = 0
@@ -87,8 +99,11 @@ class KernelColumnCache:
             self._cache.popitem(last=False)
         return col
 
-    def _compute_column(self, i: int) -> np.ndarray:
-        """Compute normalized K(i, :) using the fastest available path."""
+    def _compute_column(self, i: int):
+        """Compute normalized K(i, :) using the fastest available path.
+
+        Returns numpy for MLX inputs, stays on device for CuPy.
+        """
         xp = self._xp
         kernel = self._kernel
 
@@ -106,6 +121,9 @@ class KernelColumnCache:
         else:
             raw = kernel._raw_pairwise(self._X[i : i + 1], self._X)
 
+        if self._mlx:
+            raw = to_cpu(raw)
+            xp = np
         raw = raw.astype(np.float64)
 
         if kernel.normalize:
@@ -145,9 +163,10 @@ def smo_solve(
         coefficients: [N] signed dual coefficients (alpha_i * y_i).
         bias: Decision boundary offset (score = K*coef + bias).
     """
-    xp = get_array_module(X)
     N = X.shape[0]
-    y = xp.asarray(y, dtype=np.float64)
+    mlx_input = is_mlx(X)
+    xp = np if mlx_input else get_array_module(X)
+    y = xp.asarray(to_cpu(y) if mlx_input else y, dtype=np.float64)
 
     cache = KernelColumnCache(kernel, X, max_columns=cache_size)
 

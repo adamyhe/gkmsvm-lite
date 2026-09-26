@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from gkmsvm.backend import get_array_module
+from gkmsvm.backend import HAS_MLX, get_array_module, to_cpu, to_mlx
 from gkmsvm.codec import one_hot_encode
 from gkmsvm.svm import KERNEL_BUILDERS, GkmSVM, resolve_kernel_type
 
@@ -33,6 +33,7 @@ def train_gkmsvm(
     max_iter: int = 10_000_000,
     sv_chunk_size: int | None = None,
     gram_chunk_size: int = 1000,
+    device: str = "auto",
     verbose: bool = False,
 ) -> GkmSVM:
     """Train a gapped k-mer SVM classifier on positive and negative sequences.
@@ -57,6 +58,7 @@ def train_gkmsvm(
         max_iter: Maximum SMO iterations.
         sv_chunk_size: Chunk size for inference on the returned model.
         gram_chunk_size: Tile size for Gram matrix computation (libsvm only).
+        device: ``"auto"`` (MLX if available), ``"mlx"``, or ``"cpu"``.
         verbose: Show progress.
 
     Returns:
@@ -65,6 +67,7 @@ def train_gkmsvm(
     X_pos = _to_onehot(pos_seqs)
     X_neg = _to_onehot(neg_seqs)
     X = np.concatenate([X_pos, X_neg], axis=0)
+    X = _move_to_device(X, device, verbose)
     y = np.array([1] * X_pos.shape[0] + [-1] * X_neg.shape[0])
 
     kernel, kernel_type, kernel_params = _build_kernel(
@@ -115,6 +118,7 @@ def train_gkmsvr(
     include_rc: bool = True,
     sv_chunk_size: int | None = None,
     gram_chunk_size: int = 1000,
+    device: str = "auto",
     verbose: bool = False,
 ) -> GkmSVM:
     """Train a gapped k-mer SVR (epsilon-SVR) for regression.
@@ -137,12 +141,14 @@ def train_gkmsvr(
         include_rc: Include reverse complement in kernel.
         sv_chunk_size: Chunk size for inference on the returned model.
         gram_chunk_size: Tile size for Gram matrix computation.
+        device: ``"auto"`` (MLX if available), ``"mlx"``, or ``"cpu"``.
         verbose: Show progress.
 
     Returns:
         A trained GkmSVM model. Scores are predicted continuous values.
     """
     X = _to_onehot(sequences)
+    X = _move_to_device(X, device, verbose)
     y = np.asarray(labels, dtype=np.float64)
     if y.shape[0] != X.shape[0]:
         raise ValueError(
@@ -165,6 +171,41 @@ def train_gkmsvr(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _move_to_device(X: np.ndarray, device: str, verbose: bool) -> np.ndarray:
+    """Optionally move training data to MLX for accelerated kernel computation.
+
+    Conservative memory policy: auto-detection only engages when training data
+    fits within 25% of available system RAM, to avoid pressure on unified memory
+    (macOS users are typically running other applications).
+    """
+    if device == "cpu":
+        return X
+    if device == "auto":
+        if not HAS_MLX:
+            return X
+        data_bytes = X.nbytes
+        available = _available_memory(np)
+        if data_bytes > available * 0.25:
+            if verbose:
+                data_mb = data_bytes / 1024**2
+                avail_mb = available / 1024**2
+                print(
+                    f"Training data ({data_mb:.0f} MB) exceeds 25% of available "
+                    f"memory ({avail_mb:.0f} MB) — staying on CPU"
+                )
+            return X
+        if verbose:
+            print("Moving training data to MLX for accelerated kernel computation")
+        return to_mlx(X)
+    if device == "mlx":
+        if not HAS_MLX:
+            raise RuntimeError("MLX is not installed. Install with: pip install mlx")
+        if verbose:
+            print("Moving training data to MLX for accelerated kernel computation")
+        return to_mlx(X)
+    raise ValueError(f"Unknown device {device!r}. Use 'auto', 'mlx', or 'cpu'.")
 
 
 def _build_kernel(kernel_type, l, k, d, gamma, M, H, include_rc):
@@ -211,9 +252,10 @@ def _fit_libsvm(
     sv_indices = np.array(
         [model.sv_indices[i] - 1 for i in range(n_sv)], dtype=np.intp,
     )
+    sv_seqs = to_cpu(X[sv_indices])
     coefficients = np.array(
         [model.sv_coef[0][i] for i in range(n_sv)],
-        dtype=X.dtype,
+        dtype=sv_seqs.dtype,
     )
     bias = float(-model.rho[0])
 
@@ -221,7 +263,7 @@ def _fit_libsvm(
         print(f"Training complete: {n_sv} support vectors")
 
     return GkmSVM(
-        support_sequences=X[sv_indices],
+        support_sequences=sv_seqs,
         coefficients=coefficients,
         bias=bias,
         kernel_type=kernel_type,
@@ -245,7 +287,7 @@ def _train_smo(
     )
 
     sv_mask = np.abs(coefficients) > 1e-10
-    support_sequences = X[sv_mask]
+    support_sequences = to_cpu(X[sv_mask])
     sv_coefficients = coefficients[sv_mask].astype(support_sequences.dtype)
 
     if verbose:

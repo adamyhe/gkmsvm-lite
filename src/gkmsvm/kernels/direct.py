@@ -293,6 +293,82 @@ def _pack_windows_uint32(bw, xp):
     return packed
 
 
+# ---------------------------------------------------------------------------
+# MLX packed kernel
+# ---------------------------------------------------------------------------
+
+
+def _popcount_uint32(x):
+    """Vectorized Hamming weight for uint32 arrays (MLX-compatible)."""
+    x = x - ((x >> 1) & np.uint32(0x55555555))
+    x = (x & np.uint32(0x33333333)) + ((x >> 2) & np.uint32(0x33333333))
+    x = (x + (x >> 4)) & np.uint32(0x0F0F0F0F)
+    return (x * np.uint32(0x01010101)) >> 24
+
+
+def _fused_pairwise_packed_mlx(bx_packed, by_packed, table, l, min_matches, xp):
+    """Packed pairwise kernel on MLX via vectorized XOR + popcount.
+
+    Args:
+        bx_packed: [B, Wx] uint32 packed query windows.
+        by_packed: [S, Wy] uint32 packed SV windows.
+        table: [l+1] mismatch weight table (numpy).
+        l: window length.
+        min_matches: minimum match count for non-zero contribution.
+        xp: MLX array module.
+    """
+    B, Wx = bx_packed.shape
+    S, Wy = by_packed.shape
+    table_mlx = xp.asarray(table)
+
+    # [B, 1, Wx, 1] ^ [1, S, 1, Wy] → [B, S, Wx, Wy]
+    xored = bx_packed[:, None, :, None] ^ by_packed[None, :, None, :]
+    mismatches = _popcount_uint32(((xored >> 1) | xored) & np.uint32(0x55555555))
+    matches = l - mismatches.astype(xp.int32)
+
+    mismatch_idx = xp.clip(l - matches, 0, l)
+    contributions = table_mlx[mismatch_idx]
+    if min_matches > 0:
+        contributions = xp.where(matches >= min_matches, contributions, 0.0)
+
+    return contributions.sum(axis=(-2, -1))
+
+
+def _fused_diagonal_packed_mlx(bx_packed, table, l, min_matches, xp):
+    """Self-kernel diagonal from packed uint32 windows on MLX."""
+    B, W = bx_packed.shape
+    table_mlx = xp.asarray(table)
+
+    # [B, W, 1] ^ [B, 1, W] → [B, W, W]
+    xored = bx_packed[:, :, None] ^ bx_packed[:, None, :]
+    mismatches = _popcount_uint32(((xored >> 1) | xored) & np.uint32(0x55555555))
+    matches = l - mismatches.astype(xp.int32)
+
+    mismatch_idx = xp.clip(l - matches, 0, l)
+    contributions = table_mlx[mismatch_idx]
+    if min_matches > 0:
+        contributions = xp.where(matches >= min_matches, contributions, 0.0)
+
+    return contributions.sum(axis=(-2, -1))
+
+
+def _fused_cross_diagonal_packed_mlx(bx_packed, bx_rc_packed, table, l, min_matches, xp):
+    """Cross-kernel diagonal (fwd × RC) from packed uint32 windows on MLX."""
+    table_mlx = xp.asarray(table)
+
+    # [B, W, 1] ^ [B, 1, W_rc] → [B, W, W_rc]
+    xored = bx_packed[:, :, None] ^ bx_rc_packed[:, None, :]
+    mismatches = _popcount_uint32(((xored >> 1) | xored) & np.uint32(0x55555555))
+    matches = l - mismatches.astype(xp.int32)
+
+    mismatch_idx = xp.clip(l - matches, 0, l)
+    contributions = table_mlx[mismatch_idx]
+    if min_matches > 0:
+        contributions = xp.where(matches >= min_matches, contributions, 0.0)
+
+    return contributions.sum(axis=(-2, -1))
+
+
 def _fused_pairwise_idx_gpu(bx, by, table, min_matches, *, by_packed_t=None):
     """Fused pairwise CUDA kernel (packed uint32 path, coalesced SV access).
 
@@ -479,14 +555,19 @@ class DirectGkmKernel(GkmKernel):
             )
         if is_mlx(bx):
             xp = get_array_module(bx)
-            B, Wx, l_dim = bx.shape
-            S, Wy, _ = by.shape
-            bases = xp.arange(4).reshape(1, 1, 1, 4)
-            bx_oh = (bx[:, :, :, None] == bases).astype(xp.float32)
-            by_oh = (by[:, :, :, None] == bases).astype(xp.float32)
-            return self.pairwise_from_windows(
-                bx_oh.reshape(B, Wx, 4 * l_dim),
-                by_oh.reshape(S, Wy, 4 * l_dim),
+            from gkmsvm.backend import to_cpu
+            bx_packed = xp.asarray(_pack_windows_cpu(
+                np.ascontiguousarray(to_cpu(bx))
+            ))
+            if by_packed_t is not None:
+                by_packed = by_packed_t
+            else:
+                by_packed = xp.asarray(_pack_windows_cpu(
+                    np.ascontiguousarray(to_cpu(by))
+                ))
+            return _fused_pairwise_packed_mlx(
+                bx_packed, by_packed, self._mismatch_table,
+                self.l, self._min_matches, xp,
             )
         return _fused_pairwise_idx_gpu(
             bx, by, self._mismatch_table, self._min_matches,
@@ -542,6 +623,26 @@ class DirectGkmKernel(GkmKernel):
                 )
                 result = result + _fused_cross_diagonal_packed_numba(
                     bx_packed, bx_rc_packed, self._mismatch_table, self.l, mm
+                )
+            return result.astype(x.dtype)
+
+        if is_mlx(x):
+            from gkmsvm.backend import to_cpu
+            bx_packed = xp.asarray(_pack_windows_cpu(
+                np.ascontiguousarray(to_cpu(self.base_index_windows(x)))
+            ))
+            mm = self._min_matches
+            result = _fused_diagonal_packed_mlx(
+                bx_packed, self._mismatch_table, self.l, mm, xp
+            )
+            if self.include_rc:
+                bx_rc_packed = xp.asarray(_pack_windows_cpu(
+                    np.ascontiguousarray(
+                        to_cpu(self.base_index_windows(reverse_complement(x)))
+                    )
+                ))
+                result = result + _fused_cross_diagonal_packed_mlx(
+                    bx_packed, bx_rc_packed, self._mismatch_table, self.l, mm, xp
                 )
             return result.astype(x.dtype)
 

@@ -423,3 +423,77 @@ class TestGPUGram:
 
         gram = cp.asnumpy(compute_gram(kernel, cp.asarray(seqs)))
         np.testing.assert_allclose(gram, gram.T, atol=1e-10)
+
+
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
+
+
+def _random_seqs_str(n, length, rng):
+    return ["".join(rng.choice(list("ACGT")) for _ in range(length)) for _ in range(n)]
+
+
+class TestGPUTraining:
+    def test_train_libsvm_scores_match_cpu(self):
+        from gkmsvm import train_gkmsvm
+
+        rng = np.random.default_rng(42)
+        pos = _random_seqs_str(20, 20, rng)
+        neg = _random_seqs_str(20, 20, rng)
+
+        cpu_model = train_gkmsvm(
+            pos, neg, kernel_type="direct", l=7, k=5, C=1.0,
+            device="cpu",
+        )
+        gpu_model = train_gkmsvm(
+            pos, neg, kernel_type="direct", l=7, k=5, C=1.0,
+            device="cpu",
+        )
+
+        rng2 = np.random.default_rng(99)
+        x = np.stack([one_hot_encode(s)
+                      for s in _random_seqs_str(5, 20, rng2)])
+        cpu_scores = cpu_model(x)
+        gpu_scores = gpu_model(x)
+
+        np.testing.assert_allclose(gpu_scores, cpu_scores, atol=1e-5)
+
+    def test_train_smo_scores_match_cpu(self):
+        from gkmsvm import train_gkmsvm
+
+        rng = np.random.default_rng(99)
+        pos = _random_seqs_str(20, 20, rng)
+        neg = _random_seqs_str(20, 20, rng)
+
+        cpu_model = train_gkmsvm(
+            pos, neg, kernel_type="direct", l=7, k=5, C=1.0,
+            solver="smo", device="cpu",
+        )
+        gpu_model = train_gkmsvm(
+            pos, neg, kernel_type="direct", l=7, k=5, C=1.0,
+            solver="smo", device="cpu",
+        )
+
+        rng2 = np.random.default_rng(77)
+        x = np.stack([one_hot_encode(s)
+                      for s in _random_seqs_str(5, 20, rng2)])
+        cpu_scores = cpu_model(x)
+        gpu_scores = gpu_model(x)
+
+        np.testing.assert_allclose(gpu_scores, cpu_scores, atol=1e-4)
+
+    def test_train_returns_numpy_model(self):
+        from gkmsvm import train_gkmsvm
+
+        rng = np.random.default_rng(42)
+        pos = _random_seqs_str(15, 20, rng)
+        neg = _random_seqs_str(15, 20, rng)
+
+        model = train_gkmsvm(
+            pos, neg, kernel_type="direct", l=7, k=5, C=1.0,
+            device="cpu",
+        )
+
+        assert isinstance(model.support_sequences, np.ndarray)
+        assert isinstance(model.coefficients, np.ndarray)

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "gkmsvm-lite"
 version = "0.1.0"
-description = "Gapped k-mer SVMs for DNA sequence classification"
+description = "Gapped k-mer SVMs for DNA sequence classification and regression"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
@@ -28,7 +28,7 @@ dependencies = [
 
 [project.optional-dependencies]
 gpu = [
-    "cupy>=12.0",
+    "cupy-cuda12x[ctk]>=12.0",
 ]
 mlx = [
     "mlx>=0.10.0",

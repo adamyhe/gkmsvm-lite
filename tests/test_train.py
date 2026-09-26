@@ -138,3 +138,38 @@ class TestTrainGkmsvm:
     def test_empty_seqs_raises(self):
         with pytest.raises(ValueError, match="non-empty"):
             train_gkmsvm([], ["ACGT" * 5], kernel_type="direct", l=7, k=5)
+
+    def test_device_cpu_explicit(self):
+        rng = np.random.default_rng(42)
+        pos = _random_seqs_str(15, 20, rng)
+        neg = _random_seqs_str(15, 20, rng)
+
+        model = train_gkmsvm(
+            pos, neg, kernel_type="direct", l=7, k=5, C=1.0,
+            device="cpu",
+        )
+        assert model.num_support_vectors > 0
+        assert isinstance(model.support_sequences, np.ndarray)
+
+    def test_device_invalid_raises(self):
+        rng = np.random.default_rng(42)
+        pos = _random_seqs_str(10, 20, rng)
+        neg = _random_seqs_str(10, 20, rng)
+
+        with pytest.raises(ValueError, match="Unknown device"):
+            train_gkmsvm(
+                pos, neg, kernel_type="direct", l=7, k=5,
+                device="tpu",
+            )
+
+    def test_device_auto_works(self):
+        rng = np.random.default_rng(42)
+        pos = _random_seqs_str(15, 20, rng)
+        neg = _random_seqs_str(15, 20, rng)
+
+        model = train_gkmsvm(
+            pos, neg, kernel_type="direct", l=7, k=5, C=1.0,
+            device="auto",
+        )
+        assert model.num_support_vectors > 0
+        assert isinstance(model.support_sequences, np.ndarray)
