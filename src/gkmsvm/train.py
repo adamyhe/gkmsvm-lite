@@ -274,7 +274,7 @@ def _available_memory(xp) -> int:
             free, _ = cp.cuda.Device().mem_info
             return free
         except Exception:
-            return 0
+            pass
     try:
         with open("/proc/meminfo") as f:
             for line in f:

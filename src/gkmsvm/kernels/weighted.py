@@ -158,11 +158,11 @@ class CenterWeightedGkmKernel(GkmKernel):
         xp = get_array_module(x)
         B = x.shape[0]
         if chunk_size is not None and chunk_size < B:
-            result = xp.empty(B, dtype=x.dtype)
+            chunks = []
             for start in range(0, B, chunk_size):
                 end = min(start + chunk_size, B)
-                result[start:end] = self._raw_diagonal(x[start:end])
-            return result
+                chunks.append(self._raw_diagonal(x[start:end]))
+            return xp.concatenate(chunks)
 
         pw = xp.asarray(self._pos_weights).astype(x.dtype)
         matches = self._per_position_self_matches(x)

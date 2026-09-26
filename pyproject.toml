@@ -30,6 +30,9 @@ dependencies = [
 gpu = [
     "cupy>=12.0",
 ]
+mlx = [
+    "mlx>=0.10.0",
+]
 dev = [
     "pytest",
     "pytest-cov",

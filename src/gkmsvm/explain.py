@@ -16,7 +16,7 @@ from __future__ import annotations
 import numpy as np
 from numba import njit, prange
 
-from gkmsvm.backend import get_array_module
+from gkmsvm.backend import get_array_module, is_mlx
 from gkmsvm.codec import reverse_complement
 from gkmsvm.kernels.direct import (
     _pack_windows_cpu,
@@ -487,6 +487,23 @@ def gkmexplain(
     """
     if mode not in (0, 1):
         raise ValueError(f"mode must be 0 or 1, got {mode}")
+
+    if is_mlx(x):
+        from gkmsvm.backend import to_cpu, to_mlx
+        cpu_model = GkmSVM(
+            to_cpu(model.support_sequences),
+            to_cpu(model.coefficients),
+            model.bias,
+            model.kernel_type,
+            model._kernel_params,
+            sv_chunk_size=model.sv_chunk_size,
+        )
+        return to_mlx(
+            gkmexplain(
+                cpu_model, to_cpu(x), mode=mode,
+                sv_chunk_size=sv_chunk_size, verbose=verbose,
+            )
+        )
 
     xp = get_array_module(x)
     B, C, seqlen = x.shape

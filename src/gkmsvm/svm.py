@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from gkmsvm.backend import get_array_module, is_gpu, to_cpu, to_gpu
+from gkmsvm.backend import get_array_module, is_gpu, is_mlx, to_cpu, to_gpu, to_mlx
 from gkmsvm.codec import reverse_complement
 from gkmsvm.kernels.base import GkmKernel
 from gkmsvm.kernels.direct import DirectGkmKernel
@@ -183,6 +183,14 @@ class GkmSVM:
         self._on_gpu = True
         return self
 
+    def mlx(self) -> GkmSVM:
+        """Move model arrays to Apple GPU (MLX)."""
+        self.support_sequences = to_mlx(to_cpu(self.support_sequences))
+        self.coefficients = to_mlx(to_cpu(self.coefficients))
+        self._invalidate_caches()
+        self._on_gpu = False
+        return self
+
     def cpu(self) -> GkmSVM:
         """Move model arrays to CPU (NumPy)."""
         self.support_sequences = to_cpu(self.support_sequences)
@@ -240,7 +248,7 @@ class GkmSVM:
                 self._sv_rc_idx_windows = kernel.base_index_windows(
                     reverse_complement(self.support_sequences)
                 )
-            if hasattr(kernel, '_min_matches'):
+            if hasattr(kernel, '_min_matches') and not is_mlx(self._sv_idx_windows):
                 from gkmsvm.kernels.direct import (
                     _pack_windows_cpu, _pack_windows_uint32,
                 )
