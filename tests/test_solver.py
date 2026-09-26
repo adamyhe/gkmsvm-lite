@@ -143,9 +143,8 @@ class TestSmoSolve:
         assert score_pos > 0
         assert score_neg < 0
 
-    def test_smo_vs_sklearn_agreement(self):
-        pytest.importorskip("sklearn")
-        from sklearn.svm import SVC
+    def test_smo_vs_libsvm_agreement(self):
+        from libsvm.svmutil import svm_train
 
         from gkmsvm.gram import compute_gram
 
@@ -154,6 +153,7 @@ class TestSmoSolve:
         neg = _biased_seqs(25, 20, rng, bias_base=3)
         X = np.concatenate([pos, neg])
         y = np.array([1.0] * 25 + [-1.0] * 25)
+        N = X.shape[0]
 
         kernel = DirectGkmKernel(l=7, k=5, normalize=True, include_rc=True)
 
@@ -162,23 +162,27 @@ class TestSmoSolve:
         )
 
         gram = compute_gram(kernel, X)
-        clf = SVC(kernel="precomputed", C=1.0)
-        clf.fit(gram, y)
-        coef_sk = np.zeros(X.shape[0])
-        coef_sk[clf.support_] = clf.dual_coef_[0]
-        bias_sk = float(clf.intercept_[0])
+        ids = np.arange(1, N + 1, dtype=np.float64).reshape(-1, 1)
+        x_train = np.hstack([ids, gram])
+        model = svm_train(y.tolist(), x_train, "-s 0 -t 4 -c 1.0 -q")
+
+        n_sv = model.l
+        coef_lib = np.zeros(N)
+        for i in range(n_sv):
+            coef_lib[model.sv_indices[i] - 1] = model.sv_coef[0][i]
+        bias_lib = float(-model.rho[0])
 
         test_seqs = _random_seqs(10, 20, rng)
         scores_smo = np.array([
             float(np.dot(coef_smo, kernel.pairwise(t[None], X)[0]) + bias_smo)
             for t in test_seqs
         ])
-        scores_sk = np.array([
-            float(np.dot(coef_sk, kernel.pairwise(t[None], X)[0]) + bias_sk)
+        scores_lib = np.array([
+            float(np.dot(coef_lib, kernel.pairwise(t[None], X)[0]) + bias_lib)
             for t in test_seqs
         ])
 
-        np.testing.assert_allclose(scores_smo, scores_sk, atol=0.05)
+        np.testing.assert_allclose(scores_smo, scores_lib, atol=0.05)
 
     def test_smo_esttrunc(self):
         rng = np.random.default_rng(42)
@@ -242,7 +246,7 @@ class TestSmoSolve:
         assert n_sv > 0
 
     def test_solver_auto_selection(self):
-        """solver='auto' uses sklearn for small N."""
+        """solver='auto' uses libsvm for small N."""
         from gkmsvm import train_gkmsvm
 
         rng = np.random.default_rng(42)

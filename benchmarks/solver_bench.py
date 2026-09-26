@@ -1,4 +1,4 @@
-"""Benchmark: SMO solver vs sklearn (LIBSVM) precomputed Gram.
+"""Benchmark: SMO solver vs LIBSVM precomputed Gram.
 
 Compares wall-clock time, support vector count, and score agreement
 across dataset sizes. Both solvers use the same gkm kernel with the
@@ -37,10 +37,10 @@ def random_onehot(n, length, rng):
 
 
 def run_benchmark(sizes, kernel_type, l, k, d, C, seq_len, cache_size):
-    from sklearn.svm import SVC
+    from libsvm.svmutil import svm_train
 
     from gkmsvm.gram import compute_gram
-    from gkmsvm.solver import KernelColumnCache, smo_solve
+    from gkmsvm.solver import smo_solve
     from gkmsvm.svm import KERNEL_BUILDERS, resolve_kernel_type
 
     kernel_type = resolve_kernel_type(kernel_type)
@@ -54,9 +54,9 @@ def run_benchmark(sizes, kernel_type, l, k, d, C, seq_len, cache_size):
     print()
     print(
         f"{'N':>6s}  "
-        f"{'Gram':>7s}  {'sk_solv':>7s}  {'sk_tot':>7s}  "
+        f"{'Gram':>7s}  {'libsvm':>7s}  {'lib_tot':>7s}  "
         f"{'SMO':>7s}  {'Ratio':>6s}  "
-        f"{'SV_sk':>5s}  {'SV_smo':>6s}  "
+        f"{'SV_lib':>6s}  {'SV_smo':>6s}  "
         f"{'MaxΔ':>8s}  {'MeanΔ':>8s}"
     )
     print("-" * 88)
@@ -72,27 +72,30 @@ def run_benchmark(sizes, kernel_type, l, k, d, C, seq_len, cache_size):
 
         test_seqs = random_onehot(20, seq_len, np.random.default_rng(99))
 
-        # --- sklearn: Gram + LIBSVM ---
+        # --- LIBSVM: Gram + C solver ---
         t0 = time.perf_counter()
         gram = compute_gram(kernel, X, chunk_size=1000)
         t_gram = time.perf_counter() - t0
 
+        ids = np.arange(1, N + 1, dtype=np.float64).reshape(-1, 1)
+        x_train = np.hstack([ids, gram])
+
         t0 = time.perf_counter()
-        clf = SVC(kernel="precomputed", C=C)
-        clf.fit(gram, y)
-        t_sk_solve = time.perf_counter() - t0
-        t_sk_total = t_gram + t_sk_solve
+        model = svm_train(y.tolist(), x_train, f"-s 0 -t 4 -c {C} -q")
+        t_lib_solve = time.perf_counter() - t0
+        t_lib_total = t_gram + t_lib_solve
 
-        n_sv_sk = len(clf.support_)
-        coef_sk = np.zeros(N)
-        coef_sk[clf.support_] = clf.dual_coef_[0]
-        bias_sk = float(clf.intercept_[0])
+        n_sv_lib = model.l
+        coef_lib = np.zeros(N)
+        for i in range(n_sv_lib):
+            coef_lib[model.sv_indices[i] - 1] = model.sv_coef[0][i]
+        bias_lib = float(-model.rho[0])
 
-        scores_sk = np.array([
-            float(np.dot(coef_sk, kernel.pairwise(t[None], X)[0]) + bias_sk)
+        scores_lib = np.array([
+            float(np.dot(coef_lib, kernel.pairwise(t[None], X)[0]) + bias_lib)
             for t in test_seqs
         ])
-        del gram
+        del gram, x_train
 
         # --- SMO ---
         t0 = time.perf_counter()
@@ -107,21 +110,21 @@ def run_benchmark(sizes, kernel_type, l, k, d, C, seq_len, cache_size):
             for t in test_seqs
         ])
 
-        max_delta = float(np.max(np.abs(scores_smo - scores_sk)))
-        mean_delta = float(np.mean(np.abs(scores_smo - scores_sk)))
-        ratio = t_sk_total / max(t_smo, 1e-6)
+        max_delta = float(np.max(np.abs(scores_smo - scores_lib)))
+        mean_delta = float(np.mean(np.abs(scores_smo - scores_lib)))
+        ratio = t_lib_total / max(t_smo, 1e-6)
 
         print(
             f"{N:>6d}  "
-            f"{t_gram:>7.3f}  {t_sk_solve:>7.3f}  {t_sk_total:>7.3f}  "
+            f"{t_gram:>7.3f}  {t_lib_solve:>7.3f}  {t_lib_total:>7.3f}  "
             f"{t_smo:>7.3f}  {ratio:>5.2f}x  "
-            f"{n_sv_sk:>5d}  {n_sv_smo:>6d}  "
+            f"{n_sv_lib:>6d}  {n_sv_smo:>6d}  "
             f"{max_delta:>8.4f}  {mean_delta:>8.4f}"
         )
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Benchmark SMO vs sklearn solver")
+    parser = argparse.ArgumentParser(description="Benchmark SMO vs LIBSVM solver")
     parser.add_argument(
         "--sizes", default="100,200,500,1000,2000",
         help="Comma-separated dataset sizes (total N, split 50/50)",

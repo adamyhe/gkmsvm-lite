@@ -45,13 +45,13 @@ def train_gkmsvm(
         H: Center-weight decay (for -t 4, -t 5).
         include_rc: Include reverse complement in kernel.
         solver: ``"auto"`` (precomputed Gram if N²×8 < 50% available RAM/VRAM,
-            else SMO), ``"smo"`` (column-cached SMO), or ``"sklearn"``
-            (precomputed Gram).
+            else SMO), ``"smo"`` (column-cached SMO), or ``"libsvm"``
+            (precomputed Gram + LIBSVM C solver).
         cache_size: Number of kernel columns to cache (SMO only).
         tol: KKT violation tolerance (SMO only).
         max_iter: Maximum SMO iterations.
         sv_chunk_size: Chunk size for inference on the returned model.
-        gram_chunk_size: Tile size for Gram matrix computation (sklearn only).
+        gram_chunk_size: Tile size for Gram matrix computation (libsvm only).
         verbose: Show progress.
 
     Returns:
@@ -83,11 +83,11 @@ def train_gkmsvm(
             print(f"Gram matrix would be {gram_gb:.1f} GB — using SMO solver")
     elif solver == "smo":
         use_smo = True
-    elif solver == "sklearn":
+    elif solver == "libsvm":
         use_smo = False
     else:
         raise ValueError(
-            f"Unknown solver {solver!r}. Use 'auto', 'smo', or 'sklearn'."
+            f"Unknown solver {solver!r}. Use 'auto', 'smo', or 'libsvm'."
         )
 
     if use_smo:
@@ -96,51 +96,55 @@ def train_gkmsvm(
             cache_size=cache_size, tol=tol, max_iter=max_iter,
             sv_chunk_size=sv_chunk_size, verbose=verbose,
         )
-    return _train_sklearn(
+    return _train_libsvm(
         kernel, X, y, C, kernel_type, kernel_params,
         gram_chunk_size=gram_chunk_size,
         sv_chunk_size=sv_chunk_size, verbose=verbose,
     )
 
 
-def _train_sklearn(
+def _train_libsvm(
     kernel, X, y, C, kernel_type, kernel_params, *,
     gram_chunk_size, sv_chunk_size, verbose,
 ) -> GkmSVM:
-    try:
-        from sklearn.svm import SVC
-    except ImportError:
-        raise ImportError(
-            "sklearn solver requires scikit-learn. "
-            "Install with: pip install gkmsvm-lite[train]"
-        )
+    from libsvm.svmutil import svm_train
 
     from gkmsvm.gram import compute_gram
 
+    N = X.shape[0]
     if verbose:
-        n = X.shape[0]
-        print(f"Computing {n}x{n} Gram matrix ({n * n:,} kernel evaluations)...")
+        print(f"Computing {N}x{N} Gram matrix ({N * N:,} kernel evaluations)...")
     gram = compute_gram(kernel, X, chunk_size=gram_chunk_size, verbose=verbose)
 
+    ids = np.arange(1, N + 1, dtype=np.float64).reshape(-1, 1)
+    x_train = np.hstack([ids, gram])
+    del gram
+
+    quiet = "" if verbose else " -q"
     if verbose:
         print("Fitting SVM...")
-    clf = SVC(kernel="precomputed", C=C)
-    clf.fit(gram, y)
+    model = svm_train(y.tolist(), x_train, f"-s 0 -t 4 -c {C}{quiet}")
 
-    sv_indices = clf.support_
-    support_sequences = X[sv_indices]
-    coefficients = clf.dual_coef_[0].astype(support_sequences.dtype)
-    bias = float(clf.intercept_[0])
+    n_sv = model.l
+    sv_indices = np.array(
+        [model.sv_indices[i] - 1 for i in range(n_sv)]
+    )
+    coefficients = np.array(
+        [model.sv_coef[0][i] for i in range(n_sv)],
+        dtype=X.dtype,
+    )
+    bias = float(-model.rho[0])
 
     if verbose:
+        n_pos = int((coefficients > 0).sum())
+        n_neg = int((coefficients <= 0).sum())
         print(
-            f"Training complete: {len(sv_indices)} support vectors "
-            f"({(clf.dual_coef_[0] > 0).sum()} pos, "
-            f"{(clf.dual_coef_[0] <= 0).sum()} neg)"
+            f"Training complete: {n_sv} support vectors "
+            f"({n_pos} pos, {n_neg} neg)"
         )
 
     return GkmSVM(
-        support_sequences=support_sequences,
+        support_sequences=X[sv_indices],
         coefficients=coefficients,
         bias=bias,
         kernel_type=kernel_type,
