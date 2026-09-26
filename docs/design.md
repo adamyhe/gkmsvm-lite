@@ -62,7 +62,19 @@ GPU: CuPy RawKernel with coalesced memory access. Uses `--use_fast_math` and sha
 
 For batch scoring, reduce proportionally (`5000 / batch_size`).
 
-## No dense Gram matrix
+## Training
+
+Two solver backends, selected automatically based on available memory:
+
+**Precomputed Gram + libsvm-official** (default for small N): Computes the full N×N kernel matrix via tiled Gram computation, then calls LIBSVM's C solver through `libsvm-official` (114 KB, BSD-licensed). Supports both C-SVC (`train_gkmsvm`, `-s 0`) and epsilon-SVR (`train_gkmsvr`, `-s 3`). Fast — LIBSVM's SMO is highly optimized — but requires O(N²) memory.
+
+**Column-cached SMO** (large N): WSS1 maximal violating pair working set selection with LRU-cached kernel columns. Memory is O(cache_size × N) instead of O(N²). Currently supports C-SVC only. Pre-packs all training windows into uint32 format once; column computation on cache miss reuses the packed representation.
+
+`solver="auto"` estimates whether N²×8 bytes fits in 50% of available RAM (CPU) or VRAM (GPU). Falls back to SMO when it doesn't.
+
+The scoring formula `Σ coef_i × K(x, sv_i) + bias` is identical for SVC and SVR — only the dual coefficients differ (α_i × y_i for SVC, α_i* − α_i for SVR). The `GkmSVM` model class is shared.
+
+## No dense Gram matrix at scale
 
 LS-GKM exists because the full N×N kernel matrix doesn't fit in memory at scale (50k examples ≈ 10 GB, 90k ≈ 32 GB). Use block/column evaluation with chunked SV inference.
 
@@ -74,9 +86,18 @@ LS-GKM exists because the full N×N kernel matrix doesn't fit in memory at scale
 
 Header key-value pairs until `SV` marker, then `<signed_coef> <DNA_sequence>` per line. Key fields: `svm_type`, `kernel_type`, `L`, `k`, `d`, `norc`, `rho`, `nr_class`, `total_sv`. Auto-detects gzip. Binary classification only (nr_class=2).
 
-## Classic gkmSVM format
+## Classic gkmSVM format (C)
 
-Original gkmSVM (Ghandi et al. 2014) uses OPPOSITE sign convention: `bias = +rho`. Supports both embedded SVs (single file) and two-file format (model + FASTA). Integer kernel types (0-5) are mapped to string names. Load via `load_classic_model(model_path, svseq_path=...)`.
+Original gkmSVM C implementation uses OPPOSITE sign convention: `bias = +rho`. LIBSVM-style `key value` headers followed by `SV` marker. Supports both embedded SVs (single file: `coef sequence` per line) and two-file format (model + FASTA). Integer kernel types (0-5) are mapped to string names. Load via `load_classic_model(model_path, svseq_path=...)`.
+
+## R gkmSVM format
+
+R gkmSVM package (Ghandi et al. 2014, kernlab-based) uses `#`-prefixed headers (`#rho`, `#nsv`, `#npos`, `#nneg`, `#L`, `#k`, `#d`). Two sub-formats:
+
+- **Unified `.gkmmodel`**: headers then FASTA entries where the header line is `>seq_id\tcoefficient`.
+- **Legacy two-file**: `_svalpha.out` (tab-separated `seq_id\tcoef`) plus `_svseq.fa`.
+
+Same bias convention as C gkmSVM: `bias = +rho`. Load via `load_r_gkmsvm_model(path, svseq_path=...)`. Auto-detects `_svseq.fa` companion file when loading `_svalpha.out`.
 
 ## SV diagonal cache
 
@@ -99,10 +120,16 @@ Each l-mer window is packed into a uint32 (2 bits per base, 22 bits for l=11). M
 
 The mismatch table has zero entries for high-mismatch counts. For esttrunc l=11 k=7 d=3, only m=0..3 are non-zero (min_matches=8). For random DNA, P(match)=0.25, so P(>=8 matches out of 11) ≈ 0.12% — 99.88% of window pairs contribute nothing. Both CPU and GPU paths skip the table lookup for pairs below min_matches. On GPU, shared memory caches the query sequence's packed windows so all threads in a block share a single load from global memory.
 
+## Epsilon-SVR
+
+`train_gkmsvr()` trains an epsilon-SVR for continuous-valued prediction (e.g. quantitative chromatin accessibility from lsgkm-svr). The epsilon parameter controls the tube width — errors within ±epsilon are not penalized. Uses LIBSVM's `-s 3` solver with precomputed Gram matrix. SMO SVR (2N dual variables, different box constraints) is deferred — the Gram path handles typical regression dataset sizes.
+
 ## References
 
-- Ghandi et al., "Enhanced regulatory sequence prediction using gapped k-mer features" (2014)
-- Lee, "LS-GKM: a new gkm-SVM for large-scale datasets" (2016)
-- Shrikumar et al., "GkmExplain: fast and accurate interpretation of nonlinear gapped k-mer SVMs" (2019)
+- Ghandi M, Lee D, Mohammad-Noori M, Beer MA. Enhanced regulatory sequence prediction using gapped k-mer features. *PLoS Comput Biol* 10(7):e1003711 (2014). doi:10.1371/journal.pcbi.1003711
+- Lee D. LS-GKM: a new gkm-SVM for large-scale datasets. *Bioinformatics* 32(14):2196–2198 (2016). doi:10.1093/bioinformatics/btw142
+- Shrikumar A, Prakash E, Kundaje A. GkmExplain: fast and accurate interpretation of nonlinear gapped k-mer SVMs. *Bioinformatics* 35(14):i173–i182 (2019). doi:10.1093/bioinformatics/btz322
+- Lee D, Gorkin DU, Baker M, Strober BJ, Asoni AL, McCallion AS, Beer MA. A method to predict the impact of regulatory variants from DNA sequence. *Nat Genet* 47(8):955–961 (2015). doi:10.1038/ng.3331
+- Chang CC, Lin CJ. LIBSVM: a library for support vector machines. *ACM Trans Intell Syst Technol* 2(3):1–27 (2011). doi:10.1145/1961189.1961199
 - Dongwon-Lee/lsgkm: https://github.com/Dongwon-Lee/lsgkm
 - kundajelab/lsgkm (with GkmExplain): https://github.com/kundajelab/lsgkm

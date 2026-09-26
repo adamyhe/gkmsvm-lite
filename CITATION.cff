@@ -1,0 +1,107 @@
+cff-version: 1.2.0
+title: gkmsvm-lite
+message: >-
+  If you use this software, please cite it using the metadata
+  from this file, and cite the original methods papers below.
+type: software
+authors:
+  - given-names: Adam Youlin
+    family-names: He
+    email: ayhe@stanford.edu
+    affiliation: Stanford University
+repository-code: https://github.com/adamyhe/gkmsvm-lite
+license: MIT
+version: 0.1.0
+
+references:
+  - type: article
+    title: "Enhanced regulatory sequence prediction using gapped k-mer features"
+    authors:
+      - given-names: Mahmoud
+        family-names: Ghandi
+      - given-names: Dongwon
+        family-names: Lee
+      - given-names: Morteza
+        family-names: Mohammad-Noori
+      - given-names: Michael A.
+        family-names: Beer
+    journal: PLoS Computational Biology
+    volume: 10
+    issue: 7
+    year: 2014
+    doi: 10.1371/journal.pcbi.1003711
+    scope: "Original gkm-SVM method — kernel definition and R package."
+
+  - type: article
+    title: "LS-GKM: a new gkm-SVM for large-scale datasets"
+    authors:
+      - given-names: Dongwon
+        family-names: Lee
+    journal: Bioinformatics
+    volume: 32
+    issue: 14
+    start: 2196
+    end: 2198
+    year: 2016
+    doi: 10.1093/bioinformatics/btw142
+    scope: "LS-GKM C implementation — estimated/truncated kernels, model format, scalable training."
+
+  - type: article
+    title: "GkmExplain: fast and accurate interpretation of nonlinear gapped k-mer SVMs"
+    authors:
+      - given-names: Avanti
+        family-names: Shrikumar
+      - given-names: Eva
+        family-names: Prakash
+      - given-names: Anshul
+        family-names: Kundaje
+    journal: Bioinformatics
+    volume: 35
+    issue: 14
+    start: i173
+    end: i182
+    year: 2019
+    doi: 10.1093/bioinformatics/btz322
+    scope: "GkmExplain attribution — analytical decomposition of gkm-SVM decisions."
+
+  - type: article
+    title: "A method to predict the impact of regulatory variants from DNA sequence"
+    authors:
+      - given-names: Dongwon
+        family-names: Lee
+      - given-names: David U.
+        family-names: Gorkin
+      - given-names: Maggie
+        family-names: Baker
+      - given-names: Benjamin J.
+        family-names: Strober
+      - given-names: Alessandro L.
+        family-names: Asoni
+      - given-names: Andrew S.
+        family-names: McCallion
+      - given-names: Michael A.
+        family-names: Beer
+    journal: Nature Genetics
+    volume: 47
+    issue: 8
+    start: 955
+    end: 961
+    year: 2015
+    doi: 10.1038/ng.3331
+    scope: "deltaSVM — linear k-mer weight scoring for variant effect prediction."
+
+  - type: article
+    title: "LIBSVM: a library for support vector machines"
+    authors:
+      - given-names: Chih-Chung
+        family-names: Chang
+      - given-names: Chih-Jen
+        family-names: Lin
+    journal: ACM Transactions on Intelligent Systems and Technology
+    volume: 2
+    issue: 3
+    start: 1
+    end: 27
+    year: 2011
+    doi: 10.1145/1961189.1961199
+    scope: "LIBSVM C solver used for SVC and SVR training."

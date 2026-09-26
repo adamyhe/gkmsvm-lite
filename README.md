@@ -5,10 +5,11 @@ A NumPy/CuPy implementation of gapped k-mer SVMs (gkm-SVMs) for DNA sequence cla
 ## Install
 
 ```bash
-pip install -e "."               # CPU (NumPy + Numba)
-pip install -e ".[gpu]"          # GPU (+ CuPy)
-pip install -e ".[dev]"          # + pytest
+pip install gkmsvm-lite              # CPU (NumPy + Numba)
+pip install gkmsvm-lite[gpu]         # GPU (+ CuPy)
 ```
+
+For development installation from source, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Quick start
 
@@ -125,6 +126,24 @@ See [docs/design.md](docs/design.md) for design decisions.
 | [docs/performance.md](docs/performance.md) | Benchmarks, optimization details, tuning guidance |
 | [docs/attribution.md](docs/attribution.md) | Attribution methods and why gradients don't work |
 | [docs/roadmap.md](docs/roadmap.md) | Completed features and what's next |
+
+## Citation
+
+If you use gkmsvm-lite, please cite the relevant methods papers:
+
+> Ghandi M, Lee D, Mohammad-Noori M, Beer MA. Enhanced regulatory sequence prediction using gapped k-mer features. *PLoS Comput Biol* 10(7):e1003711 (2014).
+
+> Lee D. LS-GKM: a new gkm-SVM for large-scale datasets. *Bioinformatics* 32(14):2196–2198 (2016).
+
+If you use GkmExplain attribution:
+
+> Shrikumar A, Prakash E, Kundaje A. GkmExplain: fast and accurate interpretation of nonlinear gapped k-mer SVMs. *Bioinformatics* 35(14):i173–i182 (2019).
+
+If you use DeltaSVM variant scoring:
+
+> Lee D, Gorkin DU, Baker M, Strober BJ, Asoni AL, McCallion AS, Beer MA. A method to predict the impact of regulatory variants from DNA sequence. *Nat Genet* 47(8):955–961 (2015).
+
+See [CITATION.cff](CITATION.cff) for machine-readable citation metadata.
 
 ## License
 

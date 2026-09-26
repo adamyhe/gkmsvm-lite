@@ -15,6 +15,7 @@ from gkmsvm.fasta import extract_loci, read_fasta, write_fasta
 from gkmsvm.importers.classic import load_classic_model
 from gkmsvm.importers.deltasvm import load_deltasvm_weights
 from gkmsvm.importers.lsgkm import load_lsgkm_model
+from gkmsvm.importers.r_gkmsvm import load_r_gkmsvm_model
 from gkmsvm.ism import ism
 from gkmsvm.serialization import load_model
 from gkmsvm.svm import KERNEL_ALIASES, GkmSVM, resolve_kernel_type
@@ -32,6 +33,7 @@ __all__ = [
     "DeltaSVM",
     "load_lsgkm_model",
     "load_classic_model",
+    "load_r_gkmsvm_model",
     "load_deltasvm_weights",
     "read_fasta",
     "write_fasta",
