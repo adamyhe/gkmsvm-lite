@@ -2,9 +2,9 @@
 
 ## Why gradient methods don't work
 
-gkm-SVMs compute kernel values through discrete k-mer counting and mismatch table lookups. There is no meaningful gradient through these operations. **Gradient-based methods (DeepLIFT, DeepSHAP, captum, ledidi) are not compatible with gkm-SVMs.** Do not attempt to differentiate through the kernel.
+gkm-SVMs compute kernel values through discrete k-mer counting and mismatch table lookups. There is no meaningful gradient through these operations. **Gradient-based attribution methods are not compatible with gkm-SVMs.** This includes DeepLIFT, DeepSHAP, Integrated Gradients, Saliency, GradCAM, and gradient-based methods in captum. Ledidi (gradient-based sequence design) is also incompatible.
 
-KernelSHAP is an exception — it is perturbation-based (model-agnostic) and does work on gkm-SVMs, but requires many kernel evaluations per sequence and is orders of magnitude slower than GkmExplain. GkmExplain has theoretical connections to Integrated Gradients and is the recommended attribution method for gkm-SVMs.
+**Perturbation-based methods do work** — they only need to evaluate the model, not differentiate through it. This includes KernelSHAP, Occlusion, Shapley Value Sampling, and Feature Ablation (all available in captum). However, these require many kernel evaluations per sequence and are orders of magnitude slower than GkmExplain. GkmExplain has theoretical connections to Integrated Gradients and is the recommended attribution method for gkm-SVMs.
 
 ## GkmExplain
 
