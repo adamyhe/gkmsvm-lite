@@ -2,7 +2,9 @@
 
 ## Why gradient methods don't work
 
-gkm-SVMs compute kernel values through discrete k-mer counting and mismatch table lookups. There is no meaningful gradient through these operations. **Gradient-based methods (DeepLIFT, SHAP, captum, ledidi) are not compatible with gkm-SVMs.** Do not attempt to differentiate through the kernel — use the methods below instead.
+gkm-SVMs compute kernel values through discrete k-mer counting and mismatch table lookups. There is no meaningful gradient through these operations. **Gradient-based methods (DeepLIFT, DeepSHAP, captum, ledidi) are not compatible with gkm-SVMs.** Do not attempt to differentiate through the kernel.
+
+KernelSHAP is an exception — it is perturbation-based (model-agnostic) and does work on gkm-SVMs, but requires many kernel evaluations per sequence and is orders of magnitude slower than GkmExplain. GkmExplain has theoretical connections to Integrated Gradients and is the recommended attribution method for gkm-SVMs.
 
 ## GkmExplain
 
@@ -78,17 +80,17 @@ deltas = ism(model, x)  # [B, 4, L] — delta scores
 
 ISM in gkmsvm-lite uses a window-delta optimization: when a single base changes, only ~l of the W = L - l + 1 kernel windows are affected. Only these windows are recomputed rather than the full kernel, making ISM ~(W/l)x faster than naive re-scoring.
 
-### When to use ISM vs GkmExplain
+### When to use what
 
-| | GkmExplain | ISM |
-|---|---|---|
-| Speed | 20-30x faster | Slower (one kernel eval per mutation) |
-| Output | Analytical decomposition | Exact score deltas |
-| Interpretation | What contributes to the kernel | What happens if you mutate |
-| Mode 1 | Hypothetical importance at all bases | N/A (ISM is inherently "hypothetical") |
-| Use case | Motif discovery, fast screening | Ground-truth mutation effects |
+| | GkmExplain | ISM | KernelSHAP |
+|---|---|---|---|
+| Speed | 20-30x faster than ISM | One kernel eval per mutation | Orders of magnitude slower |
+| Output | Analytical decomposition | Exact score deltas | Shapley values |
+| Interpretation | What contributes to the kernel | What happens if you mutate | Feature importance with interactions |
+| Mode 1 | Hypothetical importance at all bases | N/A (inherently hypothetical) | N/A |
+| Use case | Motif discovery, fast screening | Ground-truth mutation effects | When Shapley guarantees are needed |
 
-GkmExplain mode 1 delta scores closely match ISM delta scores but are not identical — GkmExplain decomposes the kernel differently than literal re-evaluation. For most applications, GkmExplain is preferred for speed. Use ISM when you need exact mutation impact scores.
+GkmExplain mode 1 delta scores closely match ISM delta scores but are not identical — GkmExplain decomposes the kernel differently than literal re-evaluation. For most applications, GkmExplain is preferred for speed. Use ISM when you need exact mutation impact scores. KernelSHAP provides formal Shapley value guarantees but is impractical for routine use due to the cost of repeated kernel evaluations.
 
 ## Paired REF/ALT scoring
 
