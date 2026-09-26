@@ -9,6 +9,13 @@ description = "Gapped k-mer SVMs for DNA sequence classification"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
 authors = [
     {name = "Adam Youlin He", email = "ayhe@stanford.edu"},
 ]
