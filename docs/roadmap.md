@@ -11,7 +11,8 @@
 - [x] CenterWeightedRbfGkmKernel (`-t 5` / `wgkmrbf` / `weighted_rbf`)
 - [x] GkmSVM with chunked SV evaluation
 - [x] LS-GKM model importer (plain text and gzip)
-- [x] Classic gkmSVM importer (opposite bias sign convention)
+- [x] Classic gkmSVM importer — C gkmSVM LIBSVM-style format (opposite bias sign convention)
+- [x] R gkmSVM importer — `.gkmmodel` unified and `_svalpha.out`/`_svseq.fa` two-file formats
 - [x] DeltaSVM model + importer (linear gapped k-mer scoring)
 - [x] FASTA I/O and pyfaidx locus extraction
 - [x] Oracle validation against Dongwon-Lee/lsgkm `gkmpredict`
@@ -34,14 +35,17 @@
 - [x] Packed SV window caching (CPU + GPU, eliminates redundant packing)
 - [x] tqdm progress bars for inference, ISM, GkmExplain
 - [x] dsQTL benchmark replication (AP=0.19, r=0.73, GPU 337 seq/s, CPU 28 seq/s at 19bp)
-- [x] Training via sklearn SVC with precomputed gkm kernel matrix
+- [x] Training via precomputed Gram matrix (libsvm-official C solver)
 - [x] Tiled Gram matrix computation with symmetry exploitation
 - [x] Model serialization: npz (native) and LS-GKM text (interop) formats
 - [x] `GkmSVM.save()` with auto-format detection
 - [x] `load_model()` unified loader (npz + LS-GKM auto-detect)
 - [x] Column-cached SMO solver (`solver="smo"`) — LRU-cached kernel columns, no N×N Gram matrix, scales to ATAC/ChIP-scale (80K+ sequences)
-- [x] `train_gkmsvm()` solver selection: `auto` / `smo` / `sklearn`
-- [x] 255 tests passing
+- [x] `train_gkmsvm()` solver selection: `auto` / `smo` / `libsvm`
+- [x] Memory-aware solver auto-selection — estimates Gram matrix size against available RAM/VRAM (50% budget)
+- [x] Replaced scikit-learn with libsvm-official (114 KB vs ~100 MB)
+- [x] Epsilon-SVR regression via `train_gkmsvr()` — continuous-valued prediction with configurable epsilon tube
+- [x] 273 tests passing
 
 ## Next
 

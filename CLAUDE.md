@@ -5,11 +5,12 @@ Agent-facing reference for working on this codebase. Human-readable docs are in 
 ## Build and test
 
 ```bash
-pip install -e ".[dev]"          # CPU only
-pip install -e ".[dev,gpu]"      # with CuPy GPU support
+uv pip install -e ".[dev]"          # CPU only
+uv pip install -e ".[dev,gpu]"      # with CuPy GPU support
+uv pip install -e ".[dev,bench]"    # with benchmark dependencies
 pytest tests/ -v
-pytest tests/test_codec.py       # single file
-pytest tests/ -k "test_rc"       # pattern match
+pytest tests/test_codec.py          # single file
+pytest tests/ -k "test_rc"          # pattern match
 ```
 
 ## Source layout
@@ -18,7 +19,7 @@ pytest tests/ -k "test_rc"       # pattern match
 src/gkmsvm/
 ├── __init__.py          # public API re-exports
 ├── svm.py               # GkmSVM model, scoring, chunked inference
-├── train.py             # train_gkmsvm() — sklearn or SMO solver
+├── train.py             # train_gkmsvm() (C-SVC) + train_gkmsvr() (epsilon-SVR)
 ├── solver.py            # KernelColumnCache, smo_solve() — column-cached SMO
 ├── gram.py              # compute_gram() — tiled Gram matrix with symmetry
 ├── serialization.py     # save/load npz and LS-GKM text formats
@@ -37,7 +38,8 @@ src/gkmsvm/
 │   └── weighted.py      # -t 4 wgkm, -t 5 wgkmrbf
 └── importers/
     ├── lsgkm.py         # load_lsgkm_model()
-    ├── classic.py       # load_classic_model()
+    ├── classic.py       # load_classic_model() — C gkmSVM (LIBSVM-style)
+    ├── r_gkmsvm.py      # load_r_gkmsvm_model() — R gkmSVM (.gkmmodel, _svalpha.out)
     └── deltasvm.py      # load_deltasvm_weights()
 ```
 
@@ -65,8 +67,10 @@ src/gkmsvm/
 - Min-matches skip: for esttrunc l=11 k=7 d=3, `min_matches=8`. 99.88% of window pairs skipped.
 - CPU inner loop: Numba `@njit(parallel=True, fastmath=True)`. GPU inner loop: CuPy RawKernel with shared-memory caching.
 - SV diagonal is cached after first computation.
-- Training: `solver="auto"` uses precomputed Gram (sklearn) for N≤20K, column-cached SMO for larger. SMO uses LRU-cached kernel columns — memory is O(cache_size × N) not O(N²).
+- Training: `solver="auto"` estimates Gram matrix size against available RAM/VRAM — uses precomputed Gram + libsvm-official when it fits (< 50% available memory), column-cached SMO otherwise. SMO uses LRU-cached kernel columns — memory is O(cache_size × N) not O(N²).
 - `KernelColumnCache` pre-packs all training windows once, computes single columns via `pairwise_from_indices(bx[1,W,l], by_all)` on cache miss.
+- SVR (`train_gkmsvr`) uses libsvm epsilon-SVR (`-s 3`) with precomputed Gram. SMO SVR is not yet implemented.
+- `libsvm-official` (114 KB, BSD) provides the C solver for both SVC and SVR. No scikit-learn dependency.
 
 ## Gotchas
 
