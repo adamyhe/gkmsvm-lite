@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from gkmsvm.backend import get_array_module
+from gkmsvm.codec import reverse_complement
 from gkmsvm.kernels.base import GkmKernel
 
 
@@ -20,6 +21,9 @@ def compute_gram(
 
     When Y is None, computes K(X, X) with symmetry exploitation —
     only upper-triangle tiles are evaluated, then mirrored.
+
+    Uses the packed uint32 path when available (DirectGkmKernel,
+    EstTruncGkmKernel) for ~3x faster computation on CPU.
 
     Args:
         kernel: A GkmKernel instance.
@@ -37,6 +41,8 @@ def compute_gram(
         Y = X
     N = X.shape[0]
     M = Y.shape[0]
+
+    use_fast = hasattr(kernel, "pairwise_from_indices")
 
     gram = xp.zeros((N, M), dtype=np.float64)
 
@@ -57,14 +63,45 @@ def compute_gram(
         from tqdm import tqdm
         tiles = tqdm(tiles, desc="Gram matrix")
 
+    if use_fast:
+        diag_x = kernel._raw_diagonal(X)
+        if symmetric:
+            diag_y = diag_x
+        else:
+            diag_y = kernel._raw_diagonal(Y)
+
     for r_start, c_start in tiles:
         r_end = min(r_start + chunk_size, N)
         c_end = min(c_start + chunk_size, M)
 
-        tile = kernel.pairwise(X[r_start:r_end], Y[c_start:c_end])
+        if use_fast:
+            tile = _fast_pairwise_tile(
+                kernel, X[r_start:r_end], Y[c_start:c_end]
+            )
+            if kernel.normalize:
+                norm = xp.sqrt(
+                    diag_x[r_start:r_end, None] * diag_y[c_start:c_end][None, :]
+                )
+                tile = tile / xp.clip(norm, 1e-10, None)
+        else:
+            tile = kernel.pairwise(X[r_start:r_end], Y[c_start:c_end])
+
         gram[r_start:r_end, c_start:c_end] = tile
 
         if symmetric and r_start != c_start:
             gram[c_start:c_end, r_start:r_end] = tile.T
 
     return gram
+
+
+def _fast_pairwise_tile(kernel, x, y):
+    """Compute raw pairwise kernel using the packed uint32 path."""
+    bx = kernel.base_index_windows(x)
+    by = kernel.base_index_windows(y)
+    result = kernel.pairwise_from_indices(bx, by)
+
+    if kernel.include_rc:
+        by_rc = kernel.base_index_windows(reverse_complement(y))
+        result = result + kernel.pairwise_from_indices(bx, by_rc)
+
+    return result.astype(x.dtype)
