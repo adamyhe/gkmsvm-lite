@@ -1,4 +1,4 @@
-"""Import R gkmSVM models (Ghandi et al. 2014, R/kernlab package).
+"""Import R gkmSVM models (Ghandi et al. 2016, R/kernlab package).
 
 Two sub-formats:
   - Unified ``.gkmmodel``: single file with ``#``-prefixed headers

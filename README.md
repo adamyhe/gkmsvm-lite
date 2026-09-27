@@ -62,7 +62,7 @@ model.save("my_model.npz")
 from gkmsvm import (
     load_lsgkm_model,      # LS-GKM / kundajelab/lsgkm
     load_classic_model,     # C gkmSVM (LIBSVM-style format)
-    load_r_gkmsvm_model,   # R gkmSVM (Ghandi et al. 2014)
+    load_r_gkmsvm_model,   # R gkmSVM (Ghandi et al. 2016)
     load_deltasvm_weights,  # DeltaSVM k-mer weights
     load_model,             # auto-detect npz or LS-GKM text
 )
@@ -99,6 +99,8 @@ All six LS-GKM kernel types are supported:
 If you use gkmsvm-lite, please cite the relevant methods papers:
 
 > Ghandi M, Lee D, Mohammad-Noori M, Beer MA. Enhanced regulatory sequence prediction using gapped k-mer features. *PLoS Comput Biol* 10(7):e1003711 (2014).
+
+> Ghandi M, Mohammad-Noori M, Ghareghani N, Lee D, Garraway L, Beer MA. gkmSVM: an R package for gapped-kmer SVM. *Bioinformatics* 32(14):2205-2207 (2016).
 
 > Lee D. LS-GKM: a new gkm-SVM for large-scale datasets. *Bioinformatics* 32(14):2196-2198 (2016).
 

@@ -30,7 +30,31 @@ references:
     issue: 7
     year: 2014
     doi: 10.1371/journal.pcbi.1003711
-    scope: "Original gkm-SVM method — kernel definition and R package."
+    scope: "Original gkm-SVM method and kernel definition."
+
+  - type: article
+    title: "gkmSVM: an R package for gapped-kmer SVM"
+    authors:
+      - given-names: Mahmoud
+        family-names: Ghandi
+      - given-names: Morteza
+        family-names: Mohammad-Noori
+      - given-names: Nasimeh
+        family-names: Ghareghani
+      - given-names: Dongwon
+        family-names: Lee
+      - given-names: Levi
+        family-names: Garraway
+      - given-names: Michael A.
+        family-names: Beer
+    journal: Bioinformatics
+    volume: 32
+    issue: 14
+    start: 2205
+    end: 2207
+    year: 2016
+    doi: 10.1093/bioinformatics/btw203
+    scope: "R gkmSVM package — model format used by load_r_gkmsvm_model()."
 
   - type: article
     title: "LS-GKM: a new gkm-SVM for large-scale datasets"

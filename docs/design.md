@@ -96,7 +96,7 @@ Original gkmSVM C implementation uses OPPOSITE sign convention: `bias = +rho`. L
 
 ## R gkmSVM format
 
-R gkmSVM package (Ghandi et al. 2014, kernlab-based) uses `#`-prefixed headers (`#rho`, `#nsv`, `#npos`, `#nneg`, `#L`, `#k`, `#d`). Two sub-formats:
+R gkmSVM package (Ghandi et al. 2016, kernlab-based) uses `#`-prefixed headers (`#rho`, `#nsv`, `#npos`, `#nneg`, `#L`, `#k`, `#d`). Two sub-formats:
 
 - **Unified `.gkmmodel`**: headers then FASTA entries where the header line is `>seq_id\tcoefficient`.
 - **Legacy two-file**: `_svalpha.out` (tab-separated `seq_id\tcoef`) plus `_svseq.fa`.
@@ -132,6 +132,7 @@ The mismatch table has zero entries for high-mismatch counts. For esttrunc l=11 
 ## References
 
 - Ghandi M, Lee D, Mohammad-Noori M, Beer MA. Enhanced regulatory sequence prediction using gapped k-mer features. *PLoS Comput Biol* 10(7):e1003711 (2014). doi:10.1371/journal.pcbi.1003711
+- Ghandi M, Mohammad-Noori M, Ghareghani N, Lee D, Garraway L, Beer MA. gkmSVM: an R package for gapped-kmer SVM. *Bioinformatics* 32(14):2205–2207 (2016). doi:10.1093/bioinformatics/btw203
 - Lee D. LS-GKM: a new gkm-SVM for large-scale datasets. *Bioinformatics* 32(14):2196–2198 (2016). doi:10.1093/bioinformatics/btw142
 - Shrikumar A, Prakash E, Kundaje A. GkmExplain: fast and accurate interpretation of nonlinear gapped k-mer SVMs. *Bioinformatics* 35(14):i173–i182 (2019). doi:10.1093/bioinformatics/btz322
 - Lee D, Gorkin DU, Baker M, Strober BJ, Asoni AL, McCallion AS, Beer MA. A method to predict the impact of regulatory variants from DNA sequence. *Nat Genet* 47(8):955–961 (2015). doi:10.1038/ng.3331

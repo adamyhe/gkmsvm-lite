@@ -41,7 +41,7 @@ Bias convention: `bias = +rho` (opposite from LS-GKM). This is handled automatic
 
 ### R gkmSVM (R/kernlab package)
 
-The original R package (Ghandi et al. 2014) uses `#`-prefixed headers and FASTA-style support vectors.
+The R package (Ghandi et al. 2016) uses `#`-prefixed headers and FASTA-style support vectors.
 
 ```python
 from gkmsvm import load_r_gkmsvm_model
