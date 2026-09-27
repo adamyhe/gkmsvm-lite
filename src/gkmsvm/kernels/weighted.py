@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from gkmsvm.backend import get_array_module
+from gkmsvm.backend import get_array_module, get_strides
 from gkmsvm.codec import reverse_complement
 from gkmsvm.kernels.base import GkmKernel
 
@@ -93,9 +93,7 @@ class CenterWeightedGkmKernel(GkmKernel):
         self.H = H
         self._pos_weights = _center_weights(l, M, H)
 
-    def _per_position_matches(
-        self, x: np.ndarray, y: np.ndarray
-    ) -> np.ndarray:
+    def _per_position_matches(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
         """Per-position match indicators between all window pairs.
 
         Returns:
@@ -108,13 +106,13 @@ class CenterWeightedGkmKernel(GkmKernel):
         Wy = Ly - self.l + 1
 
         # Sliding windows: [B, 4, Wx, l] -> [B, Wx, l, 4]
-        sx = x.strides
+        sx = get_strides(x)
         wx = xp.lib.stride_tricks.as_strided(
             x, shape=(B, C, Wx, self.l), strides=(sx[0], sx[1], sx[2], sx[2])
         )
         wx = xp.ascontiguousarray(wx.transpose(0, 2, 3, 1))
 
-        sy = y.strides
+        sy = get_strides(y)
         wy = xp.lib.stride_tricks.as_strided(
             y, shape=(S, C, Wy, self.l), strides=(sy[0], sy[1], sy[2], sy[2])
         )
@@ -132,7 +130,7 @@ class CenterWeightedGkmKernel(GkmKernel):
         B, C, L = x.shape
         W = L - self.l + 1
 
-        sx = x.strides
+        sx = get_strides(x)
         wx = xp.lib.stride_tricks.as_strided(
             x, shape=(B, C, W, self.l), strides=(sx[0], sx[1], sx[2], sx[2])
         )
@@ -171,7 +169,7 @@ class CenterWeightedGkmKernel(GkmKernel):
         if self.include_rc:
             x_rc = reverse_complement(x)
 
-            sx = x.strides
+            sx = get_strides(x)
             B, C, L = x.shape
             W = L - self.l + 1
             wx = xp.lib.stride_tricks.as_strided(
@@ -179,7 +177,7 @@ class CenterWeightedGkmKernel(GkmKernel):
             )
             wx = xp.ascontiguousarray(wx.transpose(0, 2, 3, 1))
 
-            sxr = x_rc.strides
+            sxr = get_strides(x_rc)
             wx_rc = xp.lib.stride_tricks.as_strided(
                 x_rc, shape=(B, C, W, self.l), strides=(sxr[0], sxr[1], sxr[2], sxr[2])
             )

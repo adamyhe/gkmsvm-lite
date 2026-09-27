@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from gkmsvm.backend import HAS_CUPY, HAS_MLX, get_array_module, to_cpu, to_gpu, to_mlx
+from gkmsvm.backend import HAS_CUPY, HAS_MLX, get_array_module, is_mlx, to_cpu, to_gpu, to_mlx
 from gkmsvm.codec import one_hot_encode
 from gkmsvm.svm import KERNEL_BUILDERS, GkmSVM, resolve_kernel_type
 
@@ -266,7 +266,10 @@ def _fit_libsvm(
     sv_indices = np.array(
         [model.sv_indices[i] - 1 for i in range(n_sv)], dtype=np.intp,
     )
-    sv_seqs = to_cpu(X[sv_indices])
+    if is_mlx(X):
+        sv_seqs = to_cpu(X)[sv_indices]
+    else:
+        sv_seqs = to_cpu(X[sv_indices])
     coefficients = np.array(
         [model.sv_coef[0][i] for i in range(n_sv)],
         dtype=sv_seqs.dtype,
@@ -301,8 +304,12 @@ def _train_smo(
     )
 
     sv_mask = np.abs(to_cpu(coefficients)) > 1e-10
-    support_sequences = to_cpu(X[sv_mask])
-    sv_coefficients = to_cpu(coefficients[sv_mask]).astype(support_sequences.dtype)
+    if is_mlx(X):
+        X_cpu = to_cpu(X)
+        support_sequences = X_cpu[sv_mask]
+    else:
+        support_sequences = to_cpu(X[sv_mask])
+    sv_coefficients = to_cpu(coefficients)[sv_mask].astype(support_sequences.dtype)
 
     if verbose:
         n_pos = int((sv_coefficients > 0).sum())
