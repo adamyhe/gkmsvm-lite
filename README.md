@@ -4,13 +4,14 @@
 [![CI](https://github.com/adamyhe/gkmsvm-lite/actions/workflows/ci.yml/badge.svg)](https://github.com/adamyhe/gkmsvm-lite/actions/workflows/ci.yml)
 [![Downloads](https://static.pepy.tech/badge/gkmsvm-lite)](https://pepy.tech/projects/gkmsvm-lite)
 
-A pure-Python implementation of gapped k-mer SVMs (gkm-SVMs) for DNA sequence analysis. Supports classification (C-SVC) and regression (epsilon-SVR), all six kernel types, GPU acceleration via CuPy, and compatibility with models from LS-GKM, classic gkmSVM, and the R gkmSVM package.
+A pure-Python implementation of gapped k-mer SVMs (gkm-SVMs) for DNA sequence analysis. Supports classification (C-SVC) and regression (epsilon-SVR), all six kernel types, GPU acceleration via CuPy (NVIDIA) and MLX (Apple Silicon), and compatibility with models from LS-GKM, classic gkmSVM, and the R gkmSVM package.
 
 ## Install
 
 ```bash
 pip install gkmsvm-lite              # CPU (NumPy + Numba)
-pip install gkmsvm-lite[gpu]         # GPU (+ CuPy)
+pip install gkmsvm-lite[gpu]         # NVIDIA GPU (+ CuPy)
+pip install gkmsvm-lite[mlx]         # Apple Silicon GPU (+ MLX)
 ```
 
 For development installation from source, see [CONTRIBUTING.md](CONTRIBUTING.md).
@@ -36,8 +37,9 @@ delta = model(alt).item() - model(ref).item()
 attr = gkmexplain(model, x, mode=0)  # [1, 4, 16] importance scores
 deltas = ism(model, x)                # [1, 4, 16] mutation deltas
 
-# GPU acceleration (~6x speedup)
-model.cuda()
+# GPU acceleration
+model.cuda()  # NVIDIA (~6x speedup)
+model.mlx()   # Apple Silicon (~2-6x speedup)
 ```
 
 ## Train a model

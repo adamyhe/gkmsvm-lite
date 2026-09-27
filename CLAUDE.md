@@ -28,7 +28,7 @@ src/gkmsvm/
 ├── explain.py           # GkmExplain attribution
 ├── deltasvm.py          # DeltaSVM linear scoring
 ├── fasta.py             # FASTA I/O, extract_loci (vendored tangermeme)
-├── backend.py           # get_array_module (numpy/cupy dispatch)
+├── backend.py           # get_array_module (numpy/cupy/mlx dispatch)
 ├── _threading.py        # Numba threading layer pin
 ├── kernels/
 │   ├── base.py          # GkmKernel ABC
@@ -45,11 +45,11 @@ src/gkmsvm/
 
 ## Conventions
 
-- Python >=3.10, NumPy, Numba >=0.57, tqdm. CuPy >=12 optional (`[gpu]` extra)
+- Python >=3.10, NumPy, Numba >=0.57, tqdm. CuPy >=12 optional (`[gpu]` extra). MLX >=0.10 optional (`[mlx]` extra)
 - Array format: `[batch, 4, length]` one-hot DNA, channel order A=0/C=1/G=2/T=3
 - Output: `[batch, 1]` floating-point margin scores
-- Arrays are numpy.ndarray (CPU) or cupy.ndarray (GPU)
-- `model.cuda()` / `model.cpu()` moves arrays between devices
+- Arrays are numpy.ndarray (CPU), cupy.ndarray (NVIDIA GPU), or mlx.core.array (Apple GPU)
+- `model.cuda()` / `model.mlx()` / `model.cpu()` moves arrays between devices
 - Kernel normalization on by default, RC equivalence on by default
 - Score = `Σ coef_i × K(x, sv_i) + bias` where `bias = -rho` (LS-GKM) or `+rho` (classic gkmSVM)
 - `resolve_kernel_type()` maps aliases and integers to canonical internal names
@@ -62,10 +62,11 @@ src/gkmsvm/
 
 ## Key implementation details
 
-- Forward pass and ISM use the packed uint32 path (XOR + popcount). GkmExplain uses packed pre-filter + bit extraction from packed uint32 (no float intermediates). CPU: fused Numba kernel. GPU: fused CuPy RawKernel with coalesced access and shared memory. Weighted kernels use the float one-hot path.
-- Packed SV windows are cached on the model for both CPU and GPU. First call packs; subsequent calls reuse.
+- Forward pass and ISM use the packed uint32 path (XOR + popcount). GkmExplain uses packed pre-filter + bit extraction from packed uint32 (no float intermediates). CPU: fused Numba kernel. NVIDIA GPU: fused CuPy RawKernel with coalesced access and shared memory. Apple GPU: custom Metal shaders via `mx.fast.metal_kernel`. Weighted kernels use the float one-hot path.
+- Packed SV windows are cached on the model for CPU, NVIDIA GPU, and MLX. First call packs; subsequent calls reuse.
 - Min-matches skip: for esttrunc l=11 k=7 d=3, `min_matches=8`. 99.88% of window pairs skipped.
-- CPU inner loop: Numba `@njit(parallel=True, fastmath=True)`. GPU inner loop: CuPy RawKernel with shared-memory caching.
+- CPU inner loop: Numba `@njit(parallel=True, fastmath=True)`. NVIDIA GPU inner loop: CuPy RawKernel with shared-memory caching. Apple GPU inner loop: Metal kernel with per-thread accumulation and `popcount()`.
+- MLX compatibility: `get_strides()` for arrays without `.strides`, `xp.ascontiguousarray()` for `.copy()`, `to_cpu(X)[indices]` for fancy indexing. DeltaSVM auto-chunks intermediates >256 MB.
 - SV diagonal is cached after first computation.
 - Training: `solver="auto"` estimates Gram matrix size against available RAM/VRAM — uses precomputed Gram + libsvm-official when it fits (< 50% available memory), column-cached SMO otherwise. SMO uses LRU-cached kernel columns — memory is O(cache_size × N) not O(N²).
 - `KernelColumnCache` pre-packs all training windows once, computes single columns via `pairwise_from_indices(bx[1,W,l], by_all)` on cache miss.

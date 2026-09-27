@@ -13,7 +13,7 @@ Fused Numba kernels (`@njit(parallel=True, fastmath=True)`) combine match-count,
 
 Packed SV windows are cached on the model after first call, eliminating redundant packing on repeated scoring.
 
-## GPU backend
+## NVIDIA GPU backend (CuPy)
 
 CuPy RawKernel CUDA code with:
 
@@ -24,6 +24,22 @@ CuPy RawKernel CUDA code with:
 - **`--use_fast_math`**: Enables fast math intrinsics.
 
 GPU uses float32 accumulation for the float path. Score differences between CPU and GPU are <3e-3 due to float32 diagonal computation on GPU.
+
+## Apple Silicon GPU backend (MLX)
+
+Custom Metal shaders via `mx.fast.metal_kernel` with the same algorithmic approach as the CUDA path:
+
+- **Packed uint32 XOR + popcount**: Each l-mer packed into a uint32. Metal's hardware `popcount()` counts mismatches in a single instruction.
+- **Per-thread early exit**: `min_matches` threshold skips window pairs that contribute nothing, same as the CUDA path.
+- **No intermediate materialization**: Each Metal thread accumulates its own (batch, SV) result — no `[B, S, Wx, Wy]` tensor.
+- **`mx.as_strided` sliding windows**: Native MLX strided view replaces the Python-loop concatenation that was the initial performance bottleneck.
+
+MLX arrays lack some NumPy features (`.strides`, `.copy()`, fancy indexing). These are handled by:
+- `get_strides()` helper returning zeros for MLX (the MLX shim's `_mlx_sliding_windows` computes strides from shape).
+- `xp.ascontiguousarray()` in place of `.copy()`.
+- `to_cpu(X)[indices]` guard in training code (transfers to numpy before fancy indexing).
+
+DeltaSVM auto-chunks batch dimension when intermediates would exceed 256 MB, preventing memory thrashing on Apple Silicon's unified memory.
 
 ## Chunked SV inference
 
@@ -42,6 +58,8 @@ For batch scoring, reduce proportionally (`5000 / batch_size`). GkmExplain defau
 When a single base changes, only ~l of the W = L - l + 1 windows are affected. ISM computes the delta from affected windows only, rather than recomputing the full kernel.
 
 ## Throughput benchmarks
+
+### NVIDIA GPU (ENCFF579AOX, 72K SVs)
 
 All benchmarks use the ENCODE ENCFF579AOX model (72,145 SVs, esttrunc l=11 k=7 d=3). GPU: RTX 3080. CPU: Numba parallel threading on all available cores. Steady-state throughput (packed SV windows cached).
 
@@ -105,6 +123,24 @@ Throughput scales as O(W² × S) per query where W = seq_len - l + 1 and S = num
 
 - **GPU**: Batch size has minimal impact on throughput (GPU is compute-bound). Use batch_size=16-64 to save VRAM without sacrificing speed.
 - **CPU**: Larger batches help at short sequences (up to ~1.5x at 19bp). At 200bp+, batch size doesn't matter.
+
+### Apple Silicon GPU (Nanog, 8.8K SVs)
+
+Benchmarks use the Nanog reference model (8,873 SVs, esttrunc l=11 k=7 d=3) on an M1 MacBook Pro (16 GB unified memory). Custom Metal kernels via `mx.fast.metal_kernel`.
+
+| Config | CPU (seq/s) | MLX (seq/s) | Speedup |
+|---|---|---|---|
+| batch=1, 19bp | 215 | 387 | 1.8x |
+| batch=1, 50bp | 46 | 126 | 2.7x |
+| batch=4, 50bp | 48 | 277 | 5.8x |
+| batch=16, 50bp | 49 | 308 | 6.3x |
+| batch=1, 100bp | 20 | 61 | 3.1x |
+| batch=4, 100bp | 22 | 129 | 5.9x |
+| batch=16, 100bp | 23 | 140 | 6.1x |
+
+MLX throughput scales well with batch size (GPU saturation). At batch=16 the speedup plateaus at ~6x.
+
+DeltaSVM (linear k-mer scoring) gets 1.7-2.5x on MLX. The gather-heavy combinatorial path doesn't benefit from GPU as much as the fused XOR+popcount kernel path.
 
 ## Reproducing benchmarks
 
