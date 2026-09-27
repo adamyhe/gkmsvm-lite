@@ -9,7 +9,7 @@ import pytest
 
 from gkmsvm.codec import one_hot_encode, reverse_complement
 from gkmsvm.deltasvm import DeltaSVM, _kmer_to_index, _index_to_kmer
-from gkmsvm.importers.deltasvm import load_deltasvm_weights
+from gkmsvm.importers.deltasvm import load_deltasvm_model
 
 
 def _make_seqs(n, length, seed=42):
@@ -168,7 +168,7 @@ class TestDeltaSVMImporter:
         path = tmp_path / "weights.txt"
         self._write_weight_file(path, k, weights_dict)
 
-        model = load_deltasvm_weights(path, l=5)
+        model = load_deltasvm_model(path, l=5)
         assert model.k == 3
         assert model.l == 5
         assert model.weights.shape == (64,)
@@ -188,7 +188,7 @@ class TestDeltaSVMImporter:
                 kmer = _index_to_kmer(idx, k)
                 f.write(f"{kmer}\t{rng.gauss(0, 1)}\n")
 
-        model = load_deltasvm_weights(path, l=5)
+        model = load_deltasvm_model(path, l=5)
         assert model.k == 3
 
     def test_load_sparse(self, tmp_path):
@@ -198,7 +198,7 @@ class TestDeltaSVMImporter:
             f.write("ACG\t1.5\n")
             f.write("TGA\t-0.3\n")
 
-        model = load_deltasvm_weights(path, l=5)
+        model = load_deltasvm_model(path, l=5)
         assert float(model.weights[_kmer_to_index("ACG")]) == pytest.approx(1.5)
         assert float(model.weights[_kmer_to_index("TGA")]) == pytest.approx(-0.3)
         assert model.num_kmers == 2
@@ -211,7 +211,7 @@ class TestDeltaSVMImporter:
             f.write("\n")
             f.write("TGA\t2.0\n")
 
-        model = load_deltasvm_weights(path, l=5)
+        model = load_deltasvm_model(path, l=5)
         assert model.num_kmers == 2
 
     def test_invalid_base(self, tmp_path):
@@ -220,7 +220,7 @@ class TestDeltaSVMImporter:
             f.write("ACN\t1.0\n")
 
         with pytest.raises(ValueError, match="invalid bases"):
-            load_deltasvm_weights(path, l=5)
+            load_deltasvm_model(path, l=5)
 
     def test_inconsistent_kmer_length(self, tmp_path):
         path = tmp_path / "bad.txt"
@@ -229,7 +229,7 @@ class TestDeltaSVMImporter:
             f.write("ACGT\t2.0\n")
 
         with pytest.raises(ValueError, match="k-mer length"):
-            load_deltasvm_weights(path, l=5)
+            load_deltasvm_model(path, l=5)
 
     def test_l_less_than_k(self, tmp_path):
         path = tmp_path / "weights.txt"
@@ -237,7 +237,7 @@ class TestDeltaSVMImporter:
             f.write("ACGTACG\t1.0\n")
 
         with pytest.raises(ValueError, match="l.*must be >= k"):
-            load_deltasvm_weights(path, l=3)
+            load_deltasvm_model(path, l=3)
 
     def test_end_to_end(self, tmp_path):
         """Load weights, score a sequence, compare to naive."""
@@ -247,7 +247,7 @@ class TestDeltaSVMImporter:
         path = tmp_path / "weights.txt"
         self._write_weight_file(path, k, weights_dict)
 
-        model = load_deltasvm_weights(path, l=l, include_rc=True)
+        model = load_deltasvm_model(path, l=l, include_rc=True)
         seq = _make_seqs(1, 20, seed=13)[0]
         x = one_hot_encode(seq)[np.newaxis]
 

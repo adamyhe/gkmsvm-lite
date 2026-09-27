@@ -63,11 +63,11 @@ Bias convention: `bias = +rho` (same as C gkmSVM).
 DeltaSVM models are k-mer weight files, not full SVMs. They provide fast linear approximations for variant effect scoring.
 
 ```python
-from gkmsvm import load_deltasvm_weights
+from gkmsvm import load_deltasvm_model
 from gkmsvm import DeltaSVM
 
 # Load from k-mer weight file
-model = load_deltasvm_weights("weights.txt")
+model = load_deltasvm_model("weights.txt")
 
 # Score sequences
 scores = model(x)  # [B, 1]

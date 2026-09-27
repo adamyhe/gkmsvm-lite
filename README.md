@@ -63,7 +63,7 @@ from gkmsvm import (
     load_lsgkm_model,      # LS-GKM / kundajelab/lsgkm
     load_classic_model,     # C gkmSVM (LIBSVM-style format)
     load_r_gkmsvm_model,   # R gkmSVM (Ghandi et al. 2016)
-    load_deltasvm_weights,  # DeltaSVM k-mer weights
+    load_deltasvm_model,    # DeltaSVM k-mer weights
     load_model,             # auto-detect npz or LS-GKM text
 )
 ```

@@ -461,8 +461,9 @@ class TestMLXTraining:
 
         np.testing.assert_allclose(mlx_scores, cpu_scores, atol=1e-5)
 
-    def test_model_returns_numpy_arrays(self):
+    def test_model_returns_on_device(self):
         from gkmsvm import train_gkmsvm
+        from gkmsvm.backend import is_mlx
 
         rng = np.random.default_rng(42)
         pos = _random_seqs_str(15, 20, rng)
@@ -473,8 +474,9 @@ class TestMLXTraining:
             device="mlx",
         )
 
-        assert isinstance(model.support_sequences, np.ndarray)
-        assert isinstance(model.coefficients, np.ndarray)
+        assert model._on_mlx
+        assert is_mlx(model.support_sequences)
+        assert is_mlx(model.coefficients)
 
     def test_device_auto_selects(self):
         from gkmsvm import train_gkmsvm
@@ -488,4 +490,4 @@ class TestMLXTraining:
             device="auto",
         )
         assert model.num_support_vectors > 0
-        assert isinstance(model.support_sequences, np.ndarray)
+        assert model._on_mlx

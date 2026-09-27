@@ -126,10 +126,10 @@ def load_dsqtl_effect_sizes(gz_path: Path) -> dict[str, float]:
 def run_deltasvm_replication(variants: dict, device: str = "cpu") -> dict:
     """Score all variants with deltaSVM and compute replication metrics."""
     from gkmsvm.codec import one_hot_encode
-    from gkmsvm.importers.deltasvm import load_deltasvm_weights
+    from gkmsvm.importers.deltasvm import load_deltasvm_model
 
     print("Loading deltaSVM weights...")
-    model = load_deltasvm_weights(
+    model = load_deltasvm_model(
         str(DATA_DIR / "gm12878_deltasvm_weights.txt"),
         l=10,
         include_rc=False,

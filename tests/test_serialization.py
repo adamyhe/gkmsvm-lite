@@ -85,7 +85,7 @@ class TestLsgkmRoundTrip:
     def test_save_load_txt(self, tmp_path):
         model = _make_model()
         path = tmp_path / "model.txt"
-        model.save(str(path), format="lsgkm")
+        model.save(str(path), fmt="lsgkm")
 
         loaded = load_lsgkm_model(str(path))
 
@@ -96,7 +96,7 @@ class TestLsgkmRoundTrip:
     def test_save_load_gz(self, tmp_path):
         model = _make_model()
         path = tmp_path / "model.txt.gz"
-        model.save(str(path), format="lsgkm")
+        model.save(str(path), fmt="lsgkm")
 
         loaded = load_lsgkm_model(str(path))
 
@@ -109,7 +109,7 @@ class TestLsgkmRoundTrip:
         scores_before = model(x)
 
         path = tmp_path / "model.txt"
-        model.save(str(path), format="lsgkm")
+        model.save(str(path), fmt="lsgkm")
         loaded = load_lsgkm_model(str(path))
         scores_after = loaded(x)
 
@@ -118,7 +118,7 @@ class TestLsgkmRoundTrip:
     def test_load_model_auto_detect_txt(self, tmp_path):
         model = _make_model()
         path = tmp_path / "model.txt"
-        model.save(str(path), format="lsgkm")
+        model.save(str(path), fmt="lsgkm")
 
         loaded = load_model(str(path))
         assert loaded.kernel_type == model.kernel_type
@@ -126,7 +126,7 @@ class TestLsgkmRoundTrip:
     def test_rho_sign_convention(self, tmp_path):
         model = _make_model()
         path = tmp_path / "model.txt"
-        model.save(str(path), format="lsgkm")
+        model.save(str(path), fmt="lsgkm")
 
         with open(path) as f:
             for line in f:
@@ -140,11 +140,11 @@ class TestSaveMethod:
     def test_format_override(self, tmp_path):
         model = _make_model()
         path = tmp_path / "model.bin"
-        model.save(str(path), format="npz")
+        model.save(str(path), fmt="npz")
         loaded = load_model(str(path) + ".npz")
         assert loaded.kernel_type == model.kernel_type
 
     def test_invalid_format(self, tmp_path):
         model = _make_model()
         with pytest.raises(ValueError, match="Unknown format"):
-            model.save(str(tmp_path / "x"), format="pickle")
+            model.save(str(tmp_path / "x"), fmt="pickle")

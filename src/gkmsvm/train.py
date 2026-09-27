@@ -92,13 +92,13 @@ def train_gkmsvm(
         return _train_smo(
             kernel, X, y, C, kernel_type, kernel_params,
             cache_size=cache_size, tol=tol, max_iter=max_iter,
-            sv_chunk_size=sv_chunk_size, verbose=verbose,
+            sv_chunk_size=sv_chunk_size, device=device, verbose=verbose,
         )
     return _fit_libsvm(
         kernel, X, y, f"-s 0 -c {C}",
         kernel_type, kernel_params,
         gram_chunk_size=gram_chunk_size,
-        sv_chunk_size=sv_chunk_size, verbose=verbose,
+        sv_chunk_size=sv_chunk_size, device=device, verbose=verbose,
     )
 
 
@@ -164,7 +164,7 @@ def train_gkmsvr(
         kernel, X, y, f"-s 3 -c {C} -p {epsilon}",
         kernel_type, kernel_params,
         gram_chunk_size=gram_chunk_size,
-        sv_chunk_size=sv_chunk_size, verbose=verbose,
+        sv_chunk_size=sv_chunk_size, device=device, verbose=verbose,
     )
 
 
@@ -241,7 +241,7 @@ def _build_kernel(kernel_type, l, k, d, gamma, M, H, include_rc):
 
 def _fit_libsvm(
     kernel, X, y, libsvm_opts, kernel_type, kernel_params, *,
-    gram_chunk_size, sv_chunk_size, verbose,
+    gram_chunk_size, sv_chunk_size, device="cpu", verbose=False,
 ) -> GkmSVM:
     """Compute Gram matrix and fit with LIBSVM's C solver."""
     from libsvm.svmutil import svm_train
@@ -286,12 +286,13 @@ def _fit_libsvm(
         kernel_type=kernel_type,
         kernel_params=kernel_params,
         sv_chunk_size=sv_chunk_size,
+        device=device,
     )
 
 
 def _train_smo(
     kernel, X, y, C, kernel_type, kernel_params, *,
-    cache_size, tol, max_iter, sv_chunk_size, verbose,
+    cache_size, tol, max_iter, sv_chunk_size, device="cpu", verbose=False,
 ) -> GkmSVM:
     from gkmsvm.solver import smo_solve
 
@@ -326,6 +327,7 @@ def _train_smo(
         kernel_type=kernel_type,
         kernel_params=kernel_params,
         sv_chunk_size=sv_chunk_size,
+        device=device,
     )
 
 
