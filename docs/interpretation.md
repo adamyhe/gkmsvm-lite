@@ -60,7 +60,7 @@ GkmExplain processes support vectors in chunks to avoid GPU OOM on large models.
 attr = gkmexplain(model, x, mode=0, sv_chunk_size=1000)
 ```
 
-GkmExplain uses a packed uint32 pre-filter to skip ~99.88% of window pairs (those beyond the mismatch threshold `d`), then decomposes only the contributing pairs per-position. Per-position base identity is extracted directly from packed uint32 via bit shifts, eliminating all float intermediate arrays. On CPU, a fused Numba kernel parallelizes over (batch, SV) pairs. On GPU, a fused CuPy RawKernel uses one CUDA thread per (batch, SV) pair with coalesced memory access and shared-memory caching — ~19x less GPU memory than the vectorized approach. This makes GkmExplain roughly **2x faster than ISM** for typical parameters (l=11, k=7, d=3).
+GkmExplain uses a packed uint32 pre-filter to skip ~99.88% of window pairs (those beyond the mismatch threshold `d`), then decomposes only the contributing pairs per-position. Per-position base identity is extracted directly from packed uint32 via bit shifts, eliminating all float intermediate arrays. On CPU, a fused Numba kernel parallelizes over (batch, SV) pairs. On NVIDIA GPU, a fused CuPy RawKernel uses one CUDA thread per (batch, SV) pair with coalesced memory access and shared-memory caching — ~19x less GPU memory than the vectorized approach. On Apple Silicon, GkmExplain falls back to the CPU path (the dense per-position decomposition doesn't map to the same Metal kernel pattern as the forward pass). This makes GkmExplain roughly **2x faster than ISM** for typical parameters (l=11, k=7, d=3).
 
 ## In-silico mutagenesis (ISM)
 
@@ -79,6 +79,8 @@ deltas = ism(model, x)  # [B, 4, L] — delta scores
 ### Window-delta optimization
 
 ISM in gkmsvm-lite uses a window-delta optimization: when a single base changes, only ~l of the W = L - l + 1 kernel windows are affected. Only these windows are recomputed rather than the full kernel, making ISM ~(W/l)x faster than naive re-scoring.
+
+ISM works on all backends (CPU, NVIDIA GPU, and Apple Silicon MLX). On MLX, ISM uses the custom Metal kernels for the kernel evaluation step.
 
 ### When to use what
 

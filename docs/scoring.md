@@ -134,11 +134,14 @@ Recommended chunk sizes for single-sequence scoring at 300bp:
 
 | GPU VRAM | `sv_chunk_size` | Peak memory |
 |---|---|---|
-| 10 GB | 5000 | ~3.4 GB |
-| 16+ GB | 10000 | ~6.8 GB |
+| 10 GB NVIDIA | 5000 | ~3.4 GB |
+| 16+ GB NVIDIA | 10000 | ~6.8 GB |
+| 16 GB Apple Silicon | 5000 | ~3.4 GB (unified memory shared with system) |
 | CPU | 5000 or None | N/A |
 
 For batch scoring, reduce proportionally (`5000 / batch_size`).
+
+**Apple Silicon note:** MLX uses unified memory shared between CPU and GPU. Keep batch sizes moderate (4-16) and be aware that other applications (browsers, other processes) compete for the same memory pool. DeltaSVM auto-chunks large batches to prevent memory thrashing.
 
 ## One-hot encoding
 
