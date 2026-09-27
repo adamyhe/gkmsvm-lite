@@ -79,6 +79,7 @@ def load_lsgkm_model(
     *,
     dtype: np.dtype | type = np.float32,
     sv_chunk_size: int | None = None,
+    device: str = "cpu",
 ) -> GkmSVM:
     """Load an LS-GKM model file and return a GkmSVM instance.
 
@@ -88,6 +89,8 @@ def load_lsgkm_model(
         path: Path to the .model.txt or .model.txt.gz file.
         dtype: Array dtype for model weights.
         sv_chunk_size: Optional chunk size for batched inference over SVs.
+        device: ``"cpu"`` (default), ``"cuda"``, ``"mlx"``, or ``"auto"``
+            (CuPy if available, else MLX, else CPU).
 
     Returns:
         A GkmSVM instance with imported weights.
@@ -177,4 +180,5 @@ def load_lsgkm_model(
         kernel_type=kernel_type_str,
         kernel_params=kernel_params,
         sv_chunk_size=sv_chunk_size,
+        device=device,
     )

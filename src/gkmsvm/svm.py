@@ -131,6 +131,7 @@ class GkmSVM:
         kernel_params: dict,
         *,
         sv_chunk_size: int | None = None,
+        device: str = "cpu",
     ):
         if support_sequences.ndim != 3 or support_sequences.shape[1] != 4:
             raise ValueError(
@@ -161,6 +162,26 @@ class GkmSVM:
         self._on_gpu = False
         self._on_mlx = False
 
+        if device != "cpu":
+            self._to_device(device)
+
+    def _to_device(self, device: str) -> None:
+        """Move model to the specified device."""
+        from gkmsvm.backend import HAS_CUPY, HAS_MLX
+        if device in ("cuda", "gpu"):
+            self.cuda()
+        elif device == "mlx":
+            self.mlx()
+        elif device == "auto":
+            if HAS_CUPY:
+                self.cuda()
+            elif HAS_MLX:
+                self.mlx()
+        elif device != "cpu":
+            raise ValueError(
+                f"Unknown device {device!r}. Use 'auto', 'cpu', 'cuda', or 'mlx'."
+            )
+
     @property
     def num_support_vectors(self) -> int:
         return self.support_sequences.shape[0]
@@ -170,11 +191,25 @@ class GkmSVM:
         return dict(self._kernel_params)
 
     def _invalidate_caches(self):
+        had_gpu = is_gpu(self._sv_idx_windows) if self._sv_idx_windows is not None else self._on_gpu
+        had_mlx = is_mlx(self._sv_idx_windows) if self._sv_idx_windows is not None else self._on_mlx
         self._cached_sv_diag = None
         self._sv_idx_windows = None
         self._sv_rc_idx_windows = None
         self._sv_packed_t = None
         self._sv_rc_packed_t = None
+        if had_mlx:
+            try:
+                import mlx.core as mx
+                mx.clear_cache()
+            except (ImportError, AttributeError):
+                pass
+        if had_gpu:
+            try:
+                import cupy as cp
+                cp.get_default_memory_pool().free_all_blocks()
+            except (ImportError, AttributeError):
+                pass
 
     def cuda(self) -> GkmSVM:
         """Move model arrays to GPU (CuPy)."""

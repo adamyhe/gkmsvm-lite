@@ -31,6 +31,7 @@ def load_r_gkmsvm_model(
     svseq_path: str | Path | None = None,
     dtype: np.dtype | type = np.float32,
     sv_chunk_size: int | None = None,
+    device: str = "cpu",
 ) -> GkmSVM:
     """Load an R gkmSVM model.
 
@@ -46,6 +47,7 @@ def load_r_gkmsvm_model(
             the loader looks for a sibling ``_svseq.fa``.
         dtype: Array dtype for model weights.
         sv_chunk_size: Optional chunk size for batched SV inference.
+        device: ``"cpu"`` (default), ``"cuda"``, ``"mlx"``, or ``"auto"``.
 
     Returns:
         A GkmSVM instance with bias = +rho.
@@ -53,22 +55,22 @@ def load_r_gkmsvm_model(
     path = Path(path)
 
     if svseq_path is not None:
-        return _load_twofile(path, Path(svseq_path), dtype, sv_chunk_size)
+        return _load_twofile(path, Path(svseq_path), dtype, sv_chunk_size, device)
 
     if path.name.endswith("_svalpha.out"):
         stem = path.name[: -len("_svalpha.out")]
         candidate = path.parent / f"{stem}_svseq.fa"
         if candidate.exists():
-            return _load_twofile(path, candidate, dtype, sv_chunk_size)
+            return _load_twofile(path, candidate, dtype, sv_chunk_size, device)
         raise FileNotFoundError(
             f"Expected companion file {candidate} for {path}"
         )
 
-    return _load_gkmmodel(path, dtype, sv_chunk_size)
+    return _load_gkmmodel(path, dtype, sv_chunk_size, device)
 
 
 def _load_gkmmodel(
-    path: Path, dtype, sv_chunk_size,
+    path: Path, dtype, sv_chunk_size, device="cpu",
 ) -> GkmSVM:
     """Parse unified .gkmmodel format with #-prefixed headers."""
     header: dict = {}
@@ -109,11 +111,11 @@ def _load_gkmmodel(
             coefficients.append(current_seq_coef)
             sequences.append("".join(seq_lines))
 
-    return _build_model(header, coefficients, sequences, dtype, sv_chunk_size)
+    return _build_model(header, coefficients, sequences, dtype, sv_chunk_size, device)
 
 
 def _load_twofile(
-    alpha_path: Path, svseq_path: Path, dtype, sv_chunk_size,
+    alpha_path: Path, svseq_path: Path, dtype, sv_chunk_size, device="cpu",
 ) -> GkmSVM:
     """Parse legacy two-file format: _svalpha.out + _svseq.fa."""
     header: dict = {}
@@ -141,7 +143,7 @@ def _load_twofile(
     sv_records = read_fasta(svseq_path)
     sequences = [seq for _, seq in sv_records]
 
-    return _build_model(header, coefficients, sequences, dtype, sv_chunk_size)
+    return _build_model(header, coefficients, sequences, dtype, sv_chunk_size, device)
 
 
 def _parse_header(header: dict, key: str, value: str) -> None:
@@ -161,6 +163,7 @@ def _build_model(
     sequences: list[str],
     dtype,
     sv_chunk_size,
+    device="cpu",
 ) -> GkmSVM:
     if not sequences:
         raise ValueError("No support vector sequences found")
@@ -212,4 +215,5 @@ def _build_model(
         kernel_type=kernel_type,
         kernel_params=kernel_params,
         sv_chunk_size=sv_chunk_size,
+        device=device,
     )
