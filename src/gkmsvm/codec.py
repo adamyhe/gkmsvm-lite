@@ -62,7 +62,7 @@ def reverse_complement(arr: np.ndarray) -> np.ndarray:
     if arr.shape[-2] != 4:
         raise ValueError(f"Channel dimension must be 4, got {arr.shape[-2]}")
     xp = get_array_module(arr)
-    return xp.flip(xp.flip(arr, axis=-2), axis=-1).copy()
+    return xp.ascontiguousarray(xp.flip(xp.flip(arr, axis=-2), axis=-1))
 
 
 def validate(arr: np.ndarray) -> None:

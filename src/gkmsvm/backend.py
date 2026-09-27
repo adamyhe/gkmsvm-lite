@@ -83,6 +83,13 @@ def is_mlx(x: Any) -> bool:
     return HAS_MLX and isinstance(x, mx.array)
 
 
+def get_strides(x: Any) -> tuple:
+    """Return array strides, or zeros for MLX (which has no strides)."""
+    if hasattr(x, "strides"):
+        return x.strides
+    return (0,) * x.ndim
+
+
 # ---------------------------------------------------------------------------
 # MLX shim — adapts mlx.core to look like numpy/cupy where they differ
 # ---------------------------------------------------------------------------
@@ -182,7 +189,7 @@ class _MlxShim:
 
 
 def _mlx_sliding_windows(x: Any, shape: tuple, strides: tuple) -> Any:
-    """Implement as_strided for MLX using explicit slicing.
+    """Implement as_strided for MLX using mx.as_strided.
 
     Only handles the sliding-window patterns used in gkmsvm:
     - [B, C, W, l] from [B, C, L] (flat_windows)
@@ -194,17 +201,12 @@ def _mlx_sliding_windows(x: Any, shape: tuple, strides: tuple) -> Any:
     if ndim_in == 3 and ndim_out == 4:
         B, C, L = x.shape
         _, _, W, l = shape
-        windows = mx.concatenate(
-            [x[:, :, i : i + l][:, :, None, :] for i in range(W)],
-            axis=2,
-        )
-        return windows
+        return mx.as_strided(x, shape=(B, C, W, l), strides=(C * L, L, 1, 1))
 
     if ndim_in == 2 and ndim_out == 3:
         B, L = x.shape
         _, W, l = shape
-        windows = mx.stack([x[:, i : i + l] for i in range(W)], axis=1)
-        return windows
+        return mx.as_strided(x, shape=(B, W, l), strides=(L, 1, 1))
 
     raise NotImplementedError(
         f"MLX sliding windows: {ndim_in}D -> {ndim_out}D not implemented"

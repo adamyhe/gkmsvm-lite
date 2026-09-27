@@ -13,7 +13,7 @@ from itertools import combinations
 
 import numpy as np
 
-from gkmsvm.backend import get_array_module
+from gkmsvm.backend import get_array_module, get_strides
 from gkmsvm.codec import reverse_complement
 
 _BASE_MAP = {"A": 0, "C": 1, "G": 2, "T": 3}
@@ -86,6 +86,8 @@ class DeltaSVM:
             score = score + self._score_strand(reverse_complement(x))
         return score + self.bias
 
+    _INTERMEDIATE_BUDGET = 256 * 1024 * 1024  # 256 MB
+
     def _score_strand(self, x: np.ndarray) -> np.ndarray:
         """Score one strand."""
         xp = get_array_module(x)
@@ -94,8 +96,15 @@ class DeltaSVM:
         if W < 1:
             return xp.zeros((B, 1), dtype=x.dtype)
 
+        n_combos = len(self._combos)
+        est_bytes = B * W * n_combos * self.k * 4
+        if est_bytes > self._INTERMEDIATE_BUDGET:
+            chunk = max(1, self._INTERMEDIATE_BUDGET // (W * n_combos * self.k * 4))
+            parts = [self._score_strand(x[i:i + chunk]) for i in range(0, B, chunk)]
+            return xp.concatenate(parts)
+
         # Sliding windows
-        sx = x.strides
+        sx = get_strides(x)
         windows = xp.lib.stride_tricks.as_strided(
             x, shape=(B, C, W, self.l), strides=(sx[0], sx[1], sx[2], sx[2])
         )
