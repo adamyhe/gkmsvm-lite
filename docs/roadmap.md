@@ -46,6 +46,15 @@
 - [x] Replaced scikit-learn with libsvm-official (114 KB vs ~100 MB)
 - [x] Epsilon-SVR regression via `train_gkmsvr()` — continuous-valued prediction with configurable epsilon tube
 - [x] 273 tests passing
+- [x] MLX backend for Apple Silicon GPU inference (`model.mlx()`)
+- [x] MLX shim for NumPy API compatibility (strides, copy, fancy indexing)
+- [x] Custom Metal kernels via `mx.fast.metal_kernel` (fused XOR + popcount with per-thread early exit)
+- [x] `mx.as_strided` sliding windows (replaces Python-loop concatenation)
+- [x] MLX training support (libsvm + SMO solvers)
+- [x] MLX ISM support
+- [x] DeltaSVM auto-chunking for memory-bounded intermediates
+- [x] Nanog replication on MLX (oracle match, RC invariance, ISM, training)
+- [x] 316 tests passing (29 MLX + 287 others)
 
 ## Next
 

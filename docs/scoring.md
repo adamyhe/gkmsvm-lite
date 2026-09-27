@@ -85,7 +85,9 @@ DeltaSVM is orders of magnitude faster than full SVM scoring but is a linear app
 
 ## GPU acceleration
 
-Move models to GPU for ~6x speedup on supported hardware:
+### NVIDIA (CuPy)
+
+Move models to GPU for ~6x speedup:
 
 ```python
 model.cuda()           # move to GPU
@@ -99,6 +101,22 @@ model.cpu()            # move back to CPU
 ```
 
 GPU throughput is roughly flat across batch sizes (compute-bound). Use batch_size=16-64 to save VRAM without sacrificing speed.
+
+### Apple Silicon (MLX)
+
+Move models to MLX for 2-6x speedup on Apple Silicon:
+
+```python
+from gkmsvm.backend import to_mlx
+
+model.mlx()            # move to Apple GPU
+x_mlx = to_mlx(x)
+scores = model(x_mlx)
+
+model.cpu()            # move back to CPU
+```
+
+MLX uses custom Metal shaders with the same packed uint32 XOR+popcount approach as the CUDA path. Speedup scales with batch size — use batch_size=4-16 for best throughput. Apple Silicon's unified memory is shared between CPU and GPU; avoid running memory-heavy background processes during large jobs.
 
 ## Memory management
 

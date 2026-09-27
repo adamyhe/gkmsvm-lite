@@ -52,7 +52,9 @@ Two computation paths, selected automatically:
 
 CPU: Numba `@njit(parallel=True, fastmath=True)` fuses match-count + table-lookup + sum into a single parallel kernel, avoiding materialization of the full `[B, S, W, W]` match tensor.
 
-GPU: CuPy RawKernel with coalesced memory access. Uses `--use_fast_math` and shared-memory caching of both the mismatch weight table and query packed windows.
+NVIDIA GPU: CuPy RawKernel with coalesced memory access. Uses `--use_fast_math` and shared-memory caching of both the mismatch weight table and query packed windows.
+
+Apple GPU: Custom Metal shaders via `mx.fast.metal_kernel`. Each thread handles one (batch, SV) pair, looping over all window pairs with XOR+popcount and `min_matches` early exit. Three kernel variants: pairwise (forward pass), diagonal (self-kernel), and cross-diagonal (forward × RC). Kernels are lazily compiled on first use.
 
 ## Chunked SV inference
 
@@ -105,12 +107,13 @@ Same bias convention as C gkmSVM: `bias = +rho`. Load via `load_r_gkmsvm_model(p
 
 The SVM caches the support-vector self-kernel diagonal (`_raw_diagonal(sv)`) after first computation, avoiding a chunked recomputation on every call.
 
-## NumPy + CuPy (no PyTorch)
+## NumPy + CuPy + MLX (no PyTorch)
 
-gkm-SVMs are not differentiable — autograd provides no value. The array operations (matmul, einsum, fancy indexing) are identical in NumPy and CuPy, so a single codebase handles both CPU and GPU via `gkmsvm.backend.get_array_module()`.
+gkm-SVMs are not differentiable — autograd provides no value. The array operations (matmul, einsum, fancy indexing) are identical in NumPy and CuPy, so a single codebase handles both CPU and NVIDIA GPU via `gkmsvm.backend.get_array_module()`.
 
 CPU: NumPy arrays + Numba `@njit(parallel=True)` fused pairwise kernels.
-GPU: CuPy arrays (optional `[gpu]` extra) + CuPy RawKernel CUDA code. `model.cuda()` moves data to GPU.
+NVIDIA GPU: CuPy arrays (optional `[gpu]` extra) + CuPy RawKernel CUDA code. `model.cuda()` moves data to GPU.
+Apple GPU: MLX arrays (optional `[mlx]` extra) + custom Metal shaders via `mx.fast.metal_kernel`. `model.mlx()` moves data to Apple Silicon GPU. MLX arrays lack `.strides`, `.copy()`, and NumPy-style fancy indexing — an `_MlxShim` wrapper and `get_strides()` helper provide compatibility. Packing uses CPU (via `to_cpu()` round-trip) since Numba isn't available on Apple GPU; the Metal kernel handles the expensive pairwise computation.
 
 tangermeme interop is vendored — only `extract_loci` (pyfaidx) and FASTA I/O are needed. ledidi requires differentiable models and does not work with gkm-SVMs.
 
