@@ -32,7 +32,7 @@ def save_npz(model, path: str | Path) -> None:
     )
 
 
-def load_npz(path: str | Path):
+def load_npz(path: str | Path, *, device: str = "cpu"):
     """Load a GkmSVM model from native npz format."""
     from gkmsvm.svm import GkmSVM
 
@@ -46,6 +46,7 @@ def load_npz(path: str | Path):
         kernel_type=metadata["kernel_type"],
         kernel_params=metadata["kernel_params"],
         sv_chunk_size=metadata.get("sv_chunk_size"),
+        device=device,
     )
 
 
@@ -97,18 +98,23 @@ def save_lsgkm(model, path: str | Path) -> None:
         path.write_text(text)
 
 
-def load_model(path: str | Path):
+def load_model(path: str | Path, *, device: str = "cpu"):
     """Load a GkmSVM model, auto-detecting format from extension.
 
     Supports:
         - ``.npz`` — native format
         - ``.txt``, ``.txt.gz``, ``.model`` — LS-GKM text format
+
+    Args:
+        path: Path to model file.
+        device: ``"cpu"`` (default), ``"cuda"``, ``"mlx"``, or ``"auto"``
+            (CuPy if available, else MLX, else CPU).
     """
     path = Path(path)
     name = path.name.lower()
 
     if name.endswith(".npz"):
-        return load_npz(path)
+        return load_npz(path, device=device)
 
     from gkmsvm.importers.lsgkm import load_lsgkm_model
-    return load_lsgkm_model(str(path))
+    return load_lsgkm_model(str(path), device=device)

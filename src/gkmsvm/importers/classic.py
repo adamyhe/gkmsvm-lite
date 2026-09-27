@@ -83,6 +83,7 @@ def load_classic_model(
     svseq_path: str | Path | None = None,
     dtype: np.dtype | type = np.float32,
     sv_chunk_size: int | None = None,
+    device: str = "cpu",
 ) -> GkmSVM:
     """Load a classic gkmSVM model.
 
@@ -91,6 +92,7 @@ def load_classic_model(
         svseq_path: Path to FASTA file with support vector sequences.
         dtype: Array dtype for model weights.
         sv_chunk_size: Optional chunk size for batched SV inference.
+        device: ``"cpu"`` (default), ``"cuda"``, ``"mlx"``, or ``"auto"``.
 
     Returns:
         A GkmSVM instance with bias = +rho.
@@ -195,4 +197,5 @@ def load_classic_model(
         kernel_type=kernel_type,
         kernel_params=kernel_params,
         sv_chunk_size=sv_chunk_size,
+        device=device,
     )
