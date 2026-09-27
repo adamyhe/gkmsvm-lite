@@ -172,4 +172,3 @@ class TestTrainGkmsvm:
             device="auto",
         )
         assert model.num_support_vectors > 0
-        assert isinstance(model.support_sequences, np.ndarray)

@@ -26,6 +26,9 @@ dependencies = [
     "libsvm-official>=3.30",
 ]
 
+[project.scripts]
+gkmsvm = "gkmsvm.cli:main"
+
 [project.optional-dependencies]
 gpu = [
     "cupy-cuda12x[ctk]>=12.0",

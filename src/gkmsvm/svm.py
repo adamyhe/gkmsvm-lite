@@ -248,7 +248,7 @@ class GkmSVM:
             return to_cpu(x)
         return x
 
-    def save(self, path: str, *, format: str | None = None) -> None:
+    def save(self, path: str, *, fmt: str | None = None) -> None:
         """Save model to disk.
 
         Format is auto-detected from extension unless overridden:
@@ -257,23 +257,23 @@ class GkmSVM:
 
         Args:
             path: Output file path.
-            format: ``"npz"`` or ``"lsgkm"``. Auto-detected if None.
+            fmt: ``"npz"`` or ``"lsgkm"``. Auto-detected if None.
         """
         from gkmsvm.serialization import save_lsgkm, save_npz
 
-        if format is None:
+        if fmt is None:
             name = str(path).lower()
             if name.endswith(".npz"):
-                format = "npz"
+                fmt = "npz"
             else:
-                format = "lsgkm"
+                fmt = "lsgkm"
 
-        if format == "npz":
+        if fmt == "npz":
             save_npz(self, path)
-        elif format == "lsgkm":
+        elif fmt == "lsgkm":
             save_lsgkm(self, path)
         else:
-            raise ValueError(f"Unknown format {format!r}. Use 'npz' or 'lsgkm'.")
+            raise ValueError(f"Unknown format {fmt!r}. Use 'npz' or 'lsgkm'.")
 
     def _get_sv_diag(self) -> np.ndarray:
         sv = self.support_sequences
@@ -413,3 +413,91 @@ class GkmSVM:
         ref = self._match_device(ref)
         alt = self._match_device(alt)
         return self(alt, verbose=verbose) - self(ref, verbose=verbose)
+
+    _MAX_LMER_TABLE_L = 14  # 4^14 ≈ 268M entries, ~1 GB
+
+    def to_deltasvm(
+        self, *, device: str = "cpu", verbose: bool = False,
+    ) -> "DeltaSVM":
+        """Convert to a DeltaSVM linear scoring model.
+
+        Scores all 4^l l-mers through the full model to build a weight
+        lookup table. The resulting DeltaSVM uses one table lookup per
+        window position (no gapped k-mer decomposition).
+
+        The approximation is in query normalization: the full SVM divides
+        by sqrt(K(x,x)), which varies per query. The DeltaSVM omits this
+        and gives unnormalized scores. For variant scoring, K(ref,ref)
+        and K(alt,alt) are nearly equal (single-SNP changes affect few
+        windows), so the normalization cancels and variant effects
+        correlate near-perfectly (r > 0.999 for l >= 10).
+
+        Works for any kernel type. Requires l <= 14 (4^l table entries).
+
+        Args:
+            device: Device for the returned DeltaSVM model.
+            verbose: Show progress bar during weight computation.
+
+        Returns:
+            DeltaSVM with k=l (one weight per l-mer).
+        """
+        from gkmsvm.codec import one_hot_encode as _ohe
+        from gkmsvm.deltasvm import DeltaSVM, _index_to_kmer
+
+        l = self.kernel.l
+        if l > self._MAX_LMER_TABLE_L:
+            raise ValueError(
+                f"to_deltasvm() requires l <= {self._MAX_LMER_TABLE_L} "
+                f"(4^{l} = {4**l:,} table entries would use "
+                f"{4**l * 4 / 1e9:.1f} GB). Got l={l}."
+            )
+
+        n_lmers = 4**l
+        weights = np.zeros(n_lmers, dtype=np.float32)
+        chunk = 100_000
+
+        chunks = range(0, n_lmers, chunk)
+        if verbose:
+            from tqdm import tqdm
+            chunks = tqdm(
+                chunks, desc="to_deltasvm",
+                total=(n_lmers + chunk - 1) // chunk,
+            )
+
+        # Score l-mers with SV normalization but without per-l-mer
+        # normalization. This way the query-length normalization factor
+        # is constant across all l-mers and cancels in variant scoring.
+        kernel = self.kernel
+        adj_coefs = to_cpu(self.coefficients).astype(np.float64)
+        if kernel.normalize:
+            sv_diag = to_cpu(self._get_sv_diag()).astype(np.float64)
+            adj_coefs = adj_coefs / np.sqrt(np.clip(sv_diag, 1e-10, None))
+
+        saved_norm = kernel.normalize
+        saved_coefs = self.coefficients
+        coef_dtype = to_cpu(saved_coefs).dtype
+        kernel.normalize = False
+        self.coefficients = self._match_device(
+            adj_coefs.astype(coef_dtype)
+        )
+        try:
+            for start in chunks:
+                end = min(start + chunk, n_lmers)
+                x = np.stack([
+                    _ohe(_index_to_kmer(idx, l))
+                    for idx in range(start, end)
+                ])
+                x = self._match_device(x)
+                scores = self(x).flatten()
+                if self._on_gpu or self._on_mlx:
+                    scores = to_cpu(scores)
+                weights[start:end] = scores - self.bias
+        finally:
+            kernel.normalize = saved_norm
+            self.coefficients = saved_coefs
+
+        return DeltaSVM(
+            weights, l, l,
+            include_rc=False, bias=self.bias, device=device,
+        )
+

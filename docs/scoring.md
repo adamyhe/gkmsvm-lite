@@ -74,9 +74,9 @@ deltas = model.score_variants(ref_seqs, alt_seqs, verbose=True)
 DeltaSVM provides a faster but approximate variant effect score using pre-computed k-mer weights instead of full kernel evaluation:
 
 ```python
-from gkmsvm import load_deltasvm_weights
+from gkmsvm import load_deltasvm_model
 
-dsvm = load_deltasvm_weights("weights.txt")
+dsvm = load_deltasvm_model("weights.txt")
 scores = dsvm(x)
 deltas = dsvm.score_variants(ref_seqs, alt_seqs)
 ```

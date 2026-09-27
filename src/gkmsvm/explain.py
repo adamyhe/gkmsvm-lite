@@ -13,6 +13,8 @@ all float intermediate arrays from the inner loop.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 from numba import njit, prange
 
@@ -491,6 +493,11 @@ def gkmexplain(
     x = model._match_device(x)
 
     if is_mlx(x):
+        warnings.warn(
+            "GkmExplain does not have an MLX kernel — falling back to CPU. "
+            "This will be slower than MLX inference.",
+            stacklevel=2,
+        )
         from gkmsvm.backend import to_cpu, to_mlx
         cpu_model = GkmSVM(
             to_cpu(model.support_sequences),

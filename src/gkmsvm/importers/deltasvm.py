@@ -18,13 +18,14 @@ from gkmsvm.deltasvm import DeltaSVM, _kmer_to_index
 from gkmsvm.importers import _open_auto
 
 
-def load_deltasvm_weights(
+def load_deltasvm_model(
     path: str | Path,
     l: int,
     *,
     include_rc: bool = True,
     bias: float = 0.0,
     dtype: np.dtype | type = np.float32,
+    device: str = "cpu",
 ) -> DeltaSVM:
     """Load deltaSVM k-mer weights from a tab-separated file.
 
@@ -37,6 +38,7 @@ def load_deltasvm_weights(
         include_rc: Whether to score both strands.
         bias: Optional bias term added to scores.
         dtype: Array dtype for weights.
+        device: ``"cpu"`` (default), ``"cuda"``, ``"mlx"``, or ``"auto"``.
 
     Returns:
         A DeltaSVM instance.
@@ -94,4 +96,4 @@ def load_deltasvm_weights(
     for kmer, w in kmer_weights.items():
         weights[_kmer_to_index(kmer)] = w
 
-    return DeltaSVM(weights, l, k, include_rc=include_rc, bias=bias)
+    return DeltaSVM(weights, l, k, include_rc=include_rc, bias=bias, device=device)

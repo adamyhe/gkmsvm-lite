@@ -40,7 +40,7 @@ src/gkmsvm/
     ├── lsgkm.py         # load_lsgkm_model()
     ├── classic.py       # load_classic_model() — C gkmSVM (LIBSVM-style)
     ├── r_gkmsvm.py      # load_r_gkmsvm_model() — R gkmSVM (.gkmmodel, _svalpha.out)
-    └── deltasvm.py      # load_deltasvm_weights()
+    └── deltasvm.py      # load_deltasvm_model()
 ```
 
 ## Conventions

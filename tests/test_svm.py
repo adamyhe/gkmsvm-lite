@@ -153,3 +153,60 @@ class TestGkmSVMVariants:
         seq = one_hot_encode("ACGT")[np.newaxis]
         delta = small_model.score_variants(seq, seq)
         assert float(delta[0, 0]) == pytest.approx(0.0, abs=1e-6)
+
+
+class TestToDeltaSVM:
+    def test_single_sequence_exact(self):
+        """Normalized SVM score can be recovered from DeltaSVM + K(x,x)."""
+        rng = random.Random(42)
+        seqs = ["".join(rng.choice("ACGT") for _ in range(30)) for _ in range(10)]
+        svs = np.stack([one_hot_encode(s) for s in seqs[:5]])
+        coefs = np.array([0.5, -0.3, 0.2, -0.1, 0.4], dtype=np.float32)
+        model = GkmSVM(
+            svs, coefs, bias=-0.05, kernel_type="gkm_cnt",
+            kernel_params={"L": 3, "k": 2, "include_rc": True},
+        )
+        dsvm = model.to_deltasvm()
+        assert dsvm.k == dsvm.l == 3
+        assert dsvm.weights.shape == (64,)
+
+        for seq in seqs[5:]:
+            x = one_hot_encode(seq)[np.newaxis]
+            svm_score = model(x).item()
+            dsvm_score = dsvm(x).item()
+            diag = float(model.kernel._raw_diagonal(x)[0])
+            recovered = (dsvm_score - model.bias) / np.sqrt(diag) + model.bias
+            assert recovered == pytest.approx(svm_score, abs=1e-5)
+
+    def test_variant_correlation_realistic_l(self):
+        """DeltaSVM variant effects correlate near-perfectly for l >= 10."""
+        from gkmsvm import train_gkmsvm
+
+        rng = random.Random(0)
+        pos = ["".join(rng.choice("ACGT") for _ in range(50)) for _ in range(60)]
+        neg = ["".join(rng.choice("ACGT") for _ in range(50)) for _ in range(60)]
+        model = train_gkmsvm(pos, neg, l=10, k=7, C=1.0, kernel_type="direct")
+        dsvm = model.to_deltasvm()
+
+        test_seqs = ["".join(rng.choice("ACGT") for _ in range(50)) for _ in range(20)]
+        svm_d, dsvm_d = [], []
+        for seq in test_seqs:
+            ref = one_hot_encode(seq)[np.newaxis]
+            p = 25
+            new_b = "C" if seq[p] != "C" else "A"
+            alt = one_hot_encode(seq[:p] + new_b + seq[p + 1:])[np.newaxis]
+            svm_d.append((model(alt) - model(ref)).item())
+            dsvm_d.append((dsvm(alt) - dsvm(ref)).item())
+
+        corr = np.corrcoef(svm_d, dsvm_d)[0, 1]
+        assert corr > 0.99, f"Pearson r={corr:.4f}, expected > 0.99"
+
+    def test_l_too_large(self):
+        svs = np.stack([one_hot_encode("A" * 20)])
+        coefs = np.array([1.0], dtype=np.float32)
+        model = GkmSVM(
+            svs, coefs, bias=0.0, kernel_type="gkm_cnt",
+            kernel_params={"L": 15, "k": 7, "include_rc": False},
+        )
+        with pytest.raises(ValueError, match="l <= 14"):
+            model.to_deltasvm()
