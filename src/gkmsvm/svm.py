@@ -159,6 +159,7 @@ class GkmSVM:
         self._sv_packed_t: np.ndarray | None = None
         self._sv_rc_packed_t: np.ndarray | None = None
         self._on_gpu = False
+        self._on_mlx = False
 
     @property
     def num_support_vectors(self) -> int:
@@ -181,6 +182,7 @@ class GkmSVM:
         self.coefficients = to_gpu(self.coefficients)
         self._invalidate_caches()
         self._on_gpu = True
+        self._on_mlx = False
         return self
 
     def mlx(self) -> GkmSVM:
@@ -189,6 +191,7 @@ class GkmSVM:
         self.coefficients = to_mlx(to_cpu(self.coefficients))
         self._invalidate_caches()
         self._on_gpu = False
+        self._on_mlx = True
         return self
 
     def cpu(self) -> GkmSVM:
@@ -197,7 +200,18 @@ class GkmSVM:
         self.coefficients = to_cpu(self.coefficients)
         self._invalidate_caches()
         self._on_gpu = False
+        self._on_mlx = False
         return self
+
+    def _match_device(self, x: np.ndarray) -> np.ndarray:
+        """Convert input array to match the model's device."""
+        if self._on_gpu and not is_gpu(x):
+            return to_gpu(np.asarray(x) if is_mlx(x) else x)
+        if self._on_mlx and not is_mlx(x):
+            return to_mlx(to_cpu(x) if is_gpu(x) else x)
+        if not self._on_gpu and not self._on_mlx and (is_gpu(x) or is_mlx(x)):
+            return to_cpu(x)
+        return x
 
     def save(self, path: str, *, format: str | None = None) -> None:
         """Save model to disk.
@@ -294,6 +308,7 @@ class GkmSVM:
         Returns:
             [B, 1] uncalibrated decision values.
         """
+        x = self._match_device(x)
         xp = get_array_module(x)
         S = self.num_support_vectors
         chunk = self.sv_chunk_size
@@ -360,4 +375,6 @@ class GkmSVM:
         Returns:
             [B, 1] score differences.
         """
+        ref = self._match_device(ref)
+        alt = self._match_device(alt)
         return self(alt, verbose=verbose) - self(ref, verbose=verbose)
