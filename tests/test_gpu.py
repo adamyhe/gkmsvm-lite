@@ -448,7 +448,7 @@ class TestGPUTraining:
         )
         gpu_model = train_gkmsvm(
             pos, neg, kernel_type="direct", l=7, k=5, C=1.0,
-            device="cpu",
+            device="cuda",
         )
 
         rng2 = np.random.default_rng(99)
@@ -472,7 +472,7 @@ class TestGPUTraining:
         )
         gpu_model = train_gkmsvm(
             pos, neg, kernel_type="direct", l=7, k=5, C=1.0,
-            solver="smo", device="cpu",
+            solver="smo", device="cuda",
         )
 
         rng2 = np.random.default_rng(77)
@@ -492,7 +492,7 @@ class TestGPUTraining:
 
         model = train_gkmsvm(
             pos, neg, kernel_type="direct", l=7, k=5, C=1.0,
-            device="cpu",
+            device="cuda",
         )
 
         assert isinstance(model.support_sequences, np.ndarray)

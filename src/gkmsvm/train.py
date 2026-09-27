@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from gkmsvm.backend import HAS_MLX, get_array_module, to_cpu, to_mlx
+from gkmsvm.backend import HAS_CUPY, HAS_MLX, get_array_module, to_cpu, to_gpu, to_mlx
 from gkmsvm.codec import one_hot_encode
 from gkmsvm.svm import KERNEL_BUILDERS, GkmSVM, resolve_kernel_type
 
@@ -174,38 +174,52 @@ def train_gkmsvr(
 
 
 def _move_to_device(X: np.ndarray, device: str, verbose: bool) -> np.ndarray:
-    """Optionally move training data to MLX for accelerated kernel computation.
+    """Move training data to the requested accelerator.
 
-    Conservative memory policy: auto-detection only engages when training data
-    fits within 25% of available system RAM, to avoid pressure on unified memory
-    (macOS users are typically running other applications).
+    For MLX, conservative memory policy: auto-detection only engages when
+    training data fits within 25% of available system RAM, to avoid pressure
+    on unified memory (macOS users are typically running other applications).
     """
     if device == "cpu":
         return X
-    if device == "auto":
-        if not HAS_MLX:
-            return X
-        data_bytes = X.nbytes
-        available = _available_memory(np)
-        if data_bytes > available * 0.25:
-            if verbose:
-                data_mb = data_bytes / 1024**2
-                avail_mb = available / 1024**2
-                print(
-                    f"Training data ({data_mb:.0f} MB) exceeds 25% of available "
-                    f"memory ({avail_mb:.0f} MB) — staying on CPU"
-                )
-            return X
+    if device in ("cuda", "gpu"):
+        if not HAS_CUPY:
+            raise RuntimeError(
+                "CuPy is not installed. Install with: pip install cupy-cuda12x[ctk]"
+            )
         if verbose:
-            print("Moving training data to MLX for accelerated kernel computation")
-        return to_mlx(X)
+            print("Moving training data to CUDA GPU")
+        return to_gpu(X)
+    if device == "auto":
+        if HAS_CUPY:
+            if verbose:
+                print("Moving training data to CUDA GPU")
+            return to_gpu(X)
+        if HAS_MLX:
+            data_bytes = X.nbytes
+            available = _available_memory(np)
+            if data_bytes > available * 0.25:
+                if verbose:
+                    data_mb = data_bytes / 1024**2
+                    avail_mb = available / 1024**2
+                    print(
+                        f"Training data ({data_mb:.0f} MB) exceeds 25% of "
+                        f"available memory ({avail_mb:.0f} MB) — staying on CPU"
+                    )
+                return X
+            if verbose:
+                print("Moving training data to MLX")
+            return to_mlx(X)
+        return X
     if device == "mlx":
         if not HAS_MLX:
             raise RuntimeError("MLX is not installed. Install with: pip install mlx")
         if verbose:
-            print("Moving training data to MLX for accelerated kernel computation")
+            print("Moving training data to MLX")
         return to_mlx(X)
-    raise ValueError(f"Unknown device {device!r}. Use 'auto', 'mlx', or 'cpu'.")
+    raise ValueError(
+        f"Unknown device {device!r}. Use 'auto', 'cpu', 'cuda', or 'mlx'."
+    )
 
 
 def _build_kernel(kernel_type, l, k, d, gamma, M, H, include_rc):
@@ -286,9 +300,9 @@ def _train_smo(
         cache_size=cache_size, verbose=verbose,
     )
 
-    sv_mask = np.abs(coefficients) > 1e-10
+    sv_mask = np.abs(to_cpu(coefficients)) > 1e-10
     support_sequences = to_cpu(X[sv_mask])
-    sv_coefficients = coefficients[sv_mask].astype(support_sequences.dtype)
+    sv_coefficients = to_cpu(coefficients[sv_mask]).astype(support_sequences.dtype)
 
     if verbose:
         n_pos = int((sv_coefficients > 0).sum())
