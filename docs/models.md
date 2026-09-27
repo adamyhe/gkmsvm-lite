@@ -168,6 +168,8 @@ model = train_gkmsvm(pos, neg, solver="smo", cache_size=512)  # large-scale
 model = train_gkmsvr(seqs, labels)
 ```
 
+Training works on all backends (CPU, NVIDIA GPU, Apple Silicon MLX). On MLX, the Metal kernels accelerate Gram matrix and kernel column computation. After training, use `model.mlx()` or `model.cuda()` to move the model for inference.
+
 ### Kernel types
 
 All six kernel types are supported for both training and inference:
