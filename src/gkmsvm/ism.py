@@ -35,6 +35,7 @@ def ism(
     Returns:
         [B, 4, L] score deltas.
     """
+    x = model._match_device(x)
     kernel = model.kernel
     chunk = sv_chunk_size if sv_chunk_size is not None else model.sv_chunk_size
     fn = _ism_index if hasattr(kernel, "pairwise_from_indices") else _ism_float

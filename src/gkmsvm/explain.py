@@ -488,6 +488,8 @@ def gkmexplain(
     if mode not in (0, 1):
         raise ValueError(f"mode must be 0 or 1, got {mode}")
 
+    x = model._match_device(x)
+
     if is_mlx(x):
         from gkmsvm.backend import to_cpu, to_mlx
         cpu_model = GkmSVM(
