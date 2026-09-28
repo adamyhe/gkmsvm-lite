@@ -153,11 +153,11 @@ predictions = model(x)  # [B, 1]
 
 Training requires computing kernel values between all pairs of training sequences. Two solvers are available:
 
-- **Precomputed Gram + LIBSVM** (`solver="libsvm"`): Computes the full N x N kernel matrix, then passes it to LIBSVM's C solver. Fast, but requires O(N^2) memory. For N=10K sequences, the Gram matrix is ~800 MB.
+- **Precomputed Gram + sklearn** (`solver="libsvm"`): Computes the full N x N kernel matrix, then passes it to sklearn's LIBSVM-backed solver. Fast, but requires O(N^2) memory. For N=10K sequences, the Gram matrix is ~800 MB.
 
 - **Column-cached SMO** (`solver="smo"`): Computes kernel columns on demand with an LRU cache. Memory is O(cache_size x N) instead of O(N^2). Slower per iteration but scales to 80K+ sequences where the Gram matrix would exceed available RAM.
 
-- **Auto** (`solver="auto"`, default): Estimates whether the Gram matrix fits in 50% of available RAM (CPU) or VRAM (GPU). Uses precomputed Gram when it fits, SMO otherwise.
+- **Auto** (`solver="auto"`, default): Estimates whether the Gram matrix fits in 75% of available RAM (CPU) or VRAM (GPU). Uses precomputed Gram when it fits, SMO otherwise.
 
 ```python
 # Force a specific solver

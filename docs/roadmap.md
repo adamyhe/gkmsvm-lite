@@ -42,7 +42,7 @@
 - [x] `load_model()` unified loader (npz + LS-GKM auto-detect)
 - [x] Column-cached SMO solver (`solver="smo"`) — LRU-cached kernel columns, no N×N Gram matrix, scales to ATAC/ChIP-scale (80K+ sequences)
 - [x] `train_gkmsvm()` solver selection: `auto` / `smo` / `libsvm`
-- [x] Memory-aware solver auto-selection — estimates Gram matrix size against available RAM/VRAM (50% budget)
+- [x] Memory-aware solver auto-selection — estimates Gram matrix size against available RAM/VRAM (75% budget)
 - [x] Replaced scikit-learn with libsvm-official (114 KB vs ~100 MB)
 - [x] Epsilon-SVR regression via `train_gkmsvr()` — continuous-valued prediction with configurable epsilon tube
 - [x] 273 tests passing

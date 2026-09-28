@@ -137,8 +137,7 @@ def cmd_trainsvr(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
 
-    model = train_gkmsvr(
-        seqs, labels,
+    svr_kwargs = dict(
         kernel_type=args.kernel_type,
         l=args.l, k=args.k, d=args.d,
         C=args.C,
@@ -149,6 +148,10 @@ def cmd_trainsvr(args: argparse.Namespace) -> None:
         device=args.device,
         verbose=args.verbose,
     )
+    if hasattr(args, "solver"):
+        svr_kwargs["solver"] = args.solver
+        svr_kwargs["cache_size"] = args.cache_size
+    model = train_gkmsvr(seqs, labels, **svr_kwargs)
 
     output = Path(args.output)
     if output.suffix == ".npz":
@@ -248,6 +251,74 @@ def cmd_deltasvm(args: argparse.Namespace) -> None:
             out.close()
 
 
+def cmd_to_deltasvm(args: argparse.Namespace) -> None:
+    model = _load_model(args.model, device="cpu")
+    dsvm = model.to_deltasvm(device="cpu", verbose=args.verbose)
+
+    output = Path(args.output)
+    _save_deltasvm_weights(dsvm, output)
+
+    from gkmsvm.backend import to_cpu
+    n_nonzero = int((to_cpu(dsvm.weights) != 0).sum())
+    n_total = dsvm.weights.shape[0]
+    print(
+        f"Converted to DeltaSVM ({n_nonzero:,}/{n_total:,} non-zero weights) "
+        f"→ {output}",
+        file=sys.stderr,
+    )
+
+
+def _save_deltasvm_weights(dsvm, path: Path) -> None:
+    """Write DeltaSVM weights in kmer<TAB>weight format."""
+    from gkmsvm.backend import to_cpu
+    from gkmsvm.deltasvm import _index_to_kmer
+
+    weights = to_cpu(dsvm.weights)
+    k = dsvm.k
+    with open(path, "w") as f:
+        for idx in range(weights.shape[0]):
+            w = float(weights[idx])
+            if w != 0.0:
+                f.write(f"{_index_to_kmer(idx, k)}\t{w:.8g}\n")
+
+
+def cmd_score_variants(args: argparse.Namespace) -> None:
+    from gkmsvm.backend import to_cpu
+    from gkmsvm.codec import one_hot_encode
+
+    model = _load_model(args.model, device=args.device)
+
+    ref_records = _read_seqs(args.ref)
+    alt_records = _read_seqs(args.alt)
+
+    if len(ref_records) != len(alt_records):
+        print(
+            f"Error: {len(ref_records)} ref sequences but "
+            f"{len(alt_records)} alt sequences",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    ref_names = [name for name, _ in ref_records]
+    X_ref = _encode_seqs(ref_records)
+    X_alt = _encode_seqs(alt_records)
+
+    X_ref = model._match_device(X_ref)
+    X_alt = model._match_device(X_alt)
+    deltas = to_cpu(
+        model.score_variants(X_ref, X_alt, verbose=args.verbose).flatten()
+    )
+
+    out = sys.stdout if args.output is None else open(args.output, "w")
+    try:
+        out.write("name\tdelta\n")
+        for name, delta in zip(ref_names, deltas):
+            out.write(f"{name}\t{delta:.6f}\n")
+    finally:
+        if out is not sys.stdout:
+            out.close()
+
+
 def cmd_import(args: argparse.Namespace) -> None:
     fmt = args.format
     inp = args.input
@@ -314,6 +385,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-o", "--output", required=True, help="Output model (.npz or .model.txt).")
     p.add_argument("-C", type=float, default=1.0, help="Regularization (default: 1.0).")
     p.add_argument("--epsilon", type=float, default=0.1, help="SVR epsilon (default: 0.1).")
+    p.add_argument(
+        "--solver", default="auto", choices=["auto", "smo", "libsvm"],
+        help="Solver (default: auto).",
+    )
+    p.add_argument("--cache-size", type=int, default=256, help="SMO cache columns (default: 256).")
     _add_kernel_args(p)
     _add_device_arg(p)
 
@@ -351,6 +427,25 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-rc", action="store_true", help="Disable reverse complement.")
     _add_device_arg(p)
 
+    # ── to-deltasvm ──────────────────────────────────────────────────
+    p = sub.add_parser(
+        "to-deltasvm", help="Convert a trained model to DeltaSVM weights.",
+    )
+    p.add_argument("-m", "--model", required=True, help="Model file (.npz or .model.txt).")
+    p.add_argument("-o", "--output", required=True, help="Output DeltaSVM weight file.")
+    _add_device_arg(p)
+
+    # ── score-variants ──────────────────────────────────────────────
+    p = sub.add_parser(
+        "score-variants",
+        help="Score variant effects: score(alt) - score(ref).",
+    )
+    p.add_argument("-m", "--model", required=True, help="Model file.")
+    p.add_argument("--ref", required=True, help="Reference sequences FASTA.")
+    p.add_argument("--alt", required=True, help="Alternate sequences FASTA.")
+    p.add_argument("-o", "--output", default=None, help="Output TSV (default: stdout).")
+    _add_device_arg(p)
+
     # ── import ───────────────────────────────────────────────────────
     p = sub.add_parser("import", help="Import external model format to .npz.")
     p.add_argument("-i", "--input", required=True, help="Input model file.")
@@ -379,6 +474,8 @@ def main(argv: list[str] | None = None) -> None:
         "ism": cmd_ism,
         "explain": cmd_explain,
         "deltasvm": cmd_deltasvm,
+        "to-deltasvm": cmd_to_deltasvm,
+        "score-variants": cmd_score_variants,
         "import": cmd_import,
     }
     dispatch[args.command](args)

@@ -74,7 +74,7 @@ Two solver backends, selected automatically based on available memory:
 
 **Column-cached SMO** (large N): WSS1 maximal violating pair working set selection with LRU-cached kernel columns. Memory is O(cache_size × N) instead of O(N²). Currently supports C-SVC only. Pre-packs all training windows into uint32 format once; column computation on cache miss reuses the packed representation.
 
-`solver="auto"` estimates whether N²×8 bytes fits in 50% of available RAM (CPU) or VRAM (GPU). Falls back to SMO when it doesn't.
+`solver="auto"` estimates whether N²×8 bytes fits in 75% of available RAM (CPU) or VRAM (GPU). Falls back to SMO when it doesn't.
 
 The scoring formula `Σ coef_i × K(x, sv_i) + bias` is identical for SVC and SVR — only the dual coefficients differ (α_i × y_i for SVC, α_i* − α_i for SVR). The `GkmSVM` model class is shared.
 

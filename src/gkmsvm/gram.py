@@ -16,6 +16,7 @@ def compute_gram(
     *,
     chunk_size: int = 1000,
     verbose: bool = False,
+    out: np.ndarray | None = None,
 ) -> np.ndarray:
     """Compute kernel matrix K(X, Y) with tiled chunking.
 
@@ -31,6 +32,7 @@ def compute_gram(
         Y: [M, 4, L] one-hot encoded sequences, or None for self-Gram.
         chunk_size: Tile size for row and column chunking.
         verbose: Show tqdm progress bar over tiles.
+        out: Optional [N, M] output array to write into (avoids allocation).
 
     Returns:
         [N, M] or [N, N] kernel matrix.
@@ -44,7 +46,7 @@ def compute_gram(
 
     use_fast = hasattr(kernel, "pairwise_from_indices")
 
-    gram = np.zeros((N, M), dtype=np.float64)
+    gram = np.zeros((N, M), dtype=np.float64) if out is None else out
 
     row_ranges = list(range(0, N, chunk_size))
     col_ranges = list(range(0, M, chunk_size))

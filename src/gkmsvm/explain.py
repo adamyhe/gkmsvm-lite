@@ -473,6 +473,7 @@ def gkmexplain(
     *,
     mode: int = 0,
     sv_chunk_size: int | None = None,
+    batch_size: int = 50,
     verbose: bool = False,
 ) -> np.ndarray:
     """Compute GkmExplain attribution scores.
@@ -482,7 +483,10 @@ def gkmexplain(
         x: [B, 4, L] one-hot encoded sequences.
         mode: 0 = importance scores, 1 = hypothetical importance scores.
         sv_chunk_size: Chunk size for SV processing.
-        verbose: Show tqdm progress bar over SV chunks.
+        batch_size: Number of input sequences to process at a time. The
+            intermediate ``persv`` array is ``[batch, 4, L, sv_chunk]``
+            float64 — batching keeps peak memory bounded.
+        verbose: Show tqdm progress bar.
 
     Returns:
         [B, 4, L] attribution scores.
@@ -510,7 +514,8 @@ def gkmexplain(
         return to_mlx(
             gkmexplain(
                 cpu_model, to_cpu(x), mode=mode,
-                sv_chunk_size=sv_chunk_size, verbose=verbose,
+                sv_chunk_size=sv_chunk_size, batch_size=batch_size,
+                verbose=verbose,
             )
         )
 
@@ -537,44 +542,64 @@ def gkmexplain(
     alpha_table = xp.asarray(alpha_table_cpu)
     kappa_table = xp.asarray(kappa_table_cpu) if kappa_table_cpu is not None else None
 
-    wx = kernel.flat_windows(x)
-    wx_4l = wx.reshape(B, W, 4, l)
-
     diag_chunk = chunk if chunk is not None else 1000
     if do_norm:
-        diag_x = kernel._raw_diagonal(x)
         diag_sv = kernel._raw_diagonal(sv, chunk_size=diag_chunk)
-        norm = xp.clip(xp.sqrt(diag_x[:, None] * diag_sv[None, :]), 1e-10, None)
+
+    cs = chunk if chunk is not None else min(S, 2000)
 
     result = xp.zeros((B, 4, seqlen), dtype=np.float64)
 
-    cs = chunk if chunk is not None else min(S, 2000)
-    sv_iter = range(0, S, cs)
+    n_seq_batches = (B + batch_size - 1) // batch_size
+    n_sv_chunks = (S + cs - 1) // cs
+    total_iters = n_seq_batches * n_sv_chunks
+    pbar = None
     if verbose:
         from tqdm import tqdm
+        pbar = tqdm(total=total_iters, desc="GkmExplain")
 
-        sv_iter = tqdm(sv_iter, desc="GkmExplain", total=(S + cs - 1) // cs)
-    for sv_start in sv_iter:
-        sv_end = min(sv_start + cs, S)
-        sv_c = sv[sv_start:sv_end]
-        S_c = sv_end - sv_start
+    for b_start in range(0, B, batch_size):
+        b_end = min(b_start + batch_size, B)
+        x_b = x[b_start:b_end]
+        Bb = b_end - b_start
 
-        persv = _explain_windows(
-            wx, wx_4l, kernel.flat_windows(sv_c), x,
-            alpha_table, kappa_table, l, mode, B, W, seqlen, S_c,
-            min_matches,
-        )
+        wx_b = kernel.flat_windows(x_b)
+        wx_4l_b = wx_b.reshape(Bb, W, 4, l)
 
-        if do_rc:
-            persv = persv + _explain_windows(
-                wx, wx_4l, kernel.flat_windows(reverse_complement(sv_c)), x,
-                alpha_table, kappa_table, l, mode, B, W, seqlen, S_c,
+        if do_norm:
+            diag_x_b = kernel._raw_diagonal(x_b)
+            norm_b = xp.clip(
+                xp.sqrt(diag_x_b[:, None] * diag_sv[None, :]), 1e-10, None,
+            )
+
+        for sv_start in range(0, S, cs):
+            sv_end = min(sv_start + cs, S)
+            sv_c = sv[sv_start:sv_end]
+            S_c = sv_end - sv_start
+
+            persv = _explain_windows(
+                wx_b, wx_4l_b, kernel.flat_windows(sv_c), x_b,
+                alpha_table, kappa_table, l, mode, Bb, W, seqlen, S_c,
                 min_matches,
             )
 
-        if do_norm:
-            persv = persv / norm[:, None, None, sv_start:sv_end]
+            if do_rc:
+                persv = persv + _explain_windows(
+                    wx_b, wx_4l_b,
+                    kernel.flat_windows(reverse_complement(sv_c)), x_b,
+                    alpha_table, kappa_table, l, mode, Bb, W, seqlen, S_c,
+                    min_matches,
+                )
 
-        result = result + (persv * coefs[sv_start:sv_end]).sum(axis=-1)
+            if do_norm:
+                persv = persv / norm_b[:, None, None, sv_start:sv_end]
+
+            result[b_start:b_end] += (persv * coefs[sv_start:sv_end]).sum(axis=-1)
+
+            if pbar is not None:
+                pbar.update(1)
+
+    if pbar is not None:
+        pbar.close()
 
     return result.astype(x.dtype)

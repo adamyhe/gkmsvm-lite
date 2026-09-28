@@ -1,6 +1,14 @@
 # benchmarking
 benchmarks/data/
 
+# data downloads and analysis outputs
+data/
+output_gkmexplain/
+
+# example notebooks — downloaded data and outputs
+examples/data/
+examples/output_*/
+
 # OS
 .DS_Store
 Thumbs.db

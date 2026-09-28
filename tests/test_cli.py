@@ -153,6 +153,85 @@ class TestImport:
         assert reimported.num_support_vectors == model.num_support_vectors
 
 
+class TestToDeltasvm:
+    def test_to_deltasvm_roundtrip(self, tmp_fasta, tmp_path):
+        pos = tmp_fasta("pos.fa", 20)
+        neg = tmp_fasta("neg.fa", 20)
+        model_path = str(tmp_path / "model.npz")
+        weights_path = str(tmp_path / "weights.tsv")
+
+        main(["train", "-p", pos, "-n", neg, "-o", model_path,
+              "-l", "5", "-k", "3", "-t", "direct", "--device", "cpu"])
+
+        main(["to-deltasvm", "-m", model_path, "-o", weights_path,
+              "--device", "cpu"])
+
+        assert Path(weights_path).exists()
+        lines = Path(weights_path).read_text().strip().split("\n")
+        assert len(lines) > 0
+        kmer, weight = lines[0].split("\t")
+        assert len(kmer) == 5
+        float(weight)  # should not raise
+
+    def test_to_deltasvm_scores_correlate(self, tmp_fasta, tmp_path):
+        """DeltaSVM scores should correlate well with full SVM scores."""
+        pos = tmp_fasta("pos.fa", 20)
+        neg = tmp_fasta("neg.fa", 20)
+        model_path = str(tmp_path / "model.npz")
+        weights_path = str(tmp_path / "weights.tsv")
+        svm_scores_path = str(tmp_path / "svm.tsv")
+        dsvm_scores_path = str(tmp_path / "dsvm.tsv")
+
+        main(["train", "-p", pos, "-n", neg, "-o", model_path,
+              "-l", "5", "-k", "3", "-t", "direct", "--device", "cpu"])
+
+        test_fa = tmp_fasta("test.fa", 10)
+
+        main(["predict", "-m", model_path, "-i", test_fa,
+              "-o", svm_scores_path, "--device", "cpu"])
+
+        main(["to-deltasvm", "-m", model_path, "-o", weights_path,
+              "--device", "cpu"])
+
+        main(["deltasvm", "-w", weights_path, "-i", test_fa,
+              "-l", "5", "-o", dsvm_scores_path, "--no-rc"])
+
+        def read_scores(path):
+            scores = []
+            with open(path) as f:
+                next(f)
+                for line in f:
+                    scores.append(float(line.strip().split("\t")[1]))
+            return np.array(scores)
+
+        svm = read_scores(svm_scores_path)
+        dsvm = read_scores(dsvm_scores_path)
+        corr = np.corrcoef(svm, dsvm)[0, 1]
+        assert corr > 0.95
+
+
+class TestScoreVariants:
+    def test_score_variants_output(self, tmp_fasta, tmp_path):
+        pos = tmp_fasta("pos.fa", 20)
+        neg = tmp_fasta("neg.fa", 20)
+        model_path = str(tmp_path / "model.npz")
+
+        main(["train", "-p", pos, "-n", neg, "-o", model_path,
+              "-l", "5", "-k", "3", "-t", "direct", "--device", "cpu"])
+
+        ref_fa = tmp_fasta("ref.fa", 5)
+        alt_fa = tmp_fasta("alt.fa", 5)
+        out_path = str(tmp_path / "variants.tsv")
+
+        main(["score-variants", "-m", model_path,
+              "--ref", ref_fa, "--alt", alt_fa,
+              "-o", out_path, "--device", "cpu"])
+
+        lines = Path(out_path).read_text().strip().split("\n")
+        assert lines[0] == "name\tdelta"
+        assert len(lines) == 6
+
+
 class TestNoCommand:
     def test_no_command_exits(self):
         with pytest.raises(SystemExit):
