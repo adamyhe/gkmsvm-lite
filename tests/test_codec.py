@@ -33,7 +33,7 @@ class TestOneHotEncode:
         np.testing.assert_array_equal(upper, mixed)
 
     def test_invalid_base_raises(self):
-        with pytest.raises(ValueError, match="Invalid base 'N'"):
+        with pytest.raises(ValueError, match="Invalid base"):
             one_hot_encode("ACNGT")
 
     def test_empty_raises(self):

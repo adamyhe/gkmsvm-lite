@@ -7,7 +7,6 @@ Agent-facing reference for working on this codebase. Human-readable docs are in 
 ```bash
 uv pip install -e ".[dev]"          # CPU only
 uv pip install -e ".[dev,gpu]"      # with CuPy GPU support
-uv pip install -e ".[dev,bench]"    # with benchmark dependencies
 pytest tests/ -v
 pytest tests/test_codec.py          # single file
 pytest tests/ -k "test_rc"          # pattern match
@@ -45,7 +44,7 @@ src/gkmsvm/
 
 ## Conventions
 
-- Python >=3.10, NumPy, Numba >=0.57, tqdm. CuPy >=12 optional (`[gpu]` extra). MLX >=0.10 optional (`[mlx]` extra)
+- Python >=3.10, NumPy, Numba >=0.57, scikit-learn, tqdm. CuPy >=12 optional (`[gpu]` extra). MLX >=0.10 optional (`[mlx]` extra)
 - Array format: `[batch, 4, length]` one-hot DNA, channel order A=0/C=1/G=2/T=3
 - Output: `[batch, 1]` floating-point margin scores
 - Arrays are numpy.ndarray (CPU), cupy.ndarray (NVIDIA GPU), or mlx.core.array (Apple GPU)
@@ -68,10 +67,10 @@ src/gkmsvm/
 - CPU inner loop: Numba `@njit(parallel=True, fastmath=True)`. NVIDIA GPU inner loop: CuPy RawKernel with shared-memory caching. Apple GPU inner loop: Metal kernel with per-thread accumulation and `popcount()`.
 - MLX compatibility: `get_strides()` for arrays without `.strides`, `xp.ascontiguousarray()` for `.copy()`, `to_cpu(X)[indices]` for fancy indexing. DeltaSVM auto-chunks intermediates >256 MB.
 - SV diagonal is cached after first computation.
-- Training: `solver="auto"` estimates Gram matrix size against available RAM/VRAM — uses precomputed Gram + libsvm-official when it fits (< 50% available memory), column-cached SMO otherwise. SMO uses LRU-cached kernel columns — memory is O(cache_size × N) not O(N²).
+- Training: `solver="auto"` estimates Gram matrix size — uses precomputed Gram + sklearn when it fits in device memory (< 75%); on GPU, falls back to GPU-computed Gram + CPU-side sklearn when it fits in system RAM (< 75%); else column-cached SMO. SMO uses WSS2 working set selection, shrinking, and LRU-cached kernel columns — memory is O(cache_size × N) not O(N²). `max_gram_gb` caps Gram allocation on shared compute.
 - `KernelColumnCache` pre-packs all training windows once, computes single columns via `pairwise_from_indices(bx[1,W,l], by_all)` on cache miss.
-- SVR (`train_gkmsvr`) uses libsvm epsilon-SVR (`-s 3`) with precomputed Gram. SMO SVR is not yet implemented.
-- `libsvm-official` (114 KB, BSD) provides the C solver for both SVC and SVR. No scikit-learn dependency.
+- SVR (`train_gkmsvr`) uses sklearn epsilon-SVR with precomputed Gram. SMO SVR is not yet implemented.
+- `scikit-learn` provides the LIBSVM C solver for both SVC and SVR via `SVC(kernel='precomputed')` / `SVR(kernel='precomputed')`. No direct `libsvm-official` dependency.
 
 ## Gotchas
 

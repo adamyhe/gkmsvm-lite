@@ -208,6 +208,7 @@ class GkmSVM:
             try:
                 import cupy as cp
                 cp.get_default_memory_pool().free_all_blocks()
+                cp.get_default_pinned_memory_pool().free_all_blocks()
             except (ImportError, AttributeError):
                 pass
 
@@ -454,7 +455,15 @@ class GkmSVM:
 
         n_lmers = 4**l
         weights = np.zeros(n_lmers, dtype=np.float32)
-        chunk = 100_000
+
+        n_sv_windows = self._get_sv_index_windows()[0].shape[0]
+        if self._on_gpu:
+            import cupy as cp
+            free, _ = cp.cuda.Device().mem_info
+            bytes_per_row = n_sv_windows * 8 * 2 + 128
+            chunk = max(256, int(free * 0.5 / bytes_per_row))
+        else:
+            chunk = 100_000
 
         chunks = range(0, n_lmers, chunk)
         if verbose:

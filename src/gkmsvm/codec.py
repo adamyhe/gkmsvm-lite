@@ -1,5 +1,12 @@
+"""One-hot encoding, decoding, reverse complement, and validation.
+
+One-hot encoding adapted from tangermeme (Schreiber 2025,
+https://doi.org/10.1101/2025.08.08.669296).
+"""
+
 from __future__ import annotations
 
+import numba
 import numpy as np
 
 from gkmsvm.backend import get_array_module
@@ -7,6 +14,26 @@ from gkmsvm.backend import get_array_module
 BASES = "ACGT"
 _BASE_TO_INDEX = {b: i for i, b in enumerate(BASES)}
 _BASE_TO_INDEX.update({b.lower(): i for i, b in enumerate(BASES)})
+
+_OHE_MAPPING = np.full(256, -2, dtype=np.int8)
+for _i, _b in enumerate(BASES):
+    _OHE_MAPPING[ord(_b)] = _i
+    _OHE_MAPPING[ord(_b.lower())] = _i
+_OHE_MAPPING[ord('N')] = -1
+_OHE_MAPPING[ord('n')] = -1
+
+
+@numba.njit(cache=True)
+def _fast_one_hot(out, seq, mapping, allow_n):
+    for i in range(len(seq)):
+        idx = mapping[seq[i]]
+        if idx >= 0:
+            out[i, idx] = 1
+        elif idx == -1:
+            if not allow_n:
+                raise ValueError("Invalid base in sequence")
+        else:
+            raise ValueError("Invalid base in sequence")
 
 
 def one_hot_encode(
@@ -26,18 +53,10 @@ def one_hot_encode(
     if L == 0:
         raise ValueError("Sequence must be non-empty")
 
-    arr = np.zeros((4, L), dtype=dtype)
-    for i, base in enumerate(sequence):
-        idx = _BASE_TO_INDEX.get(base)
-        if idx is not None:
-            arr[idx, i] = 1.0
-        elif allow_n and base in "Nn":
-            pass
-        else:
-            raise ValueError(
-                f"Invalid base '{base}' at position {i}. Only A, C, G, T are accepted."
-            )
-    return arr
+    seq_bytes = np.frombuffer(bytearray(sequence, "ascii"), dtype=np.uint8)
+    ohe = np.zeros((L, 4), dtype=np.int8)
+    _fast_one_hot(ohe, seq_bytes, _OHE_MAPPING, allow_n)
+    return ohe.T.astype(dtype, copy=False)
 
 
 def one_hot_decode(arr: np.ndarray) -> str:

@@ -140,14 +140,15 @@ def smo_solve(
     C: float = 1.0,
     tol: float = 1e-3,
     max_iter: int = 10_000_000,
-    cache_size: int = 256,
+    cache_size: int = 2048,
     verbose: bool = False,
 ) -> tuple[np.ndarray, float]:
     """Column-cached SMO solver for C-SVM.
 
-    Uses maximal violating pair working set selection (WSS1) with
-    LRU-cached kernel column evaluation. Kernel columns use the
-    packed uint32 path when available.
+    On GPU (CuPy), uses batched working-set SMO: selects q variables
+    per iteration, computes q kernel rows in a single GPU launch, and
+    solves the q×q sub-problem on CPU. On CPU/MLX, uses serial WSS2
+    (Fan et al. 2005) with shrinking.
 
     Args:
         kernel: GkmKernel instance.
@@ -156,8 +157,8 @@ def smo_solve(
         C: Regularization parameter.
         tol: KKT violation tolerance for convergence.
         max_iter: Maximum SMO iterations.
-        cache_size: Number of kernel columns to cache.
-        verbose: Print progress every 1000 iterations.
+        cache_size: Number of kernel columns to cache (serial only).
+        verbose: Print progress.
 
     Returns:
         coefficients: [N] signed dual coefficients (alpha_i * y_i).
@@ -166,6 +167,228 @@ def smo_solve(
     N = X.shape[0]
     mlx_input = is_mlx(X)
     xp = np if mlx_input else get_array_module(X)
+
+    use_batched = (
+        xp is not np
+        and not mlx_input
+        and N > 512
+        and hasattr(kernel, "pairwise_from_indices")
+    )
+
+    if use_batched:
+        return _smo_batched(kernel, X, y, C, tol, max_iter, verbose, xp)
+    return _smo_serial(
+        kernel, X, y, C, tol, max_iter, cache_size, verbose, xp, mlx_input,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Batched working-set SMO (GPU)
+# ---------------------------------------------------------------------------
+
+
+def _smo_batched(kernel, X, y, C, tol, max_iter, verbose, xp):
+    """Batched working-set SMO for GPU.
+
+    Selects q variables per outer iteration, computes q kernel rows
+    in a single batched GPU call, solves the q×q sub-problem with
+    serial SMO on CPU, and updates gradients with a matrix-vector
+    multiply.
+    """
+    N = X.shape[0]
+    q = min(256, N)
+    y = xp.asarray(y, dtype=np.float64)
+
+    # Precompute packed windows
+    idx_windows = kernel.base_index_windows(X)
+    rc_idx_windows = (
+        kernel.base_index_windows(reverse_complement(X))
+        if kernel.include_rc
+        else None
+    )
+    packed_t = None
+    rc_packed_t = None
+    if hasattr(kernel, "_min_matches"):
+        from gkmsvm.kernels.direct import _pack_windows_uint32
+
+        packed = _pack_windows_uint32(idx_windows, xp)
+        packed_t = xp.ascontiguousarray(packed.T)
+        if rc_idx_windows is not None:
+            rc_packed = _pack_windows_uint32(rc_idx_windows, xp)
+            rc_packed_t = xp.ascontiguousarray(rc_packed.T)
+
+    diag = kernel._raw_diagonal(X).astype(np.float64)
+    Q_diag = xp.ones(N, dtype=np.float64) if kernel.normalize else diag.copy()
+
+    alpha = xp.zeros(N, dtype=np.float64)
+    G = -xp.ones(N, dtype=np.float64)
+
+    import time as _time
+
+    gap = float("inf")
+    m_val = float("inf")
+    M_val = float("-inf")
+    iteration = 0
+    t_start = _time.monotonic()
+
+    while iteration < max_iter:
+        I_up = ((y > 0) & (alpha < C)) | ((y < 0) & (alpha > 0))
+        I_low = ((y > 0) & (alpha > 0)) | ((y < 0) & (alpha < C))
+        neg_yG = -y * G
+
+        if not xp.any(I_up) or not xp.any(I_low):
+            break
+
+        up_vals = xp.where(I_up, neg_yG, -np.inf)
+        low_vals = xp.where(I_low, neg_yG, np.inf)
+
+        m_val = float(xp.max(up_vals))
+        M_val = float(xp.min(low_vals))
+        gap = m_val - M_val
+
+        if verbose and (iteration == 0 or iteration % 1000 < q):
+            n_sv = int(xp.sum(alpha > 1e-10))
+            elapsed = _time.monotonic() - t_start
+            print(
+                f"  iter {iteration:>8d}  gap={gap:.4e}  "
+                f"SVs={n_sv}  batch={q}  {elapsed:.1f}s"
+            )
+
+        if gap < tol:
+            break
+
+        # Select working set: top q/2 from I_up, bottom q/2 from I_low
+        n_up = int(xp.sum(I_up))
+        n_low_cand = int(xp.sum(I_low & (neg_yG < m_val)))
+        q_half = min(q // 2, n_up, max(1, n_low_cand))
+
+        up_order = xp.argsort(up_vals)
+        ws_up = up_order[-q_half:]
+
+        low_mask = I_low & (neg_yG < m_val)
+        low_scores = xp.where(low_mask, neg_yG, np.inf)
+        low_order = xp.argsort(low_scores)
+        ws_low = low_order[:q_half]
+
+        ws = xp.unique(xp.concatenate([ws_up, ws_low]))
+        q_actual = int(ws.shape[0])
+        if q_actual < 2:
+            break
+
+        # Batched kernel row computation — single GPU launch
+        bx_ws = idx_windows[ws]
+        K_ws = kernel.pairwise_from_indices(
+            bx_ws, idx_windows, by_packed_t=packed_t,
+        )
+        if kernel.include_rc and rc_idx_windows is not None:
+            K_ws = K_ws + kernel.pairwise_from_indices(
+                bx_ws, rc_idx_windows, by_packed_t=rc_packed_t,
+            )
+
+        K_ws = K_ws.astype(np.float64)
+        if kernel.normalize:
+            norm = xp.sqrt(diag[ws, None] * diag[None, :])
+            K_ws = K_ws / xp.clip(norm, 1e-10, None)
+
+        # Solve sub-problem on CPU
+        ws_cpu = to_cpu(ws)
+        K_sub = to_cpu(K_ws[:, ws])
+        g_sub = to_cpu(G[ws])
+        y_sub = to_cpu(y[ws])
+        alpha_sub = to_cpu(alpha[ws])
+        Q_diag_sub = to_cpu(Q_diag[ws])
+
+        delta_cpu = _solve_subproblem(
+            K_sub, g_sub, y_sub, alpha_sub, C, Q_diag_sub,
+        )
+
+        if np.allclose(delta_cpu, 0):
+            break
+
+        # Update alpha and gradient on GPU
+        delta = xp.asarray(delta_cpu, dtype=np.float64)
+        alpha[ws] += delta
+        coeffs = y[ws] * delta
+        G += y * (K_ws.T @ coeffs)
+
+        iteration += q_actual
+
+    if verbose:
+        n_sv = int(xp.sum(alpha > 1e-10))
+        elapsed = _time.monotonic() - t_start
+        print(
+            f"  SMO done: {iteration} effective iters, {n_sv} SVs, "
+            f"gap={gap:.2e}, {elapsed:.1f}s"
+        )
+
+    free = (alpha > 1e-10) & (alpha < C - 1e-10)
+    if xp.any(free):
+        rho = float(xp.mean(y[free] * G[free]))
+    else:
+        rho = -(m_val + M_val) / 2.0
+
+    return (alpha * y).astype(np.float64), float(-rho)
+
+
+def _solve_subproblem(K_sub, g, y, alpha, C, Q_diag, max_iter=500, tol=1e-3):
+    """Solve q-variable sub-QP with serial SMO on CPU."""
+    alpha_orig = alpha.copy()
+    alpha = alpha.copy()
+    g = g.copy()
+
+    for _ in range(max_iter):
+        I_up = ((y > 0) & (alpha < C)) | ((y < 0) & (alpha > 0))
+        I_low = ((y > 0) & (alpha > 0)) | ((y < 0) & (alpha < C))
+
+        neg_yg = -y * g
+        up_vals = np.where(I_up, neg_yg, -np.inf)
+        low_vals = np.where(I_low, neg_yg, np.inf)
+
+        i = int(np.argmax(up_vals))
+        j = int(np.argmin(low_vals))
+
+        if float(up_vals[i]) - float(low_vals[j]) < tol:
+            break
+
+        K_ij = float(K_sub[i, j])
+        a = float(Q_diag[i]) + float(Q_diag[j]) - 2.0 * K_ij
+        if a <= 0:
+            a = 1e-12
+
+        s = float(y[i] * y[j])
+        b = -s * float(g[i]) + float(g[j])
+        d_j = -b / a
+
+        alpha_i = float(alpha[i])
+        alpha_j = float(alpha[j])
+
+        if s > 0:
+            lo = max(-alpha_j, alpha_i - C)
+            hi = min(C - alpha_j, alpha_i)
+        else:
+            lo = max(-alpha_j, -alpha_i)
+            hi = min(C - alpha_j, C - alpha_i)
+
+        d_j = max(lo, min(hi, d_j))
+        d_i = -s * d_j
+
+        alpha[i] += d_i
+        alpha[j] += d_j
+
+        g += d_i * y[i] * y * K_sub[i] + d_j * y[j] * y * K_sub[j]
+
+    return alpha - alpha_orig
+
+
+# ---------------------------------------------------------------------------
+# Serial SMO (CPU / MLX / fallback)
+# ---------------------------------------------------------------------------
+
+
+def _smo_serial(kernel, X, y, C, tol, max_iter, cache_size, verbose, xp,
+                mlx_input):
+    """Serial WSS2 SMO with shrinking."""
+    N = X.shape[0]
     y = xp.asarray(to_cpu(y) if mlx_input else y, dtype=np.float64)
 
     cache = KernelColumnCache(kernel, X, max_columns=cache_size)
@@ -179,40 +402,79 @@ def smo_solve(
         else cache._diag.copy()
     )
 
+    import time as _time
+
+    active = xp.ones(N, dtype=bool)
+    n_active = N
+    shrink_interval = max(N, 1000)
+    unshrink_needed = False
+
     gap = float("inf")
+    m_val = float("inf")
+    M_val = float("-inf")
+    t_start = _time.monotonic()
 
     for iteration in range(max_iter):
-        I_up = ((y > 0) & (alpha < C)) | ((y < 0) & (alpha > 0))
-        I_low = ((y > 0) & (alpha > 0)) | ((y < 0) & (alpha < C))
+        I_up = active & (((y > 0) & (alpha < C)) | ((y < 0) & (alpha > 0)))
+        I_low = active & (((y > 0) & (alpha > 0)) | ((y < 0) & (alpha < C)))
 
         neg_yG = -y * G
 
         if not xp.any(I_up) or not xp.any(I_low):
+            if unshrink_needed:
+                active[:] = True
+                n_active = N
+                unshrink_needed = False
+                continue
             break
 
         up_vals = xp.where(I_up, neg_yG, -np.inf)
         low_vals = xp.where(I_low, neg_yG, np.inf)
 
         i = int(xp.argmax(up_vals))
-        j = int(xp.argmin(low_vals))
-
         m_val = float(neg_yG[i])
-        M_val = float(neg_yG[j])
+        M_val = float(xp.min(low_vals))
         gap = m_val - M_val
 
         if verbose and iteration % 1000 == 0:
             n_sv = int(xp.sum(alpha > 1e-10))
             total = cache.hits + cache.misses
             hr = cache.hits / max(1, total) * 100
+            elapsed = _time.monotonic() - t_start
             print(
                 f"  iter {iteration:>8d}  gap={gap:.4e}  "
-                f"SVs={n_sv}  cache hit={hr:.0f}%"
+                f"SVs={n_sv}  active={n_active}/{N}  "
+                f"cache hit={hr:.0f}%  {elapsed:.1f}s"
             )
 
         if gap < tol:
+            if unshrink_needed:
+                active[:] = True
+                n_active = N
+                unshrink_needed = False
+                continue
             break
 
+        # Shrinking
+        if iteration > 0 and iteration % shrink_interval == 0:
+            shrunk = _shrink(alpha, neg_yG, active, y, C, m_val, M_val, xp)
+            if shrunk > 0:
+                n_active = int(xp.sum(active))
+                unshrink_needed = True
+                if verbose:
+                    print(f"  shrink: removed {shrunk}, active={n_active}/{N}")
+                continue
+
+        # WSS2: select j using second-order information
         K_col_i = cache.get_column(i)
+
+        candidates = I_low & (neg_yG < m_val)
+        b_sq = (m_val - neg_yG) ** 2
+        a_wss = Q_diag[i] + Q_diag - 2.0 * K_col_i
+        a_wss = xp.maximum(a_wss, 1e-12)
+        gain = xp.where(candidates, b_sq / a_wss, -np.inf)
+        j = int(xp.argmax(gain))
+
         K_col_j = cache.get_column(j)
 
         K_ij = float(K_col_i[j])
@@ -246,9 +508,10 @@ def smo_solve(
         n_sv = int(xp.sum(alpha > 1e-10))
         total = cache.hits + cache.misses
         hr = cache.hits / max(1, total) * 100
+        elapsed = _time.monotonic() - t_start
         print(
             f"  SMO done: {iteration + 1} iters, {n_sv} SVs, "
-            f"gap={gap:.2e}, cache hit={hr:.1f}%"
+            f"gap={gap:.2e}, cache hit={hr:.1f}%, {elapsed:.1f}s"
         )
 
     free = (alpha > 1e-10) & (alpha < C - 1e-10)
@@ -258,3 +521,20 @@ def smo_solve(
         rho = -(m_val + M_val) / 2.0
 
     return (alpha * y).astype(np.float64), float(-rho)
+
+
+def _shrink(alpha, neg_yG, active, y, C, m_val, M_val, xp):
+    """Remove bounded variables unlikely to change from the active set."""
+    at_zero = alpha < 1e-10
+    at_C = alpha > C - 1e-10
+
+    shrink_zero_pos = at_zero & (y > 0) & (neg_yG < M_val) & active
+    shrink_zero_neg = at_zero & (y < 0) & (neg_yG > m_val) & active
+    shrink_C_pos = at_C & (y > 0) & (neg_yG > m_val) & active
+    shrink_C_neg = at_C & (y < 0) & (neg_yG < M_val) & active
+
+    to_shrink = shrink_zero_pos | shrink_zero_neg | shrink_C_pos | shrink_C_neg
+    n_shrunk = int(xp.sum(to_shrink))
+    if n_shrunk > 0:
+        active[to_shrink] = False
+    return n_shrunk

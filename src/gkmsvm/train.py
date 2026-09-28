@@ -28,9 +28,10 @@ def train_gkmsvm(
     H: float | None = None,
     include_rc: bool = True,
     solver: str = "auto",
-    cache_size: int = 256,
+    cache_size: int = 2048,
     tol: float = 1e-3,
     max_iter: int = 10_000_000,
+    max_gram_gb: float | None = None,
     sv_chunk_size: int | None = None,
     gram_chunk_size: int = 1000,
     device: str = "auto",
@@ -50,12 +51,16 @@ def train_gkmsvm(
         M: Center-weight window size (for -t 4, -t 5).
         H: Center-weight decay (for -t 4, -t 5).
         include_rc: Include reverse complement in kernel.
-        solver: ``"auto"`` (precomputed Gram if N²×8 < 50% available RAM/VRAM,
-            else SMO), ``"smo"`` (column-cached SMO), or ``"libsvm"``
-            (precomputed Gram + LIBSVM C solver).
+        solver: ``"auto"`` (precomputed Gram if it fits in device memory;
+            on GPU, falls back to GPU-compute + CPU-solve if it fits in
+            system RAM; else column-cached SMO), ``"smo"`` (column-cached
+            SMO), or ``"libsvm"`` (precomputed Gram + sklearn solver).
         cache_size: Number of kernel columns to cache (SMO only).
         tol: KKT violation tolerance (SMO only).
         max_iter: Maximum SMO iterations.
+        max_gram_gb: Hard cap on Gram matrix size in GB. On shared compute,
+            set this to your allocation limit to avoid OOM. ``None`` uses
+            automatic memory detection.
         sv_chunk_size: Chunk size for inference on the returned model.
         gram_chunk_size: Tile size for Gram matrix computation (libsvm only).
         device: ``"auto"`` (MLX if available), ``"mlx"``, or ``"cpu"``.
@@ -74,15 +79,38 @@ def train_gkmsvm(
         kernel_type, l, k, d, gamma, M, H, include_rc,
     )
 
+    xp = get_array_module(X)
+    N = X.shape[0]
+    gram_gb = N * N * 8 / 1024**3
+
+    if max_gram_gb is not None and gram_gb > max_gram_gb:
+        gram_capped = True
+    else:
+        gram_capped = False
+
     if solver == "auto":
-        use_smo = not _gram_fits_in_memory(X.shape[0], get_array_module(X))
-        if verbose and use_smo:
-            gram_gb = X.shape[0] ** 2 * 8 / 1024**3
-            print(f"Gram matrix would be {gram_gb:.1f} GB — using SMO solver")
+        if not gram_capped and _gram_fits_in_memory(N, xp):
+            use_smo = False
+            gpu_gram_cpu_solve = False
+        elif not gram_capped and xp is not np and _gram_fits_on_cpu(N):
+            use_smo = False
+            gpu_gram_cpu_solve = True
+            if verbose:
+                print(
+                    f"Gram matrix ({gram_gb:.1f} GB) exceeds GPU memory "
+                    f"— computing on GPU, solving on CPU"
+                )
+        else:
+            use_smo = True
+            gpu_gram_cpu_solve = False
+            if verbose:
+                print(f"Gram matrix would be {gram_gb:.1f} GB — using SMO solver")
     elif solver == "smo":
         use_smo = True
+        gpu_gram_cpu_solve = False
     elif solver == "libsvm":
         use_smo = False
+        gpu_gram_cpu_solve = False
     else:
         raise ValueError(
             f"Unknown solver {solver!r}. Use 'auto', 'smo', or 'libsvm'."
@@ -94,8 +122,15 @@ def train_gkmsvm(
             cache_size=cache_size, tol=tol, max_iter=max_iter,
             sv_chunk_size=sv_chunk_size, device=device, verbose=verbose,
         )
+    if gpu_gram_cpu_solve:
+        return _fit_libsvm_gpu_gram(
+            kernel, X, y, C,
+            kernel_type, kernel_params,
+            gram_chunk_size=gram_chunk_size,
+            sv_chunk_size=sv_chunk_size, verbose=verbose,
+        )
     return _fit_libsvm(
-        kernel, X, y, f"-s 0 -c {C}",
+        kernel, X, y, C,
         kernel_type, kernel_params,
         gram_chunk_size=gram_chunk_size,
         sv_chunk_size=sv_chunk_size, device=device, verbose=verbose,
@@ -124,7 +159,7 @@ def train_gkmsvr(
     """Train a gapped k-mer SVR (epsilon-SVR) for regression.
 
     Predicts continuous values from DNA sequences using the gapped
-    k-mer kernel with LIBSVM's epsilon-SVR solver.
+    k-mer kernel with sklearn's epsilon-SVR solver.
 
     Args:
         sequences: DNA sequences — list of strings or [N, 4, L] array.
@@ -160,10 +195,25 @@ def train_gkmsvr(
         kernel_type, l, k, d, gamma, M, H, include_rc,
     )
 
+    xp = get_array_module(X)
+    N = X.shape[0]
+    if xp is not np and not _gram_fits_in_memory(N, xp) and _gram_fits_on_cpu(N):
+        if verbose:
+            gram_gb = N * N * 8 / 1024**3
+            print(
+                f"Gram matrix ({gram_gb:.1f} GB) exceeds GPU memory "
+                f"— computing on GPU, solving on CPU"
+            )
+        return _fit_libsvm_gpu_gram(
+            kernel, X, y, C,
+            kernel_type, kernel_params,
+            epsilon=epsilon, gram_chunk_size=gram_chunk_size,
+            sv_chunk_size=sv_chunk_size, verbose=verbose,
+        )
     return _fit_libsvm(
-        kernel, X, y, f"-s 3 -c {C} -p {epsilon}",
+        kernel, X, y, C,
         kernel_type, kernel_params,
-        gram_chunk_size=gram_chunk_size,
+        epsilon=epsilon, gram_chunk_size=gram_chunk_size,
         sv_chunk_size=sv_chunk_size, device=device, verbose=verbose,
     )
 
@@ -239,45 +289,30 @@ def _build_kernel(kernel_type, l, k, d, gamma, M, H, include_rc):
     return kernel, kernel_type, kernel_params
 
 
-def _fit_libsvm(
-    kernel, X, y, libsvm_opts, kernel_type, kernel_params, *,
-    gram_chunk_size, sv_chunk_size, device="cpu", verbose=False,
+def _fit_libsvm_gpu_gram(
+    kernel, X, y, C, kernel_type, kernel_params, *,
+    epsilon=None, gram_chunk_size, sv_chunk_size, verbose=False,
 ) -> GkmSVM:
-    """Compute Gram matrix and fit with LIBSVM's C solver."""
-    from libsvm.svmutil import svm_train
-
+    """Compute Gram on GPU in tiles, accumulate on CPU, solve with sklearn."""
     from gkmsvm.gram import compute_gram
 
     N = X.shape[0]
+    gram = np.empty((N, N), dtype=np.float64)
     if verbose:
-        print(f"Computing {N}x{N} Gram matrix ({N * N:,} kernel evaluations)...")
-    gram = compute_gram(kernel, X, chunk_size=gram_chunk_size, verbose=verbose)
+        print(f"Computing {N}x{N} Gram matrix on GPU, storing on CPU...")
+    compute_gram(kernel, X, chunk_size=gram_chunk_size, verbose=verbose,
+                 out=gram)
 
-    ids = np.arange(1, N + 1, dtype=np.float64).reshape(-1, 1)
-    x_train = np.hstack([ids, gram])
-    del gram
+    y_cpu = to_cpu(y) if not isinstance(y, np.ndarray) else y
+    clf = _fit_sklearn(gram, y_cpu, C, epsilon=epsilon, verbose=verbose)
 
-    quiet = "" if verbose else " -q"
-    if verbose:
-        print("Fitting SVM...")
-    model = svm_train(y.tolist(), x_train, f"-t 4 {libsvm_opts}{quiet}")
-
-    n_sv = model.l
-    sv_indices = np.array(
-        [model.sv_indices[i] - 1 for i in range(n_sv)], dtype=np.intp,
-    )
-    if is_mlx(X):
-        sv_seqs = to_cpu(X)[sv_indices]
-    else:
-        sv_seqs = to_cpu(X[sv_indices])
-    coefficients = np.array(
-        [model.sv_coef[0][i] for i in range(n_sv)],
-        dtype=sv_seqs.dtype,
-    )
-    bias = float(-model.rho[0])
+    sv_indices = clf.support_
+    sv_seqs = to_cpu(X)[sv_indices]
+    coefficients = clf.dual_coef_[0].astype(sv_seqs.dtype)
+    bias = float(clf.intercept_[0])
 
     if verbose:
-        print(f"Training complete: {n_sv} support vectors")
+        print(f"Training complete: {len(sv_indices)} support vectors")
 
     return GkmSVM(
         support_sequences=sv_seqs,
@@ -286,8 +321,61 @@ def _fit_libsvm(
         kernel_type=kernel_type,
         kernel_params=kernel_params,
         sv_chunk_size=sv_chunk_size,
-        device=device,
     )
+
+
+def _fit_libsvm(
+    kernel, X, y, C, kernel_type, kernel_params, *,
+    epsilon=None, gram_chunk_size, sv_chunk_size, device="cpu", verbose=False,
+) -> GkmSVM:
+    """Compute Gram matrix and fit with sklearn's LIBSVM-backed solver."""
+    from gkmsvm.gram import compute_gram
+
+    N = X.shape[0]
+    gram = np.empty((N, N), dtype=np.float64)
+    if verbose:
+        print(f"Computing {N}x{N} Gram matrix ({N * N:,} kernel evaluations)...")
+    compute_gram(kernel, X, chunk_size=gram_chunk_size, verbose=verbose,
+                 out=gram)
+
+    y_fit = to_cpu(y) if not isinstance(y, np.ndarray) else y
+    clf = _fit_sklearn(gram, y_fit, C, epsilon=epsilon, verbose=verbose)
+
+    sv_indices = clf.support_
+    if is_mlx(X):
+        sv_seqs = to_cpu(X)[sv_indices]
+    else:
+        sv_seqs = to_cpu(X[sv_indices])
+    coefficients = clf.dual_coef_[0].astype(sv_seqs.dtype)
+    bias = float(clf.intercept_[0])
+
+    if verbose:
+        print(f"Training complete: {len(sv_indices)} support vectors")
+
+    return GkmSVM(
+        support_sequences=sv_seqs,
+        coefficients=coefficients,
+        bias=bias,
+        kernel_type=kernel_type,
+        kernel_params=kernel_params,
+        sv_chunk_size=sv_chunk_size,
+    )
+
+
+def _fit_sklearn(gram, y, C, *, epsilon=None, verbose=False):
+    """Fit SVC or SVR with a precomputed kernel matrix."""
+    from sklearn.svm import SVC, SVR
+
+    if epsilon is not None:
+        clf = SVR(C=C, epsilon=epsilon, kernel="precomputed")
+        if verbose:
+            print("Fitting SVR with sklearn...")
+    else:
+        clf = SVC(C=C, kernel="precomputed")
+        if verbose:
+            print("Fitting SVC with sklearn...")
+    clf.fit(gram, y)
+    return clf
 
 
 def _train_smo(
@@ -327,7 +415,6 @@ def _train_smo(
         kernel_type=kernel_type,
         kernel_params=kernel_params,
         sv_chunk_size=sv_chunk_size,
-        device=device,
     )
 
 
@@ -359,10 +446,17 @@ def _available_memory(xp) -> int:
 
 
 def _gram_fits_in_memory(N: int, xp) -> bool:
-    """Check if an N x N float64 Gram matrix fits in available memory."""
+    """Check if Gram matrix fits in available device memory."""
     gram_bytes = N * N * 8
     available = _available_memory(xp)
-    return gram_bytes < available * 0.5
+    return gram_bytes < available * 0.75
+
+
+def _gram_fits_on_cpu(N: int) -> bool:
+    """Check if Gram matrix fits in CPU RAM."""
+    gram_bytes = N * N * 8
+    available = _available_memory(np)
+    return gram_bytes < available * 0.75
 
 
 def _to_onehot(seqs) -> np.ndarray:

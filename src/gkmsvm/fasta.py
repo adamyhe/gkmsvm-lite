@@ -2,6 +2,9 @@
 
 For simple FASTA read/write, use read_fasta / write_fasta.
 For BED + genome → array extraction, use extract_loci (requires pyfaidx).
+
+extract_loci adapted from tangermeme (Schreiber 2025,
+https://doi.org/10.1101/2025.08.08.669296).
 """
 
 from __future__ import annotations

@@ -9,7 +9,12 @@ description = "Gapped k-mer SVMs for DNA sequence classification and regression"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
+keywords = ["gkm-svm", "svm", "dna", "genomics", "bioinformatics", "kernel-methods"]
 classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -23,8 +28,16 @@ dependencies = [
     "numpy",
     "numba>=0.57",
     "tqdm",
-    "libsvm-official>=3.30",
+    "scikit-learn>=1.0",
+    "pyfaidx",
+    "dinuc-shuf>=0.1.0b1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/adamyhe/gkmsvm-lite"
+Repository = "https://github.com/adamyhe/gkmsvm-lite"
+Issues = "https://github.com/adamyhe/gkmsvm-lite/issues"
+Documentation = "https://github.com/adamyhe/gkmsvm-lite/tree/main/docs"
 
 [project.scripts]
 gkmsvm = "gkmsvm.cli:main"
@@ -40,9 +53,14 @@ dev = [
     "pytest",
     "pytest-cov",
 ]
-bench = [
-    "scikit-learn>=1.0",
-    "py2bit",
+examples = [
+    "jupyter",
+    "matplotlib",
+    "pandas",
+    "scipy",
+    "modisco>=2.5",
+    "h5py",
+    "openpyxl",
 ]
 
 [tool.hatch.build.targets.wheel]

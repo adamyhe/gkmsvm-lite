@@ -5,7 +5,7 @@ from math import comb
 import numpy as np
 from numba import njit, prange
 
-from gkmsvm.backend import get_array_module, get_strides, is_mlx
+from gkmsvm.backend import get_array_module, get_strides, is_gpu, is_mlx
 from gkmsvm.codec import reverse_complement
 from gkmsvm.kernels.base import GkmKernel
 
@@ -139,7 +139,7 @@ void fused_pairwise(
     const float* __restrict__ wy,
     const double* __restrict__ table,
     double* __restrict__ result,
-    const int total_pairs,
+    const long long total_pairs,
     const int S,
     const int Wx,
     const int Wy,
@@ -152,11 +152,11 @@ void fused_pairwise(
     }
     __syncthreads();
 
-    const int idx = blockDim.x * blockIdx.x + threadIdx.x;
+    const long long idx = (long long)blockDim.x * blockIdx.x + threadIdx.x;
     if (idx >= total_pairs) return;
 
-    const int b = idx / S;
-    const int s = idx % S;
+    const long long b = idx / S;
+    const int s = (int)(idx % S);
 
     double acc = 0.0;
     for (int i = 0; i < Wx; i++) {
@@ -184,7 +184,7 @@ void fused_pairwise_idx(
     const unsigned int* __restrict__ by_packed,
     const double* __restrict__ table,
     double* __restrict__ result,
-    const int total_pairs,
+    const long long total_pairs,
     const int S,
     const int Wx,
     const int Wy,
@@ -203,13 +203,13 @@ void fused_pairwise_idx(
         s_table[i] = table[i];
     }
 
-    const int idx = blockDim.x * blockIdx.x + threadIdx.x;
+    const long long idx = (long long)blockDim.x * blockIdx.x + threadIdx.x;
 
     // Cooperatively load query windows into shared memory when all
     // threads in the block share the same query index.
-    const int block_start = blockDim.x * blockIdx.x;
-    const int b_first = block_start / S;
-    const int b_last = (block_start + blockDim.x - 1) / S;
+    const long long block_start = (long long)blockDim.x * blockIdx.x;
+    const long long b_first = block_start / S;
+    const long long b_last = (block_start + blockDim.x - 1) / S;
     if (b_first == b_last) {
         const unsigned int* bx_src = bx_packed + b_first * Wx;
         for (int i = threadIdx.x; i < Wx; i += blockDim.x) {
@@ -220,8 +220,8 @@ void fused_pairwise_idx(
 
     if (idx >= total_pairs) return;
 
-    const int b = idx / S;
-    const int s = idx % S;
+    const long long b = idx / S;
+    const int s = (int)(idx % S);
 
     const bool use_shared = (b_first == b_last);
 
@@ -244,8 +244,146 @@ void fused_pairwise_idx(
 }
 """
 
+_FUSED_DIAGONAL_CUDA = r"""
+extern "C" __global__
+void fused_diagonal(
+    const unsigned int* __restrict__ bx_packed,
+    const double* __restrict__ table,
+    double* __restrict__ result,
+    const int B,
+    const int W,
+    const int l,
+    const int min_matches
+) {
+    extern __shared__ double s_table[];
+    for (int i = threadIdx.x; i <= l; i += blockDim.x) {
+        s_table[i] = table[i];
+    }
+    __syncthreads();
+
+    const int b = blockDim.x * blockIdx.x + threadIdx.x;
+    if (b >= B) return;
+
+    double acc = 0.0;
+    for (int i = 0; i < W; i++) {
+        unsigned int bx_val = bx_packed[b * W + i];
+        for (int j = 0; j < W; j++) {
+            unsigned int x = bx_val ^ bx_packed[b * W + j];
+            unsigned int mismatches = ((x >> 1) | x) & 0x55555555u;
+            int mismatch_count = __popc(mismatches);
+            int matches = l - mismatch_count;
+            if (matches >= min_matches) {
+                acc += s_table[l - matches];
+            }
+        }
+    }
+    result[b] = acc;
+}
+"""
+
+_FUSED_CROSS_DIAGONAL_CUDA = r"""
+extern "C" __global__
+void fused_cross_diagonal(
+    const unsigned int* __restrict__ bx_packed,
+    const unsigned int* __restrict__ bx_rc_packed,
+    const double* __restrict__ table,
+    double* __restrict__ result,
+    const int B,
+    const int W,
+    const int W_rc,
+    const int l,
+    const int min_matches
+) {
+    extern __shared__ double s_table[];
+    for (int i = threadIdx.x; i <= l; i += blockDim.x) {
+        s_table[i] = table[i];
+    }
+    __syncthreads();
+
+    const int b = blockDim.x * blockIdx.x + threadIdx.x;
+    if (b >= B) return;
+
+    double acc = 0.0;
+    for (int i = 0; i < W; i++) {
+        unsigned int bx_val = bx_packed[b * W + i];
+        for (int j = 0; j < W_rc; j++) {
+            unsigned int x = bx_val ^ bx_rc_packed[b * W_rc + j];
+            unsigned int mismatches = ((x >> 1) | x) & 0x55555555u;
+            int mismatch_count = __popc(mismatches);
+            int matches = l - mismatch_count;
+            if (matches >= min_matches) {
+                acc += s_table[l - matches];
+            }
+        }
+    }
+    result[b] = acc;
+}
+"""
+
 _cupy_fused_kernel = None
 _cupy_fused_idx_kernel = None
+_cupy_fused_diag_kernel = None
+_cupy_fused_cross_diag_kernel = None
+
+
+def _fused_diagonal_packed_gpu(bx_packed, table, l, min_matches):
+    """Self-kernel diagonal via CUDA RawKernel (packed uint32 path)."""
+    global _cupy_fused_diag_kernel
+    import cupy as cp
+
+    if _cupy_fused_diag_kernel is None:
+        _cupy_fused_diag_kernel = cp.RawKernel(
+            _FUSED_DIAGONAL_CUDA,
+            "fused_diagonal",
+            options=("--use_fast_math",),
+        )
+
+    B, W = bx_packed.shape
+    table_gpu = cp.asarray(table, dtype=cp.float64)
+    result = cp.empty(B, dtype=cp.float64)
+
+    block = 256
+    grid = (B + block - 1) // block
+
+    _cupy_fused_diag_kernel(
+        (grid,),
+        (block,),
+        (bx_packed, table_gpu, result,
+         np.int32(B), np.int32(W), np.int32(l), np.int32(min_matches)),
+        shared_mem=(l + 1) * 8,
+    )
+    return result
+
+
+def _fused_cross_diagonal_packed_gpu(bx_packed, bx_rc_packed, table, l, min_matches):
+    """Cross-kernel diagonal (fwd x RC) via CUDA RawKernel."""
+    global _cupy_fused_cross_diag_kernel
+    import cupy as cp
+
+    if _cupy_fused_cross_diag_kernel is None:
+        _cupy_fused_cross_diag_kernel = cp.RawKernel(
+            _FUSED_CROSS_DIAGONAL_CUDA,
+            "fused_cross_diagonal",
+            options=("--use_fast_math",),
+        )
+
+    B, W = bx_packed.shape
+    _, W_rc = bx_rc_packed.shape
+    table_gpu = cp.asarray(table, dtype=cp.float64)
+    result = cp.empty(B, dtype=cp.float64)
+
+    block = 256
+    grid = (B + block - 1) // block
+
+    _cupy_fused_cross_diag_kernel(
+        (grid,),
+        (block,),
+        (bx_packed, bx_rc_packed, table_gpu, result,
+         np.int32(B), np.int32(W), np.int32(W_rc),
+         np.int32(l), np.int32(min_matches)),
+        shared_mem=(l + 1) * 8,
+    )
+    return result
 
 
 def _fused_pairwise_gpu(wx, wy, table):
@@ -281,7 +419,7 @@ def _fused_pairwise_gpu(wx, wy, table):
             wy_f32,
             table_gpu,
             result,
-            np.int32(total),
+            np.int64(total),
             np.int32(S),
             np.int32(Wx),
             np.int32(Wy),
@@ -539,7 +677,7 @@ def _fused_pairwise_idx_gpu(bx, by, table, min_matches, *, by_packed_t=None):
             by_packed_t,
             table_gpu,
             result,
-            np.int32(total),
+            np.int64(total),
             np.int32(S),
             np.int32(Wx),
             np.int32(Wy),
@@ -801,10 +939,21 @@ class DirectGkmKernel(GkmKernel):
                 )
             return result.astype(x.dtype)
 
-        wx = self.flat_windows(x)
-        result = self.diagonal_from_windows(wx)
+        import cupy as cp
+        bx_packed = cp.ascontiguousarray(
+            _pack_windows_uint32(cp.asarray(self.base_index_windows(x)), cp)
+        )
+        mm = self._min_matches
+        result = _fused_diagonal_packed_gpu(
+            bx_packed, self._mismatch_table, self.l, mm
+        )
         if self.include_rc:
-            wx_rc = self.flat_windows(reverse_complement(x))
-            rc_matches = xp.matmul(wx, wx_rc.transpose(0, 2, 1))
-            result = result + self._apply_table(rc_matches)
+            bx_rc_packed = cp.ascontiguousarray(
+                _pack_windows_uint32(
+                    cp.asarray(self.base_index_windows(reverse_complement(x))), cp
+                )
+            )
+            result = result + _fused_cross_diagonal_packed_gpu(
+                bx_packed, bx_rc_packed, self._mismatch_table, self.l, mm
+            )
         return result.astype(x.dtype)

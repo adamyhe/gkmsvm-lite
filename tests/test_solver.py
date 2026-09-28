@@ -143,8 +143,8 @@ class TestSmoSolve:
         assert score_pos > 0
         assert score_neg < 0
 
-    def test_smo_vs_libsvm_agreement(self):
-        from libsvm.svmutil import svm_train
+    def test_smo_vs_sklearn_agreement(self):
+        from sklearn.svm import SVC
 
         from gkmsvm.gram import compute_gram
 
@@ -162,15 +162,12 @@ class TestSmoSolve:
         )
 
         gram = compute_gram(kernel, X)
-        ids = np.arange(1, N + 1, dtype=np.float64).reshape(-1, 1)
-        x_train = np.hstack([ids, gram])
-        model = svm_train(y.tolist(), x_train, "-s 0 -t 4 -c 1.0 -q")
+        clf = SVC(C=1.0, kernel="precomputed").fit(gram, y)
 
-        n_sv = model.l
         coef_lib = np.zeros(N)
-        for i in range(n_sv):
-            coef_lib[model.sv_indices[i] - 1] = model.sv_coef[0][i]
-        bias_lib = float(-model.rho[0])
+        for i, idx in enumerate(clf.support_):
+            coef_lib[idx] = clf.dual_coef_[0, i]
+        bias_lib = float(clf.intercept_[0])
 
         test_seqs = _random_seqs(10, 20, rng)
         scores_smo = np.array([
