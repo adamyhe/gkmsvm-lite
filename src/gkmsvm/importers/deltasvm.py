@@ -22,20 +22,26 @@ def load_deltasvm_model(
     path: str | Path,
     l: int,
     *,
-    include_rc: bool = True,
+    include_rc: bool | None = None,
     bias: float = 0.0,
     dtype: np.dtype | type = np.float32,
     device: str = "cpu",
 ) -> DeltaSVM:
     """Load deltaSVM k-mer weights from a tab-separated file.
 
-    The file format is one k-mer per line: ``<sequence>\\t<weight>``.
-    The k-mer length k is inferred from the first entry.
+    The file format is one k-mer per line: ``<sequence>\\t<weight>`` or
+    ``<sequence>\\t<revcomp>\\t<weight>`` (RC-collapsed, as in Lee 2015).
+
+    For 3-column RC-collapsed files, both the forward and RC k-mer are
+    populated in the weight table and ``include_rc`` defaults to False
+    (RC is already represented). For 2-column files, ``include_rc``
+    defaults to True.
 
     Args:
         path: Path to the deltaSVM weight file (plain text or gzip).
         l: Window length (l-mer size). Must match the model's L parameter.
-        include_rc: Whether to score both strands.
+        include_rc: Whether to score both strands. Defaults to False for
+            3-column (RC-collapsed) files, True for 2-column files.
         bias: Optional bias term added to scores.
         dtype: Array dtype for weights.
         device: ``"cpu"`` (default), ``"cuda"``, ``"mlx"``, or ``"auto"``.
@@ -46,11 +52,17 @@ def load_deltasvm_model(
     path = Path(path)
     k = None
     kmer_weights: dict[str, float] = {}
+    has_rc_column = False
+    header_rc_false = False
 
     with _open_auto(path) as f:
         for line_num, line in enumerate(f, 1):
             line = line.strip()
-            if not line or line.startswith("#"):
+            if not line:
+                continue
+            if line.startswith("#"):
+                if "include_rc=false" in line.lower():
+                    header_rc_false = True
                 continue
 
             parts = line.split("\t")
@@ -59,6 +71,7 @@ def load_deltasvm_model(
 
             if len(parts) == 3:
                 kmer, revcomp, weight_str = parts
+                has_rc_column = True
             elif len(parts) == 2:
                 kmer, weight_str = parts
                 revcomp = None
@@ -91,6 +104,9 @@ def load_deltasvm_model(
 
     if l < k:
         raise ValueError(f"l ({l}) must be >= k ({k})")
+
+    if include_rc is None:
+        include_rc = not (has_rc_column or header_rc_false)
 
     weights = np.zeros(4**k, dtype=dtype)
     for kmer, w in kmer_weights.items():

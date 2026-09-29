@@ -167,7 +167,8 @@ class TestToDeltasvm:
               "--device", "cpu"])
 
         assert Path(weights_path).exists()
-        lines = Path(weights_path).read_text().strip().split("\n")
+        lines = [l for l in Path(weights_path).read_text().strip().split("\n")
+                 if l and not l.startswith("#")]
         assert len(lines) > 0
         kmer, weight = lines[0].split("\t")
         assert len(kmer) == 5

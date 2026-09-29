@@ -276,6 +276,8 @@ def _save_deltasvm_weights(dsvm, path: Path) -> None:
     weights = to_cpu(dsvm.weights)
     k = dsvm.k
     with open(path, "w") as f:
+        if not dsvm.include_rc:
+            f.write("# include_rc=false (RC already in weights)\n")
         for idx in range(weights.shape[0]):
             w = float(weights[idx])
             if w != 0.0:

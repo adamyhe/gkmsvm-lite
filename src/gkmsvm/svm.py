@@ -442,8 +442,7 @@ class GkmSVM:
         Returns:
             DeltaSVM with k=l (one weight per l-mer).
         """
-        from gkmsvm.codec import one_hot_encode as _ohe
-        from gkmsvm.deltasvm import DeltaSVM, _index_to_kmer
+        from gkmsvm.deltasvm import DeltaSVM
 
         l = self.kernel.l
         if l > self._MAX_LMER_TABLE_L:
@@ -453,17 +452,20 @@ class GkmSVM:
                 f"{4**l * 4 / 1e9:.1f} GB). Got l={l}."
             )
 
+        was_on_gpu = self._on_gpu
+        was_on_mlx = self._on_mlx
+
         n_lmers = 4**l
         weights = np.zeros(n_lmers, dtype=np.float32)
 
-        n_sv_windows = self._get_sv_index_windows()[0].shape[0]
+        S = self.num_support_vectors
         if self._on_gpu:
             import cupy as cp
             free, _ = cp.cuda.Device().mem_info
-            bytes_per_row = n_sv_windows * 8 * 2 + 128
-            chunk = max(256, int(free * 0.5 / bytes_per_row))
+            chunk = max(256, min(100_000, int(free * 0.4) // (S * 8)))
         else:
-            chunk = 100_000
+            mem_budget = 2 * 1024**3
+            chunk = max(256, min(100_000, mem_budget // (S * 8)))
 
         chunks = range(0, n_lmers, chunk)
         if verbose:
@@ -473,9 +475,9 @@ class GkmSVM:
                 total=(n_lmers + chunk - 1) // chunk,
             )
 
-        # Score l-mers with SV normalization but without per-l-mer
-        # normalization. This way the query-length normalization factor
-        # is constant across all l-mers and cancels in variant scoring.
+        powers = 4 ** np.arange(l - 1, -1, -1)
+        pos_idx = np.arange(l)
+
         kernel = self.kernel
         adj_coefs = to_cpu(self.coefficients).astype(np.float64)
         if kernel.normalize:
@@ -492,10 +494,11 @@ class GkmSVM:
         try:
             for start in chunks:
                 end = min(start + chunk, n_lmers)
-                x = np.stack([
-                    _ohe(_index_to_kmer(idx, l))
-                    for idx in range(start, end)
-                ])
+                indices = np.arange(start, end)
+                bases = (indices[:, None] // powers[None, :]) % 4
+                n = end - start
+                x = np.zeros((n, 4, l), dtype=coef_dtype)
+                x[np.arange(n)[:, None], bases, pos_idx[None, :]] = 1.0
                 x = self._match_device(x)
                 scores = self(x).flatten()
                 if self._on_gpu or self._on_mlx:
@@ -505,8 +508,10 @@ class GkmSVM:
             kernel.normalize = saved_norm
             self.coefficients = saved_coefs
 
-        return DeltaSVM(
+        result = DeltaSVM(
             weights, l, l,
             include_rc=False, bias=self.bias, device=device,
         )
+
+        return result
 
