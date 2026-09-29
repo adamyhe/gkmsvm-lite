@@ -28,6 +28,7 @@ def train_gkmsvm(
     H: float | None = None,
     include_rc: bool = True,
     solver: str = "auto",
+    n_components: int | None = None,
     cache_size: int = 2048,
     tol: float = 1e-3,
     max_iter: int = 10_000_000,
@@ -53,8 +54,11 @@ def train_gkmsvm(
         include_rc: Include reverse complement in kernel.
         solver: ``"auto"`` (precomputed Gram if it fits in device memory;
             on GPU, falls back to GPU-compute + CPU-solve if it fits in
-            system RAM; else column-cached SMO), ``"smo"`` (column-cached
+            system RAM; else Nyström approximation), ``"nystrom"``
+            (Nyström low-rank approximation), ``"smo"`` (column-cached
             SMO), or ``"libsvm"`` (precomputed Gram + sklearn solver).
+        n_components: Number of landmark points for Nyström approximation.
+            Defaults to ``min(N, max(1000, int(sqrt(N) * 10)))``.
         cache_size: Number of kernel columns to cache (SMO only).
         tol: KKT violation tolerance (SMO only).
         max_iter: Maximum SMO iterations.
@@ -88,6 +92,14 @@ def train_gkmsvm(
     else:
         gram_capped = False
 
+    if solver == "nystrom":
+        return _fit_nystrom(
+            kernel, X, y, C, kernel_type, kernel_params,
+            n_components=n_components,
+            gram_chunk_size=gram_chunk_size,
+            sv_chunk_size=sv_chunk_size, verbose=verbose,
+        )
+
     if solver == "auto":
         if not gram_capped and _gram_fits_in_memory(N, xp):
             use_smo = False
@@ -101,10 +113,17 @@ def train_gkmsvm(
                     f"— computing on GPU, solving on CPU"
                 )
         else:
-            use_smo = True
-            gpu_gram_cpu_solve = False
             if verbose:
-                print(f"Gram matrix would be {gram_gb:.1f} GB — using SMO solver")
+                print(
+                    f"Gram matrix would be {gram_gb:.1f} GB "
+                    f"— using Nyström approximation"
+                )
+            return _fit_nystrom(
+                kernel, X, y, C, kernel_type, kernel_params,
+                n_components=n_components,
+                gram_chunk_size=gram_chunk_size,
+                sv_chunk_size=sv_chunk_size, verbose=verbose,
+            )
     elif solver == "smo":
         use_smo = True
         gpu_gram_cpu_solve = False
@@ -113,7 +132,8 @@ def train_gkmsvm(
         gpu_gram_cpu_solve = False
     else:
         raise ValueError(
-            f"Unknown solver {solver!r}. Use 'auto', 'smo', or 'libsvm'."
+            f"Unknown solver {solver!r}. "
+            f"Use 'auto', 'libsvm', 'nystrom', or 'smo'."
         )
 
     if use_smo:
@@ -376,6 +396,108 @@ def _fit_sklearn(gram, y, C, *, epsilon=None, verbose=False):
             print("Fitting SVC with sklearn...")
     clf.fit(gram, y)
     return clf
+
+
+def _fit_nystrom(
+    kernel, X, y, C, kernel_type, kernel_params, *,
+    n_components=None, gram_chunk_size, sv_chunk_size, verbose=False,
+) -> GkmSVM:
+    """Train SVM using Nyström low-rank kernel approximation.
+
+    Samples m landmark points, computes K_mm (m×m) and K_nm (N×m),
+    builds a low-rank approximation of the full Gram matrix, and fits
+    sklearn SVC on the approximated kernel. The kernel computation
+    cost is O(N·m) instead of O(N²).
+
+    The returned model uses the SVC-selected support vectors with
+    exact kernel evaluation at inference time — the approximation
+    only affects training.
+    """
+    from gkmsvm.gram import compute_gram
+
+    N = X.shape[0]
+    if n_components is None:
+        n_components = min(N, max(1000, int(np.sqrt(N) * 10)))
+    m = min(n_components, N)
+
+    if verbose:
+        print(f"Nyström approximation: {m} landmarks from {N} samples")
+
+    rng = np.random.RandomState(42)
+    landmark_idx = rng.choice(N, size=m, replace=False)
+    landmark_idx.sort()
+
+    X_cpu = to_cpu(X)
+    xp = get_array_module(X)
+    if xp is not np:
+        X_landmarks = xp.asarray(X_cpu[landmark_idx])
+    else:
+        X_landmarks = X_cpu[landmark_idx]
+
+    # K_mm: m×m kernel matrix between landmarks
+    K_mm = np.empty((m, m), dtype=np.float64)
+    if verbose:
+        print(f"Computing K_mm ({m}×{m})...")
+    compute_gram(kernel, X_landmarks, chunk_size=gram_chunk_size,
+                 verbose=verbose, out=K_mm)
+
+    # K_nm: N×m kernel matrix between all samples and landmarks
+    K_nm = np.empty((N, m), dtype=np.float64)
+    if verbose:
+        print(f"Computing K_nm ({N}×{m})...")
+    compute_gram(kernel, X, X_landmarks, chunk_size=gram_chunk_size,
+                 verbose=verbose, out=K_nm)
+
+    # Eigendecompose K_mm = U Λ U^T
+    eigenvalues, U = np.linalg.eigh(K_mm)
+
+    # Discard near-zero or negative eigenvalues for numerical stability
+    threshold = max(1e-10, eigenvalues.max() * 1e-8)
+    valid = eigenvalues > threshold
+    eigenvalues = eigenvalues[valid]
+    U = U[:, valid]
+    m_eff = len(eigenvalues)
+
+    if verbose:
+        print(f"Effective rank: {m_eff}/{m} "
+              f"(smallest λ={eigenvalues.min():.2e})")
+
+    # Nyström features: Φ = K_nm @ U @ Λ^{-1/2}  →  [N, m_eff]
+    inv_sqrt_lambda = 1.0 / np.sqrt(eigenvalues)
+    features = (K_nm @ U) * inv_sqrt_lambda[None, :]
+    del K_nm, K_mm, U, eigenvalues
+
+    # Approximated Gram: Φ @ Φ^T  →  [N, N], computed in row chunks
+    approx_gram_gb = N * N * 8 / 1024**3
+    if verbose:
+        print(f"Building approximated Gram ({N}×{N}, {approx_gram_gb:.1f} GB)...")
+    gram_approx = np.empty((N, N), dtype=np.float64)
+    for i in range(0, N, gram_chunk_size):
+        end = min(i + gram_chunk_size, N)
+        gram_approx[i:end] = features[i:end] @ features.T
+    del features
+
+    clf = _fit_sklearn(gram_approx, y, C, verbose=verbose)
+
+    sv_indices = clf.support_
+    if is_mlx(X):
+        sv_seqs = X_cpu[sv_indices]
+    else:
+        sv_seqs = to_cpu(X[sv_indices]) if xp is not np else X[sv_indices]
+    coefficients = clf.dual_coef_[0].astype(sv_seqs.dtype)
+    bias = float(clf.intercept_[0])
+
+    if verbose:
+        print(f"Training complete: {len(sv_indices)} support vectors")
+
+    return GkmSVM(
+        support_sequences=sv_seqs,
+        coefficients=coefficients,
+        bias=bias,
+        kernel_type=kernel_type,
+        kernel_params=kernel_params,
+        sv_chunk_size=sv_chunk_size,
+    )
 
 
 def _train_smo(

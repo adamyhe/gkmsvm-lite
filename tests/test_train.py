@@ -162,6 +162,21 @@ class TestTrainGkmsvm:
                 device="tpu",
             )
 
+    def test_nystrom_solver(self):
+        rng = np.random.default_rng(42)
+        pos = _random_seqs_str(30, 20, rng)
+        neg = _random_seqs_str(30, 20, rng)
+
+        model = train_gkmsvm(
+            pos, neg, kernel_type="direct", l=7, k=5, C=1.0,
+            solver="nystrom", n_components=20, device="cpu",
+        )
+        assert model.num_support_vectors > 0
+
+        x = _random_onehot(5, 20, rng)
+        scores = model(x)
+        assert scores.shape == (5, 1)
+
     def test_device_auto_works(self):
         rng = np.random.default_rng(42)
         pos = _random_seqs_str(15, 20, rng)
