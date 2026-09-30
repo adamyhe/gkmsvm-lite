@@ -1,6 +1,6 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "gkmsvm-lite"
@@ -13,7 +13,6 @@ keywords = ["gkm-svm", "svm", "dna", "genomics", "bioinformatics", "kernel-metho
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -63,8 +62,8 @@ examples = [
     "openpyxl",
 ]
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/gkmsvm"]
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

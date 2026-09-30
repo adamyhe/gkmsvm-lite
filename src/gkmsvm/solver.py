@@ -145,9 +145,11 @@ def smo_solve(
 ) -> tuple[np.ndarray, float]:
     """Column-cached SMO solver for C-SVM.
 
-    On GPU (CuPy), uses batched working-set SMO: selects q variables
-    per iteration, computes q kernel rows in a single GPU launch, and
-    solves the q×q sub-problem on CPU. On CPU/MLX, uses serial WSS2
+    On GPU (CuPy), uses batched WSS3 SMO: selects i candidates by
+    first-order violation, selects j candidates by second-order gain
+    (b²/a), computes q kernel rows in a single GPU launch, and solves
+    the q×q sub-problem with WSS3 on CPU. Batch size scales with
+    sqrt(N). Includes shrinking. On CPU/MLX, uses serial WSS3
     (Fan et al. 2005) with shrinking.
 
     Args:
@@ -167,6 +169,13 @@ def smo_solve(
     N = X.shape[0]
     mlx_input = is_mlx(X)
     xp = np if mlx_input else get_array_module(X)
+
+    # Prefer C solver (serial WSS3 in C, kernel columns via callback).
+    # The callback uses our KernelColumnCache which works on any backend.
+    if _get_csmo() is not None and kernel.normalize:
+        return _smo_csolver(
+            kernel, X, y, C, tol, max_iter, cache_size, verbose,
+        )
 
     use_batched = (
         xp is not np
@@ -188,15 +197,17 @@ def smo_solve(
 
 
 def _smo_batched(kernel, X, y, C, tol, max_iter, verbose, xp):
-    """Batched working-set SMO for GPU.
+    """Batched working-set SMO for GPU with WSS3 and shrinking.
 
-    Selects q variables per outer iteration, computes q kernel rows
-    in a single batched GPU call, solves the q×q sub-problem with
-    serial SMO on CPU, and updates gradients with a matrix-vector
-    multiply.
+    Selects i candidates from I_up by first-order violation, then computes
+    one kernel row for the best i to select j candidates from I_low by
+    second-order gain (b²/a). Computes q kernel rows in a single batched
+    GPU call, solves the q×q sub-problem with WSS3 serial SMO on CPU, and
+    updates gradients with a matrix-vector multiply. Batch size scales
+    with sqrt(N) for better coverage on large problems.
     """
     N = X.shape[0]
-    q = min(256, N)
+    q = min(max(256, 2 * int(N ** 0.5)), 2048)
     y = xp.asarray(y, dtype=np.float64)
 
     # Precompute packed windows
@@ -209,19 +220,33 @@ def _smo_batched(kernel, X, y, C, tol, max_iter, verbose, xp):
     packed_t = None
     rc_packed_t = None
     if hasattr(kernel, "_min_matches"):
-        from gkmsvm.kernels.direct import _pack_windows_uint32
+        if xp is not np:
+            from gkmsvm.kernels.direct import _pack_windows_uint32
 
-        packed = _pack_windows_uint32(idx_windows, xp)
-        packed_t = xp.ascontiguousarray(packed.T)
-        if rc_idx_windows is not None:
-            rc_packed = _pack_windows_uint32(rc_idx_windows, xp)
-            rc_packed_t = xp.ascontiguousarray(rc_packed.T)
+            packed = _pack_windows_uint32(idx_windows, xp)
+            packed_t = xp.ascontiguousarray(packed.T)
+            if rc_idx_windows is not None:
+                rc_packed = _pack_windows_uint32(rc_idx_windows, xp)
+                rc_packed_t = xp.ascontiguousarray(rc_packed.T)
+        else:
+            from gkmsvm.kernels.direct import _pack_windows_cpu
+
+            packed_t = _pack_windows_cpu(np.ascontiguousarray(idx_windows))
+            if rc_idx_windows is not None:
+                rc_packed_t = _pack_windows_cpu(
+                    np.ascontiguousarray(rc_idx_windows)
+                )
 
     diag = kernel._raw_diagonal(X).astype(np.float64)
     Q_diag = xp.ones(N, dtype=np.float64) if kernel.normalize else diag.copy()
 
     alpha = xp.zeros(N, dtype=np.float64)
     G = -xp.ones(N, dtype=np.float64)
+
+    active = xp.ones(N, dtype=bool)
+    n_active = N
+    shrink_interval = max(N, 1000)
+    unshrink_needed = False
 
     import time as _time
 
@@ -232,11 +257,16 @@ def _smo_batched(kernel, X, y, C, tol, max_iter, verbose, xp):
     t_start = _time.monotonic()
 
     while iteration < max_iter:
-        I_up = ((y > 0) & (alpha < C)) | ((y < 0) & (alpha > 0))
-        I_low = ((y > 0) & (alpha > 0)) | ((y < 0) & (alpha < C))
+        I_up = active & (((y > 0) & (alpha < C)) | ((y < 0) & (alpha > 0)))
+        I_low = active & (((y > 0) & (alpha > 0)) | ((y < 0) & (alpha < C)))
         neg_yG = -y * G
 
         if not xp.any(I_up) or not xp.any(I_low):
+            if unshrink_needed:
+                active[:] = True
+                n_active = N
+                unshrink_needed = False
+                continue
             break
 
         up_vals = xp.where(I_up, neg_yG, -np.inf)
@@ -251,24 +281,58 @@ def _smo_batched(kernel, X, y, C, tol, max_iter, verbose, xp):
             elapsed = _time.monotonic() - t_start
             print(
                 f"  iter {iteration:>8d}  gap={gap:.4e}  "
-                f"SVs={n_sv}  batch={q}  {elapsed:.1f}s"
+                f"SVs={n_sv}  active={n_active}/{N}  batch={q}  {elapsed:.1f}s"
             )
 
         if gap < tol:
+            if unshrink_needed:
+                active[:] = True
+                n_active = N
+                unshrink_needed = False
+                continue
             break
 
-        # Select working set: top q/2 from I_up, bottom q/2 from I_low
+        # Shrinking
+        if iteration > 0 and iteration % shrink_interval == 0:
+            shrunk = _shrink(alpha, neg_yG, active, y, C, m_val, M_val, xp)
+            if shrunk > 0:
+                n_active = int(xp.sum(active))
+                unshrink_needed = True
+                if verbose:
+                    print(f"  shrink: removed {shrunk}, active={n_active}/{N}")
+                continue
+
+        # --- WSS3: second-order j-selection ---
+        i_best = int(xp.argmax(up_vals))
+
+        bx_i = idx_windows[i_best : i_best + 1]
+        K_row_i = kernel.pairwise_from_indices(
+            bx_i, idx_windows, by_packed_t=packed_t,
+        )
+        if kernel.include_rc and rc_idx_windows is not None:
+            K_row_i = K_row_i + kernel.pairwise_from_indices(
+                bx_i, rc_idx_windows, by_packed_t=rc_packed_t,
+            )
+        K_row_i = K_row_i.astype(np.float64)[0]
+        if kernel.normalize:
+            norm_i = xp.sqrt(diag[i_best] * diag)
+            K_row_i = K_row_i / xp.clip(norm_i, 1e-10, None)
+
+        j_candidates = I_low & (neg_yG < m_val)
+        b_sq = (m_val - neg_yG) ** 2
+        a_wss = Q_diag[i_best] + Q_diag - 2.0 * K_row_i
+        a_wss = xp.maximum(a_wss, 1e-12)
+        gain = xp.where(j_candidates, b_sq / a_wss, -np.inf)
+
         n_up = int(xp.sum(I_up))
-        n_low_cand = int(xp.sum(I_low & (neg_yG < m_val)))
+        n_low_cand = int(xp.sum(j_candidates))
         q_half = min(q // 2, n_up, max(1, n_low_cand))
 
         up_order = xp.argsort(up_vals)
         ws_up = up_order[-q_half:]
 
-        low_mask = I_low & (neg_yG < m_val)
-        low_scores = xp.where(low_mask, neg_yG, np.inf)
-        low_order = xp.argsort(low_scores)
-        ws_low = low_order[:q_half]
+        gain_order = xp.argsort(gain)
+        ws_low = gain_order[-q_half:]
 
         ws = xp.unique(xp.concatenate([ws_up, ws_low]))
         q_actual = int(ws.shape[0])
@@ -331,7 +395,7 @@ def _smo_batched(kernel, X, y, C, tol, max_iter, verbose, xp):
 
 
 def _solve_subproblem(K_sub, g, y, alpha, C, Q_diag, max_iter=500, tol=1e-3):
-    """Solve q-variable sub-QP with serial SMO on CPU."""
+    """Solve q-variable sub-QP with serial WSS3 SMO on CPU."""
     alpha_orig = alpha.copy()
     alpha = alpha.copy()
     g = g.copy()
@@ -345,10 +409,17 @@ def _solve_subproblem(K_sub, g, y, alpha, C, Q_diag, max_iter=500, tol=1e-3):
         low_vals = np.where(I_low, neg_yg, np.inf)
 
         i = int(np.argmax(up_vals))
-        j = int(np.argmin(low_vals))
+        m_sub = float(up_vals[i])
 
-        if float(up_vals[i]) - float(low_vals[j]) < tol:
+        if m_sub - float(np.min(low_vals)) < tol:
             break
+
+        candidates = I_low & (neg_yg < m_sub)
+        b_sq = (m_sub - neg_yg) ** 2
+        a_wss = Q_diag[i] + Q_diag - 2.0 * K_sub[i]
+        a_wss = np.maximum(a_wss, 1e-12)
+        gain = np.where(candidates, b_sq / a_wss, -np.inf)
+        j = int(np.argmax(gain))
 
         K_ij = float(K_sub[i, j])
         a = float(Q_diag[i]) + float(Q_diag[j]) - 2.0 * K_ij
@@ -538,3 +609,111 @@ def _shrink(alpha, neg_yG, active, y, C, m_val, M_val, xp):
     if n_shrunk > 0:
         active[to_shrink] = False
     return n_shrunk
+
+
+# ---------------------------------------------------------------------------
+# C solver with kernel column callback (LIBSVM-style architecture)
+# ---------------------------------------------------------------------------
+
+def _load_csmo():
+    """Load the compiled C SMO solver. Returns None if unavailable."""
+    import ctypes
+
+    try:
+        import gkmsvm._csmo as _csmo_mod
+        return ctypes.CDLL(_csmo_mod.__file__)
+    except (ImportError, OSError):
+        return None
+
+
+_csmo_lib = None
+_csmo_checked = False
+
+
+def _get_csmo():
+    global _csmo_lib, _csmo_checked
+    if not _csmo_checked:
+        _csmo_lib = _load_csmo()
+        _csmo_checked = True
+    return _csmo_lib
+
+
+import ctypes as _ct
+
+_COLUMN_CB = _ct.CFUNCTYPE(
+    None, _ct.c_int, _ct.c_int,
+    _ct.POINTER(_ct.c_double), _ct.c_void_p,
+)
+
+
+def _smo_csolver(kernel, X, y, C, tol, max_iter, cache_size, verbose):
+    """WSS3 SMO using the C solver with kernel column callback.
+
+    The C solver handles the optimization loop (WSS3, shrinking, gradient
+    updates) while kernel columns are computed by our KernelColumnCache
+    (Numba CPU or CuPy GPU).
+    """
+    lib = _get_csmo()
+    if lib is None:
+        raise RuntimeError("C SMO solver not available")
+
+    N = X.shape[0]
+    xp = get_array_module(X)
+    mlx_input = is_mlx(X)
+
+    cache = KernelColumnCache(kernel, X, max_columns=cache_size)
+
+    y_np = to_cpu(y).astype(np.float64) if mlx_input else np.asarray(
+        to_cpu(y) if xp is not np else y, dtype=np.float64
+    )
+
+    def _column_callback(idx, n, out_ptr, _userdata):
+        col = cache.get_column(idx)
+        if xp is not np or mlx_input:
+            col = to_cpu(col)
+        col = np.ascontiguousarray(col, dtype=np.float64)
+        _ct.memmove(out_ptr, col.ctypes.data, n * 8)
+
+    cb = _COLUMN_CB(_column_callback)
+
+    alpha_out = np.zeros(N, dtype=np.float64)
+    rho_out = np.zeros(1, dtype=np.float64)
+
+    lib.csmo_solve.restype = _ct.c_int
+    lib.csmo_solve.argtypes = [
+        _ct.c_int,
+        _ct.POINTER(_ct.c_double),
+        _ct.c_double,
+        _ct.c_double,
+        _ct.c_int,
+        _ct.c_int,
+        _COLUMN_CB,
+        _ct.c_void_p,
+        _ct.POINTER(_ct.c_double),
+        _ct.POINTER(_ct.c_double),
+        _ct.c_int,
+    ]
+
+    n_iter = lib.csmo_solve(
+        N,
+        y_np.ctypes.data_as(_ct.POINTER(_ct.c_double)),
+        C,
+        tol,
+        max_iter,
+        min(cache_size, N),
+        cb,
+        None,
+        alpha_out.ctypes.data_as(_ct.POINTER(_ct.c_double)),
+        rho_out.ctypes.data_as(_ct.POINTER(_ct.c_double)),
+        int(verbose),
+    )
+
+    if verbose:
+        total = cache.hits + cache.misses
+        hr = cache.hits / max(1, total) * 100
+        print(
+            f"  Python-side cache: {cache.hits} hits, {cache.misses} misses "
+            f"({hr:.0f}% hit rate)"
+        )
+
+    return alpha_out, float(rho_out[0])

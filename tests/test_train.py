@@ -177,6 +177,101 @@ class TestTrainGkmsvm:
         scores = model(x)
         assert scores.shape == (5, 1)
 
+    def test_smo_solver(self):
+        rng = np.random.default_rng(42)
+        pos = _random_seqs_str(30, 20, rng)
+        neg = _random_seqs_str(30, 20, rng)
+
+        model = train_gkmsvm(
+            pos, neg, kernel_type="direct", l=7, k=5, C=1.0,
+            solver="smo", device="cpu",
+        )
+        assert model.num_support_vectors > 0
+
+        x = _random_onehot(5, 20, rng)
+        scores = model(x)
+        assert scores.shape == (5, 1)
+
+    def test_smo_matches_libsvm(self):
+        rng = np.random.default_rng(123)
+        pos = _random_seqs_str(25, 20, rng)
+        neg = _random_seqs_str(25, 20, rng)
+
+        model_gram = train_gkmsvm(
+            pos, neg, kernel_type="direct", l=7, k=5, C=1.0,
+            solver="libsvm", device="cpu",
+        )
+        model_smo = train_gkmsvm(
+            pos, neg, kernel_type="direct", l=7, k=5, C=1.0,
+            solver="smo", device="cpu",
+        )
+
+        x = _random_onehot(10, 20, rng)
+        scores_gram = model_gram(x)
+        scores_smo = model_smo(x)
+        np.testing.assert_allclose(scores_smo, scores_gram, atol=0.1)
+
+    def test_smo_batched_wss3(self):
+        """Verify the batched WSS3 path agrees with serial WSS3."""
+        from gkmsvm.solver import _smo_batched, _smo_serial
+        from gkmsvm.svm import KERNEL_BUILDERS
+
+        rng = np.random.default_rng(42)
+        pos = _random_onehot(30, 20, rng)
+        neg = _random_onehot(30, 20, rng)
+        X = np.concatenate([pos, neg], axis=0)
+        y = np.array([1.0] * 30 + [-1.0] * 30)
+
+        kernel_params = {"L": 7, "k": 5, "include_rc": True}
+        kernel = KERNEL_BUILDERS["gkm_cnt"](kernel_params)
+
+        coef_b, bias_b = _smo_batched(
+            kernel, X, y, C=1.0, tol=1e-3,
+            max_iter=100_000, verbose=False, xp=np,
+        )
+        coef_s, bias_s = _smo_serial(
+            kernel, X, y, C=1.0, tol=1e-3,
+            max_iter=100_000, cache_size=256,
+            verbose=False, xp=np, mlx_input=False,
+        )
+
+        sv_mask_b = np.abs(coef_b) > 1e-10
+        sv_mask_s = np.abs(coef_s) > 1e-10
+        assert sv_mask_b.sum() > 0
+        assert sv_mask_s.sum() > 0
+
+        # Both paths should produce similar decision functions
+        from gkmsvm.gram import compute_gram
+        x_test = _random_onehot(10, 20, rng)
+        K_test = compute_gram(kernel, x_test, X, chunk_size=100)
+        scores_b = K_test @ coef_b + bias_b
+        scores_s = K_test @ coef_s + bias_s
+        np.testing.assert_allclose(scores_b, scores_s, atol=0.15)
+
+    def test_csmo_solver_loaded(self):
+        """Verify C SMO solver compiles and loads."""
+        from gkmsvm.solver import _get_csmo
+        lib = _get_csmo()
+        assert lib is not None, "C SMO solver failed to compile/load"
+
+    def test_auto_solver_smo_fallback_warns(self):
+        """Auto solver warns when falling back to SMO."""
+        import warnings
+        rng = np.random.default_rng(42)
+        pos = _random_seqs_str(15, 20, rng)
+        neg = _random_seqs_str(15, 20, rng)
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            train_gkmsvm(
+                pos, neg, kernel_type="direct", l=7, k=5, C=1.0,
+                solver="auto", device="cpu", max_gram_gb=0.0,
+            )
+        smo_warnings = [x for x in w if "SMO" in str(x.message)]
+        assert len(smo_warnings) == 1
+        assert "nystrom" in str(smo_warnings[0].message).lower()
+        assert "downsampling" in str(smo_warnings[0].message).lower()
+
     def test_device_auto_works(self):
         rng = np.random.default_rng(42)
         pos = _random_seqs_str(15, 20, rng)

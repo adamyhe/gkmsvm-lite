@@ -54,9 +54,10 @@ def train_gkmsvm(
         include_rc: Include reverse complement in kernel.
         solver: ``"auto"`` (precomputed Gram if it fits in device memory;
             on GPU, falls back to GPU-compute + CPU-solve if it fits in
-            system RAM; else Nyström approximation), ``"nystrom"``
-            (Nyström low-rank approximation), ``"smo"`` (column-cached
-            SMO), or ``"libsvm"`` (precomputed Gram + sklearn solver).
+            system RAM; else column-cached SMO), ``"nystrom"``
+            (Nyström low-rank approximation — faster but approximate),
+            ``"smo"`` (column-cached SMO), or ``"libsvm"`` (precomputed
+            Gram + sklearn solver).
         n_components: Number of landmark points for Nyström approximation.
             Defaults to ``min(N, max(1000, int(sqrt(N) * 10)))``.
         cache_size: Number of kernel columns to cache (SMO only).
@@ -107,22 +108,30 @@ def train_gkmsvm(
         elif not gram_capped and xp is not np and _gram_fits_on_cpu(N):
             use_smo = False
             gpu_gram_cpu_solve = True
+            import warnings
+            warnings.warn(
+                f"Gram matrix ({gram_gb:.1f} GB) exceeds GPU memory — "
+                f"computing on GPU and solving on CPU. This may be slow "
+                f"for large N. Consider solver='nystrom' for faster "
+                f"approximate training.",
+                stacklevel=2,
+            )
             if verbose:
                 print(
                     f"Gram matrix ({gram_gb:.1f} GB) exceeds GPU memory "
                     f"— computing on GPU, solving on CPU"
                 )
         else:
-            if verbose:
-                print(
-                    f"Gram matrix would be {gram_gb:.1f} GB "
-                    f"— using Nyström approximation"
-                )
-            return _fit_nystrom(
-                kernel, X, y, C, kernel_type, kernel_params,
-                n_components=n_components,
-                gram_chunk_size=gram_chunk_size,
-                sv_chunk_size=sv_chunk_size, verbose=verbose,
+            use_smo = True
+            gpu_gram_cpu_solve = False
+            import warnings
+            warnings.warn(
+                f"Gram matrix ({gram_gb:.1f} GB) does not fit in memory — "
+                f"falling back to column-cached SMO solver. This will be "
+                f"significantly slower than precomputed Gram. Consider "
+                f"downsampling training sequences or using "
+                f"solver='nystrom' for faster approximate training.",
+                stacklevel=2,
             )
     elif solver == "smo":
         use_smo = True
