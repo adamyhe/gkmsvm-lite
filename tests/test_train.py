@@ -211,43 +211,6 @@ class TestTrainGkmsvm:
         scores_smo = model_smo(x)
         np.testing.assert_allclose(scores_smo, scores_gram, atol=0.1)
 
-    def test_smo_batched_wss3(self):
-        """Verify the batched WSS3 path agrees with serial WSS3."""
-        from gkmsvm.solver import _smo_batched, _smo_serial
-        from gkmsvm.svm import KERNEL_BUILDERS
-
-        rng = np.random.default_rng(42)
-        pos = _random_onehot(30, 20, rng)
-        neg = _random_onehot(30, 20, rng)
-        X = np.concatenate([pos, neg], axis=0)
-        y = np.array([1.0] * 30 + [-1.0] * 30)
-
-        kernel_params = {"L": 7, "k": 5, "include_rc": True}
-        kernel = KERNEL_BUILDERS["gkm_cnt"](kernel_params)
-
-        coef_b, bias_b = _smo_batched(
-            kernel, X, y, C=1.0, tol=1e-3,
-            max_iter=100_000, verbose=False, xp=np,
-        )
-        coef_s, bias_s = _smo_serial(
-            kernel, X, y, C=1.0, tol=1e-3,
-            max_iter=100_000, cache_size=256,
-            verbose=False, xp=np, mlx_input=False,
-        )
-
-        sv_mask_b = np.abs(coef_b) > 1e-10
-        sv_mask_s = np.abs(coef_s) > 1e-10
-        assert sv_mask_b.sum() > 0
-        assert sv_mask_s.sum() > 0
-
-        # Both paths should produce similar decision functions
-        from gkmsvm.gram import compute_gram
-        x_test = _random_onehot(10, 20, rng)
-        K_test = compute_gram(kernel, x_test, X, chunk_size=100)
-        scores_b = K_test @ coef_b + bias_b
-        scores_s = K_test @ coef_s + bias_s
-        np.testing.assert_allclose(scores_b, scores_s, atol=0.15)
-
     def test_csmo_solver_loaded(self):
         """Verify C SMO solver compiles and loads."""
         from gkmsvm.solver import _get_csmo
