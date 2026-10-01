@@ -46,7 +46,7 @@ Two computation paths, selected automatically:
 
 **Float one-hot path** (weighted kernels): Window match counts via matmul on flattened one-hot windows (`[B, W, 4*l]`). Both NumPy and CuPy use the same code path since CuPy mirrors NumPy's fancy indexing.
 
-**GkmExplain sparse path**: Uses packed uint32 pre-filtering to identify the ~0.12% of window pairs with ≤ d mismatches (same min-matches skip as the forward pass), then decomposes only those pairs per-position. Per-position base identity is extracted directly from packed uint32 via bit shifts (`(packed >> 2k) & 3`), eliminating all float intermediate arrays. CPU: fused Numba `@njit(parallel=True)` kernel parallelized over (batch, SV) pairs. GPU: fused CuPy RawKernel with one thread per (b, s) pair — coalesced SV reads via transposed `[Wy, S]` layout, coalesced output writes with S as the last dimension, shared-memory caching of weight tables and query packed windows, no atomics needed (each thread owns its output slice). Falls back to the dense float path for kernels without a min-matches threshold (weighted kernels).
+**GkmExplain sparse path**: Uses packed uint32 pre-filtering to identify the ~0.12% of window pairs with ≤ d mismatches (same min-matches skip as the forward pass), then decomposes only those pairs per-position. Per-position base identity is extracted directly from packed uint32 via bit shifts (`(packed >> 2k) & 3`), eliminating all float intermediate arrays. Mode 0 is computed as `mode_1 * one_hot_input` — only mode 1 has a dedicated kernel. The inner loop fuses normalization, coefficient multiplication, and SV-dimension reduction, accumulating directly into a `[B, 4, L]` result array (no per-SV intermediate). Forward and RC SV windows are concatenated along the Wy axis for a single kernel launch per chunk. CPU: fused Numba `@njit(parallel=True)` kernel with `prange(B)` — each thread owns its `[4, L]` result slice (L1-resident, ~6.4 KB). GPU: fused CuPy RawKernel with one thread per (b, s) pair — coalesced SV reads via transposed `[Wy, S]` layout, shared-memory caching of weight tables and query packed windows, float64 `atomicAdd` into the result array (CC >= 6.0). Falls back to the dense float path for kernels without a min-matches threshold (weighted kernels).
 
 ## Fused pairwise kernels
 
@@ -70,9 +70,11 @@ For batch scoring, reduce proportionally (`5000 / batch_size`).
 
 Two solver backends, selected automatically based on available memory:
 
-**Precomputed Gram + libsvm-official** (default for small N): Computes the full N×N kernel matrix via tiled Gram computation, then calls LIBSVM's C solver through `libsvm-official` (114 KB, BSD-licensed). Supports both C-SVC (`train_gkmsvm`, `-s 0`) and epsilon-SVR (`train_gkmsvr`, `-s 3`). Fast — LIBSVM's SMO is highly optimized — but requires O(N²) memory.
+**Precomputed Gram + sklearn** (`solver="libsvm"`, default for small N): Computes the full N×N kernel matrix via tiled Gram computation, then calls scikit-learn's LIBSVM-backed `SVC(kernel='precomputed')` / `SVR(kernel='precomputed')`. Supports both C-SVC (`train_gkmsvm`, `-s 0`) and epsilon-SVR (`train_gkmsvr`, `-s 3`). Fast — LIBSVM's SMO is highly optimized — but requires O(N²) memory.
 
-**Column-cached SMO** (large N): WSS1 maximal violating pair working set selection with LRU-cached kernel columns. Memory is O(cache_size × N) instead of O(N²). Currently supports C-SVC only. Pre-packs all training windows into uint32 format once; column computation on cache miss reuses the packed representation.
+**Column-cached SMO** (`solver="smo"`, large N): WSS3 working set selection (Fan et al. 2005) with shrinking and LRU-cached kernel columns. Memory is O(cache_size × N) instead of O(N²). Currently supports C-SVC only. A C extension (`_csmo`) handles the optimization loop; kernel columns are computed by `KernelColumnCache` using the fastest available backend (Numba CPU, CuPy GPU, or MLX). Falls back to a pure-Python serial solver when the C extension is unavailable.
+
+**Nyström approximation** (`solver="nystrom"`): Low-rank kernel approximation using landmark points. Faster than both Gram and SMO for large datasets, but produces an approximate solution. Useful when exact training is too slow and approximate is acceptable.
 
 `solver="auto"` estimates whether N²×8 bytes fits in 75% of available RAM (CPU) or VRAM (GPU). Falls back to SMO when it doesn't.
 

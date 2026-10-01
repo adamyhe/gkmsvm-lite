@@ -34,13 +34,28 @@ alt = one_hot_encode("ACGTACGAACGTACGT")[None, ...]
 delta = model(alt).item() - model(ref).item()
 
 # Attribution
-attr = gkmexplain(model, x, mode=0)  # [1, 4, 16] importance scores
+hyp = gkmexplain(model, x, mode=1)   # [1, 4, 16] hypothetical importance
+attr = gkmexplain(model, x, mode=0)  # [1, 4, 16] importance (= mode 1 × input)
 deltas = ism(model, x)                # [1, 4, 16] mutation deltas
 
 # GPU acceleration
 model.cuda()  # NVIDIA (~6x speedup)
 model.mlx()   # Apple Silicon (~2-6x speedup)
 ```
+
+## Command-line interface
+
+```bash
+gkmsvm predict -m model.npz -i sequences.fa -o scores.tsv --device cuda
+gkmsvm train -p positive.fa -n negative.fa -o model.npz -l 11 -k 7 -d 3
+gkmsvm explain -m model.npz -i sequences.fa -o attr.npz -s seqs.npz
+gkmsvm ism -m model.npz -i sequences.fa -o ism.npz
+gkmsvm score-variants -m model.npz --ref ref.fa --alt alt.fa -o deltas.tsv
+gkmsvm to-deltasvm -m model.npz -o weights.txt
+gkmsvm import -i model.txt.gz -f lsgkm -o model.npz
+```
+
+See [docs/cli.md](docs/cli.md) for full usage.
 
 ## Train a model
 
@@ -87,6 +102,7 @@ All six LS-GKM kernel types are supported:
 
 | Guide | Contents |
 |---|---|
+| [CLI reference](docs/cli.md) | All `gkmsvm` subcommands, flags, and usage examples |
 | [Loading and training models](docs/models.md) | Importing from all formats, training SVC/SVR, solver selection, kernel types |
 | [Scoring and variant effects](docs/scoring.md) | Inference, batch scoring, VEP, GPU acceleration, memory management |
 | [Interpretation](docs/interpretation.md) | GkmExplain, ISM, when to use each, why gradients don't work |

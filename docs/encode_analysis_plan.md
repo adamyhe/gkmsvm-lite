@@ -97,7 +97,7 @@ model.cpu()  # free GPU memory
 **Existing CLI**: `gkmsvm explain -m model.txt.gz -i peaks.fa -o attr.npz -s seqs.npz --device cuda`
 This already does the full load → encode → explain → save pipeline for a single model.
 
-**Memory**: With `batch_size=50`, `sv_chunk_size=2000`, L=200: intermediate array is ~50 × 4 × 200 × 2000 × 8 ≈ 640 MB. Fits on 10 GB GPU.
+**Memory**: The fused reduction kernel accumulates directly into a `[B, 4, L]` result array (~50 × 4 × 200 × 8 = 320 KB) per chunk — no per-SV intermediate. GPU memory is dominated by packed SV windows and the weight tables, well under 1 GB for typical models.
 
 **Runtime estimate**: For a model with ~20K SVs and ~50K peaks at batch_size=50:
 - ~1000 batches × ~0.5s per batch ≈ 8 min per model on GPU

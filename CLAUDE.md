@@ -18,8 +18,9 @@ pytest tests/ -k "test_rc"          # pattern match
 src/gkmsvm/
 ├── __init__.py          # public API re-exports
 ├── svm.py               # GkmSVM model, scoring, chunked inference
+├── cli.py               # CLI entry point (gkmsvm command)
 ├── train.py             # train_gkmsvm() (C-SVC) + train_gkmsvr() (epsilon-SVR)
-├── solver.py            # KernelColumnCache, smo_solve() — column-cached SMO
+├── solver.py            # KernelColumnCache, smo_solve(), _csmo C extension — column-cached SMO
 ├── gram.py              # compute_gram() — tiled Gram matrix with symmetry
 ├── serialization.py     # save/load npz and LS-GKM text formats
 ├── codec.py             # one-hot encode/decode, RC, validation
@@ -54,20 +55,20 @@ src/gkmsvm/
 - `resolve_kernel_type()` maps aliases and integers to canonical internal names
 - Kernel modes: `-t 0` gkm_cnt/direct, `-t 1` gkm_estfull/estimated_full, `-t 2` gkm_esttrunc/estimated (default), `-t 3` gkmrbf/rbf, `-t 4` wgkm/weighted, `-t 5` wgkmrbf/weighted_rbf
 - ISM: `ism(model, x)` → `[B, 4, L]` score deltas (window-delta optimization)
-- GkmExplain: `gkmexplain(model, x, mode=0|1)` → `[B, 4, L]` attribution scores
+- GkmExplain: `gkmexplain(model, x, mode=0|1)` → `[B, 4, L]` attribution scores. Mode 0 = mode 1 × OHE (single unified kernel). MLX unsupported (float32 violates completion axiom)
 - `verbose=True` on `model()`, `score_variants()`, `ism()`, `gkmexplain()` enables tqdm progress bars
 - No PyTorch dependency. Gradient-based methods are incompatible — use GkmExplain or ISM
 - tangermeme interop is vendored (pyfaidx for FASTA extraction)
 
 ## Key implementation details
 
-- Forward pass and ISM use the packed uint32 path (XOR + popcount). GkmExplain uses packed pre-filter + bit extraction from packed uint32 (no float intermediates). CPU: fused Numba kernel. NVIDIA GPU: fused CuPy RawKernel with coalesced access and shared memory. Apple GPU: custom Metal shaders via `mx.fast.metal_kernel`. Weighted kernels use the float one-hot path.
+- Forward pass, ISM, and GkmExplain use the packed uint32 path (XOR + popcount). GkmExplain's inner kernel fuses normalization + coefficient multiplication + SV-dimension reduction, accumulating directly into `[B, 4, L]` result (no per-SV intermediate). Forward + RC SV windows concatenated for single kernel launch. CPU: `prange(B)` with L1-resident per-thread result arrays. GPU: float64 `atomicAdd` (CC >= 6.0). Apple GPU: custom Metal shaders via `mx.fast.metal_kernel` (forward/ISM only; GkmExplain falls back to CPU). Weighted kernels use the float one-hot path.
 - Packed SV windows are cached on the model for CPU, NVIDIA GPU, and MLX. First call packs; subsequent calls reuse.
 - Min-matches skip: for esttrunc l=11 k=7 d=3, `min_matches=8`. 99.88% of window pairs skipped.
 - CPU inner loop: Numba `@njit(parallel=True, fastmath=True)`. NVIDIA GPU inner loop: CuPy RawKernel with shared-memory caching. Apple GPU inner loop: Metal kernel with per-thread accumulation and `popcount()`.
 - MLX compatibility: `get_strides()` for arrays without `.strides`, `xp.ascontiguousarray()` for `.copy()`, `to_cpu(X)[indices]` for fancy indexing. DeltaSVM auto-chunks intermediates >256 MB.
 - SV diagonal is cached after first computation.
-- Training: `solver="auto"` estimates Gram matrix size — uses precomputed Gram + sklearn when it fits in device memory (< 75%); on GPU, falls back to GPU-computed Gram + CPU-side sklearn when it fits in system RAM (< 75%); else column-cached SMO. SMO uses WSS2 working set selection, shrinking, and LRU-cached kernel columns — memory is O(cache_size × N) not O(N²). `max_gram_gb` caps Gram allocation on shared compute.
+- Training: `solver="auto"` estimates Gram matrix size — uses precomputed Gram + sklearn when it fits in device memory (< 75%); on GPU, falls back to GPU-computed Gram + CPU-side sklearn when it fits in system RAM (< 75%); else column-cached SMO. SMO uses WSS3 working set selection (C extension `_csmo` with Python kernel column callback), shrinking, and LRU-cached kernel columns — memory is O(cache_size × N) not O(N²). `solver="nystrom"` uses low-rank kernel approximation for fast approximate training. `max_gram_gb` caps Gram allocation on shared compute.
 - `KernelColumnCache` pre-packs all training windows once, computes single columns via `pairwise_from_indices(bx[1,W,l], by_all)` on cache miss.
 - SVR (`train_gkmsvr`) uses sklearn epsilon-SVR with precomputed Gram. SMO SVR is not yet implemented.
 - `scikit-learn` provides the LIBSVM C solver for both SVC and SVR via `SVC(kernel='precomputed')` / `SVR(kernel='precomputed')`. No direct `libsvm-official` dependency.

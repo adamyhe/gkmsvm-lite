@@ -52,6 +52,10 @@ print(f"Top 5 positions: {top_positions}")
 hyp = gkmexplain(model, x, mode=1)  # [1, 4, 20]
 ```
 
+### Relationship between modes
+
+Mode 0 is exactly `mode_1 * one_hot_input`: the hypothetical importance at the reference base equals the importance score. Internally, only mode 1 is computed — mode 0 is derived by element-wise multiplication with the input one-hot encoding. This avoids maintaining a separate kernel and guarantees consistency between modes.
+
 ### Memory and chunking
 
 GkmExplain processes support vectors in chunks to avoid GPU OOM on large models. The default chunk size is 2000 SVs. For very large models:
@@ -60,7 +64,11 @@ GkmExplain processes support vectors in chunks to avoid GPU OOM on large models.
 attr = gkmexplain(model, x, mode=0, sv_chunk_size=1000)
 ```
 
-GkmExplain uses a packed uint32 pre-filter to skip ~99.88% of window pairs (those beyond the mismatch threshold `d`), then decomposes only the contributing pairs per-position. Per-position base identity is extracted directly from packed uint32 via bit shifts, eliminating all float intermediate arrays. On CPU, a fused Numba kernel parallelizes over (batch, SV) pairs. On NVIDIA GPU, a fused CuPy RawKernel uses one CUDA thread per (batch, SV) pair with coalesced memory access and shared-memory caching — ~19x less GPU memory than the vectorized approach. On Apple Silicon, GkmExplain falls back to the CPU path (the dense per-position decomposition doesn't map to the same Metal kernel pattern as the forward pass). This makes GkmExplain roughly **2x faster than ISM** for typical parameters (l=11, k=7, d=3).
+GkmExplain uses a packed uint32 pre-filter to skip ~99.88% of window pairs (those beyond the mismatch threshold `d`), then decomposes only the contributing pairs per-position. Per-position base identity is extracted directly from packed uint32 via bit shifts, eliminating all float intermediate arrays.
+
+The inner kernel fuses coefficient multiplication and SV-dimension reduction directly into the accumulation loop, writing weighted contributions into a `[B, 4, L]` result array. This eliminates the `O(B × 4 × L × S_chunk)` per-SV intermediate array (~640 MB at typical sizes). Forward and reverse-complement SV windows are concatenated along the window axis for a single kernel launch per chunk.
+
+On CPU, a fused Numba kernel parallelizes over `B` (batch dimension) with `prange`, giving each thread exclusive ownership of its `[4, L]` result slice (~6.4 KB, L1-resident). On NVIDIA GPU, a fused CuPy RawKernel uses one CUDA thread per (batch, SV) pair with coalesced memory access, shared-memory caching, and float64 `atomicAdd` into the result array (requires compute capability >= 6.0). On Apple Silicon, GkmExplain falls back to the CPU path (MLX is float32-only, which violates the completion axiom's precision requirements). This makes GkmExplain roughly **2x faster than ISM** for typical parameters (l=11, k=7, d=3).
 
 ## In-silico mutagenesis (ISM)
 

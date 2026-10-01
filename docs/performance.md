@@ -4,8 +4,8 @@
 
 Two kernel computation paths, selected automatically:
 
-- **Packed uint32 path** (`pairwise_from_indices`): Base indices packed to uint32 (2 bits/base), match counting via XOR + popcount. Used by default forward pass and ISM. ~3x faster than int8 on CPU.
-- **Float path** (`pairwise_from_windows`): Flattened one-hot dot products. Used by GkmExplain and weighted kernels (`-t 4`/`-t 5`).
+- **Packed uint32 path** (`pairwise_from_indices`): Base indices packed to uint32 (2 bits/base), match counting via XOR + popcount. Used by default forward pass, ISM, and GkmExplain. ~3x faster than int8 on CPU.
+- **Float path** (`pairwise_from_windows`): Flattened one-hot dot products. Used by weighted kernels (`-t 4`/`-t 5`). GkmExplain falls back to this path for weighted kernels.
 
 ## CPU backend
 

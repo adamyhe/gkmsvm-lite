@@ -43,9 +43,7 @@
 - [x] Column-cached SMO solver (`solver="smo"`) — LRU-cached kernel columns, no N×N Gram matrix, scales to ATAC/ChIP-scale (80K+ sequences)
 - [x] `train_gkmsvm()` solver selection: `auto` / `smo` / `libsvm`
 - [x] Memory-aware solver auto-selection — estimates Gram matrix size against available RAM/VRAM (75% budget)
-- [x] Replaced scikit-learn with libsvm-official (114 KB vs ~100 MB)
 - [x] Epsilon-SVR regression via `train_gkmsvr()` — continuous-valued prediction with configurable epsilon tube
-- [x] 273 tests passing
 - [x] MLX backend for Apple Silicon GPU inference (`model.mlx()`)
 - [x] MLX shim for NumPy API compatibility (strides, copy, fancy indexing)
 - [x] Custom Metal kernels via `mx.fast.metal_kernel` (fused XOR + popcount with per-thread early exit)
@@ -54,8 +52,16 @@
 - [x] MLX ISM support
 - [x] DeltaSVM auto-chunking for memory-bounded intermediates
 - [x] Nanog replication on MLX (oracle match, RC invariance, ISM, training)
-- [x] 316 tests passing (29 MLX + 287 others)
+- [x] Nyström approximate solver for large-scale training (`solver="nystrom"`)
+- [x] C WSS3 SMO solver with GPU kernel column callback
+- [x] CLI — `gkmsvm` command-line tool with subcommands for predict, train, explain, ISM, deltaSVM, variant scoring, and model import
+- [x] GkmExplain fused reduction — coefficient multiplication + SV-dimension reduction in inner kernel loop, eliminates `[B, 4, L, S_c]` intermediate
+- [x] GkmExplain SV window caching — SV chunks outer / sequence batches inner loop order
+- [x] GkmExplain forward + RC fusion — single kernel launch via concatenated SV windows
+- [x] GkmExplain mode 0 = mode 1 × OHE — unified to single mode 1 kernel
+- [x] GkmExplain CPU `prange(B)` — L1-resident per-thread result arrays
+- [x] 365 tests passing
 
 ## Next
 
-- [ ] **CLI** — command-line interface for training, scoring, and variant effect prediction
+- [ ] **SMO SVR** — column-cached SMO solver for epsilon-SVR (2N dual variables, epsilon-tube working set selection). Currently SVR uses precomputed Gram only; SMO SVR needed for large-scale regression where the Gram matrix exceeds available memory. Reference implementation: kundajelab/lsgkm-svr

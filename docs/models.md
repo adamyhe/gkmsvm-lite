@@ -153,18 +153,23 @@ predictions = model(x)  # [B, 1]
 
 Training requires computing kernel values between all pairs of training sequences. Two solvers are available:
 
-- **Precomputed Gram + sklearn** (`solver="libsvm"`): Computes the full N x N kernel matrix, then passes it to sklearn's LIBSVM-backed solver. Fast, but requires O(N^2) memory. For N=10K sequences, the Gram matrix is ~800 MB.
+- **Precomputed Gram + sklearn** (`solver="libsvm"`): Computes the full N x N kernel matrix, then passes it to scikit-learn's LIBSVM-backed `SVC(kernel='precomputed')`. Fast, but requires O(N^2) memory. For N=10K sequences, the Gram matrix is ~800 MB.
 
-- **Column-cached SMO** (`solver="smo"`): Computes kernel columns on demand with an LRU cache. Memory is O(cache_size x N) instead of O(N^2). Slower per iteration but scales to 80K+ sequences where the Gram matrix would exceed available RAM.
+- **Column-cached SMO** (`solver="smo"`): WSS3 working set selection with shrinking and LRU-cached kernel columns. Memory is O(cache_size x N) instead of O(N^2). A C extension handles the SMO loop; kernel columns are computed on the fastest available backend (Numba CPU, CuPy GPU, or MLX). Scales to 80K+ sequences.
+
+- **Nyström approximation** (`solver="nystrom"`): Low-rank kernel approximation using landmark points. Faster than both Gram and SMO, but produces an approximate solution.
 
 - **Auto** (`solver="auto"`, default): Estimates whether the Gram matrix fits in 75% of available RAM (CPU) or VRAM (GPU). Uses precomputed Gram when it fits, SMO otherwise.
 
 ```python
 # Force a specific solver
-model = train_gkmsvm(pos, neg, solver="libsvm")   # fast, needs N^2 memory
+model = train_gkmsvm(pos, neg, solver="libsvm")    # fast, needs N^2 memory
 model = train_gkmsvm(pos, neg, solver="smo", cache_size=512)  # large-scale
+model = train_gkmsvm(pos, neg, solver="nystrom", n_components=500)  # fast approximate
 
-# SVR always uses the libsvm solver (SMO SVR not yet implemented)
+# SVR uses the precomputed Gram solver only — SMO SVR is not yet implemented.
+# This means SVR training requires O(N^2) memory. For most regression datasets
+# (quantitative chromatin accessibility, gene expression) this is sufficient.
 model = train_gkmsvr(seqs, labels)
 ```
 
