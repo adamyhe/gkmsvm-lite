@@ -210,6 +210,81 @@ class TestGkmExplainVsISM:
         assert corr > 0.5, f"correlation {corr:.3f} too low"
 
 
+class TestCompletenessAxiom:
+    """Completeness axiom: sum of mode-0 attributions equals score minus bias.
+
+    For any input x: Σ_{b,p} gkmexplain(x, mode=0)[b, p] = f(x) - bias
+    where f(x) = Σ_s coef_s * K_norm(x, sv_s).
+
+    This holds because mode 0 decomposes K(x, s) into per-position
+    contributions that sum to K(x, s), and normalization is folded into
+    the effective coefficient as a constant.
+    """
+
+    @pytest.mark.parametrize("kernel_type,params,seqlen,n_sv,atol", [
+        ("gkm_cnt", {"L": 3, "k": 2, "include_rc": False}, 10, 5, 1e-8),
+        ("gkm_cnt", {"L": 3, "k": 2, "include_rc": True}, 10, 5, 1e-6),
+        ("gkm_cnt", {"L": 5, "k": 3, "include_rc": True}, 15, 8, 1e-6),
+        ("gkm_esttrunc", {"L": 11, "k": 7, "d": 3, "include_rc": True}, 20, 5, 1e-5),
+        ("gkm_esttrunc", {"L": 11, "k": 7, "d": 3, "include_rc": False}, 20, 5, 1e-5),
+        ("gkm_esttrunc", {"L": 7, "k": 4, "d": 2, "include_rc": True}, 15, 6, 1e-5),
+    ])
+    def test_completeness_normalized(self, kernel_type, params, seqlen, n_sv, atol):
+        model = _make_model(n_sv, seqlen, kernel_type, params, seed=100)
+        x = np.stack([one_hot_encode(s) for s in _make_seqs(3, seqlen, seed=200)])
+
+        attr = gkmexplain(model, x, mode=0)
+        scores = model(x).squeeze(-1)
+        attr_sum = attr.sum(axis=(1, 2))
+        np.testing.assert_allclose(attr_sum, scores - model.bias, atol=atol)
+
+    @pytest.mark.parametrize("kernel_type,params,seqlen,n_sv", [
+        ("gkm_cnt", {"L": 3, "k": 2, "include_rc": False}, 10, 5),
+        ("gkm_cnt", {"L": 3, "k": 2, "include_rc": True}, 12, 4),
+        ("gkm_esttrunc", {"L": 11, "k": 7, "d": 3, "include_rc": False}, 20, 5),
+    ])
+    def test_completeness_unnormalized(self, kernel_type, params, seqlen, n_sv):
+        model = _make_model(n_sv, seqlen, kernel_type, params, seed=101)
+        model.kernel.normalize = False
+        x = np.stack([one_hot_encode(s) for s in _make_seqs(2, seqlen, seed=201)])
+
+        attr = gkmexplain(model, x, mode=0)
+        scores = model(x).squeeze(-1)
+        attr_sum = attr.sum(axis=(1, 2))
+        np.testing.assert_allclose(attr_sum, scores - model.bias, atol=1e-5)
+
+    def test_completeness_dense_fallback(self):
+        """d=l forces dense path (min_matches=0, no packed skip)."""
+        model = _make_model(
+            4, 12, "gkm_esttrunc",
+            {"L": 5, "k": 3, "d": 5, "include_rc": True}, seed=102,
+        )
+        x = np.stack([one_hot_encode(s) for s in _make_seqs(2, 12, seed=202)])
+
+        attr = gkmexplain(model, x, mode=0)
+        scores = model(x).squeeze(-1)
+        attr_sum = attr.sum(axis=(1, 2))
+        np.testing.assert_allclose(attr_sum, scores - model.bias, atol=1e-6)
+
+    def test_completeness_chunked_matches_full(self):
+        """Chunked SV processing preserves the completeness axiom."""
+        model = _make_model(
+            12, 20, "gkm_esttrunc",
+            {"L": 11, "k": 7, "d": 3, "include_rc": True}, seed=103,
+        )
+        x = np.stack([one_hot_encode(s) for s in _make_seqs(2, 20, seed=203)])
+
+        attr_full = gkmexplain(model, x, mode=0)
+        attr_chunked = gkmexplain(model, x, mode=0, sv_chunk_size=4)
+
+        scores = model(x).squeeze(-1)
+        expected = scores - model.bias
+
+        np.testing.assert_allclose(attr_full.sum(axis=(1, 2)), expected, atol=1e-5)
+        np.testing.assert_allclose(attr_chunked.sum(axis=(1, 2)), expected, atol=1e-5)
+        np.testing.assert_allclose(attr_full, attr_chunked, atol=1e-8)
+
+
 class TestGkmExplainEdgeCases:
     """Edge case tests."""
 
