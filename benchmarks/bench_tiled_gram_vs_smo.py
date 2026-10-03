@@ -20,8 +20,8 @@ Dataset: GM12878 dsQTL (Lee et al. 2015)
   Kernel: -t estimated -l 10 -k 6 -d 3
 
 Usage:
-    python bench_tiled_gram_vs_smo.py                # auto GPU
-    python bench_tiled_gram_vs_smo.py --device cpu    # CPU only
+    python benchmarks/bench_tiled_gram_vs_smo.py                # auto GPU
+    python benchmarks/bench_tiled_gram_vs_smo.py --device cpu    # CPU only
 """
 
 from __future__ import annotations
