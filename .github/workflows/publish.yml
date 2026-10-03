@@ -8,7 +8,7 @@ permissions:
   id-token: write
 
 jobs:
-  build:
+  build-sdist:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,38 +17,59 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install build tools
-        run: pip install build
-
-      - name: Build sdist and wheel
-        run: python -m build
+      - name: Build sdist
+        run: pipx run build --sdist
 
       - uses: actions/upload-artifact@v4
         with:
-          name: dist
-          path: dist/
+          name: sdist
+          path: dist/*.tar.gz
+
+  build-wheels:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            archs: x86_64
+          - os: macos-13
+            archs: x86_64
+          - os: macos-14
+            archs: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pypa/cibuildwheel@v2
+        env:
+          CIBW_ARCHS: ${{ matrix.archs }}
+          CIBW_SKIP: "pp* *-musllinux_*"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl
 
   publish-pypi:
-    needs: build
+    needs: [build-sdist, build-wheels]
     runs-on: ubuntu-latest
     environment: pypi
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: dist
           path: dist/
+          merge-multiple: true
 
       - uses: pypa/gh-action-pypi-publish@release/v1
 
   publish-testpypi:
-    needs: build
+    needs: [build-sdist, build-wheels]
     runs-on: ubuntu-latest
     environment: testpypi
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: dist
           path: dist/
+          merge-multiple: true
 
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
