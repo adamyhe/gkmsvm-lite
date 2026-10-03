@@ -141,7 +141,7 @@ def main():
 
     # ── Train with SMO ──
     print(f"\n{'=' * 60}")
-    print(f"Column-cached SMO (WSS2 + shrinking, cache={args.cache_size} MB)")
+    print(f"Column-cached SMO (WSS3 + shrinking, cache={args.cache_size} MB)")
     print(f"{'=' * 60}")
     model_smo, t_smo = train_and_time(
         pos_train, neg_train, solver="smo", device=device,
