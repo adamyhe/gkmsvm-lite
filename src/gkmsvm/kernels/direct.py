@@ -631,15 +631,17 @@ def _fused_cross_diagonal_packed_mlx(
     )[0]
 
 
-def _fused_pairwise_idx_gpu(bx, by, table, min_matches, *, by_packed_t=None):
+def _fused_pairwise_idx_gpu(bx, by, table, min_matches, *, by_packed_t=None,
+                            bx_packed=None):
     """Fused pairwise CUDA kernel (packed uint32 path, coalesced SV access).
 
     Args:
-        bx: [B, Wx, l] int8 query windows.
-        by: [S, Wy, l] int8 SV windows (ignored if by_packed_t is given).
+        bx: [B, Wx, l] int8 query windows (ignored if bx_packed given).
+        by: [S, Wy, l] int8 SV windows (ignored if by_packed_t given).
         table: [l+1] mismatch weight table.
         min_matches: minimum match count for non-zero contribution.
         by_packed_t: optional pre-packed [Wy, S] uint32 SV windows.
+        bx_packed: optional pre-packed [B, Wx] uint32 query windows.
     """
     global _cupy_fused_idx_kernel
     import cupy as cp
@@ -651,14 +653,17 @@ def _fused_pairwise_idx_gpu(bx, by, table, min_matches, *, by_packed_t=None):
             options=("--use_fast_math",),
         )
 
-    B, Wx, l = bx.shape
+    l = table.shape[0] - 1
+    if bx_packed is not None:
+        B, Wx = bx_packed.shape
+    else:
+        B, Wx, _ = bx.shape
+        bx_packed = cp.ascontiguousarray(_pack_windows_uint32(cp.asarray(bx), cp))
     if by_packed_t is not None:
         Wy, S = by_packed_t.shape
     else:
         S, Wy, _ = by.shape
         by_packed_t = cp.ascontiguousarray(_pack_windows_uint32(cp.asarray(by), cp).T)
-
-    bx_packed = cp.ascontiguousarray(_pack_windows_uint32(cp.asarray(bx), cp))
     table_gpu = cp.asarray(table, dtype=cp.float64)
     result = cp.empty(B * S, dtype=cp.float64)
 
@@ -796,7 +801,8 @@ class DirectGkmKernel(GkmKernel):
         return _fused_pairwise_gpu(wx, wy, self._mismatch_table)
 
     def pairwise_from_indices(
-        self, bx: np.ndarray, by: np.ndarray, *, by_packed_t=None
+        self, bx: np.ndarray, by: np.ndarray, *, by_packed_t=None,
+        bx_packed=None,
     ) -> np.ndarray:
         """Raw kernel from base-index windows (no RC, no normalization).
 
@@ -805,13 +811,16 @@ class DirectGkmKernel(GkmKernel):
             by: [S, Wy, l] int8 base indices from support sequences.
             by_packed_t: pre-packed SV windows. CPU: [S, Wy] uint32.
                 GPU: [Wy, S] uint32 (transposed for coalesced access).
+            bx_packed: pre-packed query windows. CPU: [B, Wx] uint32.
+                GPU: [B, Wx] uint32.
 
         Returns:
             [B, S] raw kernel values.
         """
-        xp = get_array_module(bx)
+        xp = get_array_module(bx if bx is not None else bx_packed)
         if xp is np:
-            bx_packed = _pack_windows_cpu(np.ascontiguousarray(bx))
+            if bx_packed is None:
+                bx_packed = _pack_windows_cpu(np.ascontiguousarray(bx))
             by_packed = (
                 by_packed_t
                 if by_packed_t is not None
@@ -824,11 +833,12 @@ class DirectGkmKernel(GkmKernel):
                 self.l,
                 self._min_matches,
             )
-        if is_mlx(bx):
-            xp = get_array_module(bx)
+        if is_mlx(bx if bx is not None else bx_packed):
+            xp = get_array_module(bx if bx is not None else bx_packed)
             from gkmsvm.backend import to_cpu
 
-            bx_packed = xp.asarray(_pack_windows_cpu(np.ascontiguousarray(to_cpu(bx))))
+            if bx_packed is None:
+                bx_packed = xp.asarray(_pack_windows_cpu(np.ascontiguousarray(to_cpu(bx))))
             if by_packed_t is not None:
                 by_packed = by_packed_t
             else:
@@ -849,6 +859,7 @@ class DirectGkmKernel(GkmKernel):
             self._mismatch_table,
             self._min_matches,
             by_packed_t=by_packed_t,
+            bx_packed=bx_packed,
         )
 
     def diagonal_from_windows(self, wx: np.ndarray) -> np.ndarray:
@@ -865,25 +876,12 @@ class DirectGkmKernel(GkmKernel):
         return self._apply_table(self_matches)
 
     def _raw_pairwise(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
-        xp = get_array_module(x)
-
-        if xp is np or is_mlx(x):
-            bx = self.base_index_windows(x)
-            by = self.base_index_windows(y)
-            result = self.pairwise_from_indices(bx, by)
-            if self.include_rc:
-                by_rc = self.base_index_windows(reverse_complement(y))
-                result = result + self.pairwise_from_indices(bx, by_rc)
-            return result.astype(x.dtype)
-
-        wx = self.flat_windows(x)
-        wy = self.flat_windows(y)
-        result = self.pairwise_from_windows(wx, wy)
-
+        bx = self.base_index_windows(x)
+        by = self.base_index_windows(y)
+        result = self.pairwise_from_indices(bx, by)
         if self.include_rc:
-            wy_rc = self.flat_windows(reverse_complement(y))
-            result = result + self.pairwise_from_windows(wx, wy_rc)
-
+            by_rc = self.base_index_windows(reverse_complement(y))
+            result = result + self.pairwise_from_indices(bx, by_rc)
         return result.astype(x.dtype)
 
     def _raw_diagonal(

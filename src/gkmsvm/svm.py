@@ -370,6 +370,49 @@ class GkmSVM:
                 norm = xp.sqrt(diag_x[:, None] * diag_sv[None, :])
                 raw = raw / xp.clip(norm, 1e-10, None)
             scores = (raw * self.coefficients).sum(axis=1, keepdims=True)
+        elif chunk is not None and chunk < S and hasattr(kernel, "pairwise_from_indices"):
+            self._get_sv_index_windows()
+            bx = kernel.base_index_windows(x)
+            on_gpu = is_gpu(bx)
+            if on_gpu:
+                import cupy as cp
+                from gkmsvm.kernels.direct import _pack_windows_uint32
+                bx_p = cp.ascontiguousarray(
+                    _pack_windows_uint32(cp.asarray(bx), cp)
+                )
+            else:
+                bx_p = None
+
+            def _slice_packed(packed, s, e):
+                if on_gpu:
+                    return xp.ascontiguousarray(packed[:, s:e])
+                return packed[s:e]
+
+            scores = xp.zeros((x.shape[0], 1), dtype=x.dtype)
+            sv_iter = range(0, S, chunk)
+            if verbose:
+                from tqdm import tqdm
+                sv_iter = tqdm(sv_iter, desc="SV chunks", total=(S + chunk - 1) // chunk)
+            for start in sv_iter:
+                end = min(start + chunk, S)
+                by_t = _slice_packed(self._sv_packed_t, start, end)
+                raw = kernel.pairwise_from_indices(
+                    bx, None, by_packed_t=by_t, bx_packed=bx_p
+                )
+                if kernel.include_rc:
+                    by_rc_t = _slice_packed(self._sv_rc_packed_t, start, end)
+                    raw = raw + kernel.pairwise_from_indices(
+                        bx, None, by_packed_t=by_rc_t, bx_packed=bx_p
+                    )
+                raw = raw.astype(x.dtype)
+                if do_norm:
+                    norm = xp.sqrt(
+                        diag_x[:, None] * diag_sv[start:end][None, :]
+                    )
+                    raw = raw / xp.clip(norm, 1e-10, None)
+                scores += (raw * self.coefficients[start:end]).sum(
+                    axis=1, keepdims=True
+                )
         elif chunk is not None and chunk < S:
             scores = xp.zeros((x.shape[0], 1), dtype=x.dtype)
             sv_iter = range(0, S, chunk)
@@ -399,21 +442,52 @@ class GkmSVM:
         return scores + self.bias
 
     def score_variants(
-        self, ref: np.ndarray, alt: np.ndarray, *, verbose: bool = False
+        self, ref: np.ndarray, alt: np.ndarray, *,
+        method: str = "kernel",
+        batch_size: int = 50,
+        verbose: bool = False,
     ) -> np.ndarray:
-        """Variant effect scores: score(alt) - score(ref).
+        """Variant effect scores.
 
         Args:
             ref: [B, 4, L] reference sequences.
             alt: [B, 4, L] alternate sequences.
+            method: Scoring strategy.
+                "kernel" — score(alt) - score(ref) via full kernel (default).
+                "gkmexplain" — GkmExplain hypothetical importance at the
+                    variant position (Shrikumar et al. 2019 §5.2).  Computes
+                    mode-1 attributions on ref, then reads off the predicted
+                    effect at each position where ref and alt differ.  Faster
+                    than kernel when the model has many SVs, because only one
+                    attribution pass is needed per sequence.
+            batch_size: Batch size for gkmexplain (ignored for kernel).
             verbose: Show tqdm progress bar.
 
         Returns:
             [B, 1] score differences.
         """
-        ref = self._match_device(ref)
-        alt = self._match_device(alt)
-        return self(alt, verbose=verbose) - self(ref, verbose=verbose)
+        if method == "kernel":
+            ref = self._match_device(ref)
+            alt = self._match_device(alt)
+            return self(alt, verbose=verbose) - self(ref, verbose=verbose)
+
+        if method == "gkmexplain":
+            from gkmsvm.explain import gkmexplain
+            from gkmsvm.backend import get_array_module, to_cpu
+
+            ref = self._match_device(ref)
+            alt = self._match_device(alt)
+            hyp = gkmexplain(self, ref, mode=1, batch_size=batch_size,
+                             verbose=verbose)
+            diff_mask = ref != alt
+            ref_contrib = (hyp * ref * diff_mask).sum(axis=(1, 2))
+            alt_contrib = (hyp * alt * diff_mask).sum(axis=(1, 2))
+            xp = get_array_module(hyp)
+            return xp.reshape(alt_contrib - ref_contrib, (-1, 1))
+
+        raise ValueError(
+            f"method must be 'kernel' or 'gkmexplain', got {method!r}"
+        )
 
     _MAX_LMER_TABLE_L = 14  # 4^14 ≈ 268M entries, ~1 GB
 
