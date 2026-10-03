@@ -263,25 +263,16 @@ def main():
     else:
         exp_model = ref_model
 
-    # Mode 0: actual contribution scores (importance × one-hot)
-    t0 = time.perf_counter()
-    imp_scores = _gkmexplain_batched(
-        exp_model, pos_x_np, mode=0,
-        batch_size=args.batch_size, device=explain_device,
-    )
-    t_mode0 = time.perf_counter() - t0
-    print(f"  Mode 0 (importance): {len(pos_x_np)} seqs in {t_mode0:.1f}s "
-          f"({len(pos_x_np)/t_mode0:.1f} seq/s)")
-
-    # Mode 1: hypothetical contribution scores
+    # Mode 1: hypothetical contribution scores (mode 0 = mode 1 × OHE)
     t0 = time.perf_counter()
     hyp_scores = _gkmexplain_batched(
         exp_model, pos_x_np, mode=1,
         batch_size=args.batch_size, device=explain_device,
     )
-    t_mode1 = time.perf_counter() - t0
-    print(f"  Mode 1 (hypothetical): {len(pos_x_np)} seqs in {t_mode1:.1f}s "
-          f"({len(pos_x_np)/t_mode1:.1f} seq/s)")
+    t_explain = time.perf_counter() - t0
+    print(f"  GkmExplain: {len(pos_x_np)} seqs in {t_explain:.1f}s "
+          f"({len(pos_x_np)/t_explain:.1f} seq/s)")
+    imp_scores = hyp_scores * pos_x_np
 
     # Completeness check on full set
     ref_full_scores = _to_numpy(

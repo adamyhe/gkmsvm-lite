@@ -34,7 +34,7 @@ import numpy as np
 import pyfaidx
 from sklearn.metrics import average_precision_score
 
-from gkmsvm.backend import HAS_CUPY
+from gkmsvm.backend import HAS_CUPY, HAS_MLX
 
 DATA_DIR = Path(__file__).parent / "data"
 FIXTURE_DIR = Path(__file__).parent.parent / "tests" / "fixtures"
@@ -42,39 +42,63 @@ FIXTURE_DIR = Path(__file__).parent.parent / "tests" / "fixtures"
 FLANK = 9  # bases of flanking context for 10-mer deltaSVM
 
 
-def _sync_gpu():
-    if HAS_CUPY:
+def _to_device(arr, device):
+    if device == "cuda":
+        from gkmsvm.backend import to_gpu
+        return to_gpu(arr)
+    elif device == "mlx":
+        from gkmsvm.backend import to_mlx
+        return to_mlx(arr)
+    return arr
+
+
+def _to_numpy(arr, device):
+    if device == "cuda":
+        from gkmsvm.backend import to_cpu
+        return to_cpu(arr)
+    return np.asarray(arr)
+
+
+def _sync_device(device):
+    if device == "cuda" and HAS_CUPY:
         import cupy as cp
         cp.cuda.Stream.null.synchronize()
+    elif device == "mlx" and HAS_MLX:
+        import mlx.core as mx
+        mx.eval()
 
 
 HG19_URL = "https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa.gz"
+GEO_URL = "https://ftp.ncbi.nlm.nih.gov/geo/series/GSE31nnn/GSE31388/suppl/GSE31388_dsQtlTable.txt.gz"
 
 
-def _ensure_genome(fasta_path: Path) -> Path:
-    """Download and index hg19 if not present."""
-    if fasta_path.exists():
-        return fasta_path
-
-    gz_path = fasta_path.parent / (fasta_path.name + ".gz")
-    if not gz_path.exists():
-        import urllib.request
-        print(f"Downloading hg19 genome to {gz_path}...")
-        urllib.request.urlretrieve(HG19_URL, gz_path)
-
+def download_data():
+    """Download publicly available data files if not present."""
     import shutil
-    print(f"Decompressing {gz_path}...")
-    with gzip.open(gz_path, "rb") as f_in, open(fasta_path, "wb") as f_out:
-        shutil.copyfileobj(f_in, f_out)
+    import urllib.request
 
-    return fasta_path
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    geo_path = DATA_DIR / "GSE31388_dsQtlTable.txt.gz"
+    if not geo_path.exists():
+        print("  Downloading GEO GSE31388 dsQTL effect sizes...")
+        urllib.request.urlretrieve(GEO_URL, geo_path)
+
+    fasta_path = DATA_DIR / "hg19.fa"
+    if not fasta_path.exists():
+        gz_path = DATA_DIR / "hg19.fa.gz"
+        if not gz_path.exists():
+            print("  Downloading hg19 genome (~900 MB compressed)...")
+            urllib.request.urlretrieve(HG19_URL, gz_path)
+        print("  Decompressing hg19.fa.gz...")
+        with gzip.open(gz_path, "rb") as f_in, open(fasta_path, "wb") as f_out:
+            shutil.copyfileobj(f_in, f_out)
 
 
 def load_dsqtl_variants(
     tsv_path: Path, fasta_path: Path
 ) -> dict[str, np.ndarray]:
     """Load dsQTL variants and extract flanking sequences from hg19."""
-    fasta_path = _ensure_genome(fasta_path)
     genome = pyfaidx.Fasta(str(fasta_path))
     chroms = []
     positions = []
@@ -154,9 +178,8 @@ def run_deltasvm_replication(variants: dict, device: str = "cpu") -> dict:
         l=10,
         include_rc=False,
     )
-    if device == "cuda":
-        from gkmsvm.backend import to_gpu
-        model.weights = to_gpu(model.weights)
+    if device != "cpu":
+        model.weights = _to_device(model.weights, device)
 
     ref_seqs = variants["ref_seq"]
     alt_seqs = variants["alt_seq"]
@@ -171,15 +194,10 @@ def run_deltasvm_replication(variants: dict, device: str = "cpu") -> dict:
         end = min(start + batch_size, n)
         ref_batch = np.stack([one_hot_encode(s) for s in ref_seqs[start:end]])
         alt_batch = np.stack([one_hot_encode(s) for s in alt_seqs[start:end]])
-        if device == "cuda":
-            from gkmsvm.backend import to_gpu, to_cpu
-            ref_batch = to_gpu(ref_batch)
-            alt_batch = to_gpu(alt_batch)
-            delta = model.score_variants(ref_batch, alt_batch)
-            our_scores[start:end] = to_cpu(delta.squeeze(1))
-        else:
-            delta = model.score_variants(ref_batch, alt_batch)
-            our_scores[start:end] = delta.squeeze(1)
+        ref_batch = _to_device(ref_batch, device)
+        alt_batch = _to_device(alt_batch, device)
+        delta = model.score_variants(ref_batch, alt_batch)
+        our_scores[start:end] = _to_numpy(delta.squeeze(1), device)
 
     elapsed = time.perf_counter() - t0
     print(f"  Scored {n} variants in {elapsed:.2f}s ({n/elapsed:.0f} variants/s)")
@@ -266,6 +284,8 @@ def run_full_kernel_benchmark(
 
     if device == "cuda":
         model.cuda()
+    elif device == "mlx":
+        model.mlx()
 
     all_ref = variants["ref_seq"]
     all_alt = variants["alt_seq"]
@@ -276,15 +296,12 @@ def run_full_kernel_benchmark(
     print(f"  Scoring {n}/{n_total} variants (query length: {len(ref_seqs[0])}bp)")
 
     print(f"\n  Benchmarking forward scoring ({device})...")
-    # Warmup (triggers Numba JIT on first call)
     warmup_ref = np.stack([one_hot_encode(s) for s in ref_seqs[:4]])
-    if device == "cuda":
-        from gkmsvm.backend import to_gpu, to_cpu
-        warmup_ref = to_gpu(warmup_ref)
+    warmup_ref = _to_device(warmup_ref, device)
     _ = model(warmup_ref)
-    _sync_gpu()
+    _sync_device(device)
 
-    batch_size = 32 if device == "cuda" else 64
+    batch_size = 32 if device != "cpu" else 64
     ref_scores = np.zeros(n)
     alt_scores = np.zeros(n)
 
@@ -293,21 +310,17 @@ def run_full_kernel_benchmark(
         end = min(start + batch_size, n)
         ref_batch = np.stack([one_hot_encode(s) for s in ref_seqs[start:end]])
         alt_batch = np.stack([one_hot_encode(s) for s in alt_seqs[start:end]])
-        if device == "cuda":
-            ref_batch = to_gpu(ref_batch)
-            alt_batch = to_gpu(alt_batch)
-            ref_scores[start:end] = to_cpu(model(ref_batch).squeeze(1))
-            alt_scores[start:end] = to_cpu(model(alt_batch).squeeze(1))
-        else:
-            ref_scores[start:end] = model(ref_batch).squeeze(1)
-            alt_scores[start:end] = model(alt_batch).squeeze(1)
+        ref_batch = _to_device(ref_batch, device)
+        alt_batch = _to_device(alt_batch, device)
+        ref_scores[start:end] = _to_numpy(model(ref_batch).squeeze(1), device)
+        alt_scores[start:end] = _to_numpy(model(alt_batch).squeeze(1), device)
         if start % (batch_size * 10) == 0 and start > 0:
             elapsed_so_far = time.perf_counter() - t0
             rate = (start * 2) / elapsed_so_far
             eta = (n * 2 - start * 2) / rate
             print(f"    {start}/{n} ({rate:.1f} seqs/s, ETA {eta:.0f}s)")
 
-    _sync_gpu()
+    _sync_device(device)
     scoring_time = time.perf_counter() - t0
 
     kernel_deltas = alt_scores - ref_scores
@@ -317,8 +330,14 @@ def run_full_kernel_benchmark(
     # ISM benchmark
     ism_results = run_ism_benchmark(model, ref_seqs[:ism_seqs], device) if ism_seqs > 0 else {}
 
-    # GkmExplain benchmark
-    explain_results = run_explain_benchmark(model, ref_seqs[:ism_seqs], device) if ism_seqs > 0 else {}
+    # GkmExplain benchmark (MLX unsupported, fall back to CPU)
+    explain_device = device if device != "mlx" else "cpu"
+    if explain_device == "cpu" and device == "mlx":
+        from gkmsvm.importers.lsgkm import load_lsgkm_model as _load
+        explain_model = _load(str(model_path), sv_chunk_size=sv_chunk_size)
+    else:
+        explain_model = model
+    explain_results = run_explain_benchmark(explain_model, ref_seqs[:ism_seqs], explain_device) if ism_seqs > 0 else {}
 
     return {
         "scoring_time": scoring_time,
@@ -337,13 +356,11 @@ def run_ism_benchmark(model, seqs: np.ndarray, device: str) -> dict:
     n = len(seqs)
     print(f"\n  Benchmarking ISM on {n} sequences ({device})...")
     x = np.stack([one_hot_encode(s) for s in seqs])
-    if device == "cuda":
-        from gkmsvm.backend import to_gpu
-        x = to_gpu(x)
+    x = _to_device(x, device)
 
     t0 = time.perf_counter()
     result = ism(model, x)
-    _sync_gpu()
+    _sync_device(device)
     elapsed = time.perf_counter() - t0
 
     print(f"  ISM: {elapsed:.2f}s for {n} seqs ({n/elapsed:.2f} seqs/s)")
@@ -357,33 +374,25 @@ def run_explain_benchmark(model, seqs: np.ndarray, device: str) -> dict:
     from gkmsvm.explain import gkmexplain
 
     n = len(seqs)
-    x = np.stack([one_hot_encode(s) for s in seqs])
-    if device == "cuda":
-        from gkmsvm.backend import to_gpu
-        x = to_gpu(x)
-    results = {}
+    x_np = np.stack([one_hot_encode(s) for s in seqs])
+    x = _to_device(x_np, device)
 
-    for mode in [0, 1]:
-        label = f"GkmExplain mode={mode}"
-        print(f"\n  Benchmarking {label} on {n} sequences ({device})...")
-        t0 = time.perf_counter()
-        result = gkmexplain(model, x, mode=mode)
-        _sync_gpu()
-        elapsed = time.perf_counter() - t0
-        print(f"  {label}: {elapsed:.2f}s for {n} seqs ({n/elapsed:.2f} seqs/s)")
-        print(f"  Output shape: {result.shape}")
-        results[f"mode{mode}"] = {
-            "elapsed": elapsed,
-            "n_seqs": n,
-            "seqs_per_sec": n / elapsed,
-        }
+    print(f"\n  Benchmarking GkmExplain on {n} sequences ({device})...")
+    t0 = time.perf_counter()
+    hyp = gkmexplain(model, x, mode=1)
+    _sync_device(device)
+    elapsed = time.perf_counter() - t0
+    imp = _to_numpy(hyp, device) * x_np
 
-    return results
+    print(f"  GkmExplain: {elapsed:.2f}s for {n} seqs ({n/elapsed:.2f} seqs/s)")
+    print(f"  Output shape: {_to_numpy(hyp, device).shape}")
+    return {"elapsed": elapsed, "n_seqs": n, "seqs_per_sec": n / elapsed}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--device", default="cpu", help="Device for computation (cpu/cuda)")
+    parser.add_argument("--device", default="cpu", choices=["cpu", "cuda", "mlx", "auto"],
+                        help="Device for computation (cpu/cuda/mlx/auto)")
     parser.add_argument("--full-kernel", action="store_true", help="Also run full kernel SVM benchmark")
     parser.add_argument("--sv-chunk-size", type=int, default=None, help="SV chunk size for full kernel (default: None = no chunking)")
     parser.add_argument("--full-kernel-variants", type=int, default=100,
@@ -391,6 +400,15 @@ def main():
     parser.add_argument("--ism-seqs", type=int, default=5,
                         help="Sequences for ISM/GkmExplain benchmark (default: 5)")
     args = parser.parse_args()
+
+    if args.device == "auto":
+        if HAS_CUPY:
+            args.device = "cuda"
+        elif HAS_MLX:
+            args.device = "mlx"
+        else:
+            args.device = "cpu"
+        print(f"Auto-selected device: {args.device}")
 
     if args.device == "cuda":
         if not HAS_CUPY:
@@ -401,8 +419,17 @@ def main():
             props = cp.cuda.runtime.getDeviceProperties(0)
             print(f"GPU: {props['name'].decode()}")
             print(f"Memory: {props['totalGlobalMem'] / 1e9:.1f} GB")
+    elif args.device == "mlx":
+        if not HAS_MLX:
+            print("MLX not available, falling back to CPU")
+            args.device = "cpu"
+        else:
+            print("Using MLX (Apple GPU)")
 
-    # --- Load data ---
+    # --- Download and load data ---
+    print("Downloading data (if needed)...")
+    download_data()
+
     print("Loading dsQTL variants and extracting sequences from hg19...")
     variants = load_dsqtl_variants(
         DATA_DIR / "dsqtl_lee2015.tsv",
