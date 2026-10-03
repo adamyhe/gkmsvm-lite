@@ -48,10 +48,6 @@ gpu = [
 mlx = [
     "mlx>=0.10.0",
 ]
-dev = [
-    "pytest",
-    "pytest-cov",
-]
 examples = [
     "jupyter",
     "matplotlib",
@@ -60,6 +56,12 @@ examples = [
     "modisco>=2.5",
     "h5py",
     "openpyxl",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-cov",
 ]
 
 [tool.setuptools.packages.find]

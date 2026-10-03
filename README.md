@@ -4,7 +4,7 @@
 [![CI](https://github.com/adamyhe/gkmsvm-lite/actions/workflows/ci.yml/badge.svg)](https://github.com/adamyhe/gkmsvm-lite/actions/workflows/ci.yml)
 [![Downloads](https://static.pepy.tech/badge/gkmsvm-lite)](https://pepy.tech/projects/gkmsvm-lite)
 
-A pure-Python implementation of gapped k-mer SVMs (gkm-SVMs) for DNA sequence analysis. Supports classification (C-SVC) and regression (epsilon-SVR), all six kernel types, GPU acceleration via CuPy (NVIDIA) and MLX (Apple Silicon), and compatibility with models from LS-GKM, classic gkmSVM, and the R gkmSVM package.
+A Python implementation of gapped k-mer SVMs (gkm-SVMs) for DNA sequence analysis. Supports classification (C-SVC) and regression (epsilon-SVR), all six kernel types, GPU acceleration via CuPy (NVIDIA) and MLX (Apple Silicon), and compatibility with models from LS-GKM, classic gkmSVM, and the R gkmSVM package.
 
 ## Install
 

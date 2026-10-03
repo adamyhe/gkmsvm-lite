@@ -5,8 +5,8 @@ Agent-facing reference for working on this codebase. Human-readable docs are in 
 ## Build and test
 
 ```bash
-uv pip install -e ".[dev]"          # CPU only
-uv pip install -e ".[dev,gpu]"      # with CuPy GPU support
+uv pip install -e "." --group dev    # CPU only
+uv pip install -e ".[gpu]" --group dev  # with CuPy GPU support
 pytest tests/ -v
 pytest tests/test_codec.py          # single file
 pytest tests/ -k "test_rc"          # pattern match

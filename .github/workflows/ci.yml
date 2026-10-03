@@ -21,8 +21,11 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Install uv
+        run: pip install uv
+
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        run: uv pip install -e "." --group dev --system
 
       - name: Run tests
         run: pytest tests/ -v --tb=short
