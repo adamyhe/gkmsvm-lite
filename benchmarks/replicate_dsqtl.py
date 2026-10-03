@@ -13,7 +13,7 @@ Data requirements (see benchmarks/data/):
     - gm12878_deltasvm_weights.txt  : Beer lab GM12878 deltaSVM 10-mer weights
     - dsqtl_lee2015.tsv             : Lee 2015 Supp Table 1 (28,309 variants)
     - GSE31388_dsQtlTable.txt.gz    : Degner et al. 2012 dsQTL effect sizes
-    - hg19.2bit                     : UCSC hg19 reference genome
+    - hg19.fa                       : hg19 genome FASTA (auto-downloaded from UCSC)
     - encode_ENCFF579AOX.model.txt.gz : (optional) full ENCODE model for GPU benchmark
 
 Usage:
@@ -31,7 +31,7 @@ import time
 from pathlib import Path
 
 import numpy as np
-import py2bit
+import pyfaidx
 from sklearn.metrics import average_precision_score
 
 from gkmsvm.backend import HAS_CUPY
@@ -48,11 +48,34 @@ def _sync_gpu():
         cp.cuda.Stream.null.synchronize()
 
 
+HG19_URL = "https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa.gz"
+
+
+def _ensure_genome(fasta_path: Path) -> Path:
+    """Download and index hg19 if not present."""
+    if fasta_path.exists():
+        return fasta_path
+
+    gz_path = fasta_path.parent / (fasta_path.name + ".gz")
+    if not gz_path.exists():
+        import urllib.request
+        print(f"Downloading hg19 genome to {gz_path}...")
+        urllib.request.urlretrieve(HG19_URL, gz_path)
+
+    import shutil
+    print(f"Decompressing {gz_path}...")
+    with gzip.open(gz_path, "rb") as f_in, open(fasta_path, "wb") as f_out:
+        shutil.copyfileobj(f_in, f_out)
+
+    return fasta_path
+
+
 def load_dsqtl_variants(
-    tsv_path: Path, twobit_path: Path
+    tsv_path: Path, fasta_path: Path
 ) -> dict[str, np.ndarray]:
     """Load dsQTL variants and extract flanking sequences from hg19."""
-    tb = py2bit.open(str(twobit_path))
+    fasta_path = _ensure_genome(fasta_path)
+    genome = pyfaidx.Fasta(str(fasta_path))
     chroms = []
     positions = []
     ref_seqs = []
@@ -70,12 +93,9 @@ def load_dsqtl_variants(
 
             start = pos - 1 - FLANK
             end = pos + FLANK
-            if start < 0:
+            if start < 0 or chrom not in genome:
                 continue
-            try:
-                seq = tb.sequence(chrom, start, end).upper()
-            except RuntimeError:
-                continue
+            seq = str(genome[chrom][start:end]).upper()
             if len(seq) != 2 * FLANK + 1 or "N" in seq:
                 continue
 
@@ -100,7 +120,7 @@ def load_dsqtl_variants(
             published_scores.append(float(row["gkm_SVM"]))
             snp_names.append(row["SNPname1"])
 
-    tb.close()
+    genome.close()
     return {
         "chrom": np.array(chroms),
         "pos": np.array(positions),
@@ -386,7 +406,7 @@ def main():
     print("Loading dsQTL variants and extracting sequences from hg19...")
     variants = load_dsqtl_variants(
         DATA_DIR / "dsqtl_lee2015.tsv",
-        DATA_DIR / "hg19.2bit",
+        DATA_DIR / "hg19.fa",
     )
     print(f"  Loaded {len(variants['label'])} variants "
           f"({(variants['label'] == 1).sum()} pos / {(variants['label'] == -1).sum()} neg)")
