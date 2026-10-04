@@ -218,10 +218,16 @@ def _model_path(pk: str, neg_idx: int) -> Path:
     return MODEL_DIR / f"gm12878_{pk}_neg{neg_idx}.npz"
 
 
+def _dsvm_path(pk: str, neg_idx: int) -> Path:
+    return MODEL_DIR / f"gm12878_{pk}_neg{neg_idx}_dsvm.npz"
+
+
 def train_models(pos_seqs, neg_sets, params: dict, device: str,
                  pk: str, force_train: bool = False, C: float = 1.0):
     from gkmsvm import train_gkmsvm
-    from gkmsvm.serialization import save_npz, load_model
+    from gkmsvm.serialization import (
+        save_npz, load_model, save_deltasvm_npz, load_deltasvm_npz,
+    )
     from gkmsvm.backend import to_cpu
 
     models = []
@@ -229,6 +235,7 @@ def train_models(pos_seqs, neg_sets, params: dict, device: str,
 
     for i, neg_seqs in enumerate(neg_sets):
         cached = _model_path(pk, i + 1)
+        dsvm_cached = _dsvm_path(pk, i + 1)
 
         if cached.exists() and not force_train:
             print(f"\n── Model {i+1}/{len(neg_sets)} "
@@ -251,14 +258,21 @@ def train_models(pos_seqs, neg_sets, params: dict, device: str,
             save_npz(m, str(cached))
             print(f"  Saved {cached}")
 
-        if device == "cuda":
-            m.cuda()
+        if dsvm_cached.exists() and not force_train:
+            print(f"  DeltaSVM weights: [cached]")
+            d = load_deltasvm_npz(str(dsvm_cached))
+        else:
+            if device == "cuda":
+                m.cuda()
+            t0 = time.time()
+            d = m.to_deltasvm(device=device, verbose=True)
+            print(f"  DeltaSVM conversion: {time.time() - t0:.1f}s")
+            m.cpu()
+            d.cpu()
+            MODEL_DIR.mkdir(parents=True, exist_ok=True)
+            save_deltasvm_npz(d, str(dsvm_cached))
+            print(f"  Saved {dsvm_cached}")
 
-        t0 = time.time()
-        d = m.to_deltasvm(device=device, verbose=True)
-        print(f"  DeltaSVM conversion: {time.time() - t0:.1f}s")
-
-        m.cpu()
         models.append(m)
         dsvms.append(d)
 

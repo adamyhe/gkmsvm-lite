@@ -32,6 +32,41 @@ def save_npz(model, path: str | Path) -> None:
     )
 
 
+def save_deltasvm_npz(model, path: str | Path) -> None:
+    """Save a DeltaSVM model in npz format."""
+    from gkmsvm.backend import to_cpu
+
+    metadata = {
+        "model_type": "deltasvm",
+        "l": model.l,
+        "k": model.k,
+        "include_rc": model.include_rc,
+        "bias": float(model.bias),
+    }
+    np.savez(
+        path,
+        weights=to_cpu(model.weights),
+        metadata=np.void(json.dumps(metadata).encode("utf-8")),
+    )
+
+
+def load_deltasvm_npz(path: str | Path, *, device: str = "cpu"):
+    """Load a DeltaSVM model from npz format."""
+    from gkmsvm.deltasvm import DeltaSVM
+
+    data = np.load(path, allow_pickle=False)
+    metadata = json.loads(bytes(data["metadata"]))
+
+    return DeltaSVM(
+        weights=data["weights"],
+        l=metadata["l"],
+        k=metadata["k"],
+        include_rc=metadata["include_rc"],
+        bias=metadata.get("bias", 0.0),
+        device=device,
+    )
+
+
 def load_npz(path: str | Path, *, device: str = "cpu"):
     """Load a GkmSVM model from native npz format."""
     from gkmsvm.svm import GkmSVM
@@ -114,6 +149,11 @@ def load_model(path: str | Path, *, device: str = "cpu"):
     name = path.name.lower()
 
     if name.endswith(".npz"):
+        data = np.load(path, allow_pickle=False)
+        metadata = json.loads(bytes(data["metadata"]))
+        data.close()
+        if metadata.get("model_type") == "deltasvm":
+            return load_deltasvm_npz(path, device=device)
         return load_npz(path, device=device)
 
     from gkmsvm.importers.lsgkm import load_lsgkm_model
