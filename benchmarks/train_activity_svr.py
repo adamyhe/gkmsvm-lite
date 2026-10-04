@@ -245,9 +245,9 @@ def main():
                         help="Crop sequences to this length (default: 300).")
     parser.add_argument("--max-train-seqs", type=int, default=None,
                         help="Subsample training peaks for speed.")
-    parser.add_argument("--solver", default="nystrom",
+    parser.add_argument("--solver", default="auto",
                         choices=["auto", "nystrom", "libsvm"],
-                        help="Training solver (default: nystrom).")
+                        help="Training solver (default: auto).")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--work-dir", default=None,
                         help="DART-Eval data directory (overrides DART_WORK_DIR).")

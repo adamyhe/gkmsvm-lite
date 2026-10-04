@@ -205,9 +205,9 @@ def main():
     parser.add_argument("--d", type=int, default=3, dest="d_param")
     parser.add_argument("--C", type=float, default=1.0, dest="C_param")
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--solver", default="nystrom",
+    parser.add_argument("--solver", default="auto",
                         choices=["auto", "nystrom", "libsvm"],
-                        help="Training solver (default: nystrom).")
+                        help="Training solver (default: auto).")
     parser.add_argument("--output", default=None,
                         help="Save results to TSV file.")
     parser.add_argument("--work-dir", default=None,
