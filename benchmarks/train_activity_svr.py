@@ -243,8 +243,9 @@ def main():
     parser.add_argument("--epsilon", type=float, default=0.1)
     parser.add_argument("--target-len", type=int, default=300,
                         help="Crop sequences to this length (default: 300).")
-    parser.add_argument("--max-train-seqs", type=int, default=None,
-                        help="Subsample training peaks for speed.")
+    parser.add_argument("--max-train-seqs", type=int, default=20000,
+                        help="Subsample training peaks (default: 20000). "
+                             "Set 0 for all.")
     parser.add_argument("--solver", default="auto",
                         choices=["auto", "nystrom", "libsvm"],
                         help="Training solver (default: auto).")
@@ -279,8 +280,9 @@ def main():
         print(f"{cell_line}")
         print(f"{'=' * 60}")
 
+        max_seqs = args.max_train_seqs or None
         seqs, targets, _ = load_train_data(
-            h5_path, cell_line, args.target_len, args.max_train_seqs)
+            h5_path, cell_line, args.target_len, max_seqs)
         if seqs is None:
             continue
 
