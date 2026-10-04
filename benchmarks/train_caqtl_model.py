@@ -233,6 +233,17 @@ def main():
     global DART_WORK_DIR
     if os.environ.get("DART_WORK_DIR"):
         DART_WORK_DIR = os.environ["DART_WORK_DIR"]
+    if not DART_WORK_DIR:
+        DART_WORK_DIR = str(Path(__file__).parent / "data" / "dart-eval")
+
+    # Auto-download from Synapse if H5 files are missing
+    h5_task4 = os.path.join(DART_WORK_DIR,
+                            "task_4_chromatin_activity/data.h5")
+    h5_task5 = os.path.join(DART_WORK_DIR,
+                            "task_5_variant_effect_prediction/data.h5")
+    if not os.path.exists(h5_task4) or not os.path.exists(h5_task5):
+        from dart_download import download_dart_data
+        download_dart_data(DART_WORK_DIR, tasks=("task_4", "task_5"))
 
     print("=" * 60)
     print("caQTL Benchmark: Train GM12878 ATAC → Score African caQTLs")

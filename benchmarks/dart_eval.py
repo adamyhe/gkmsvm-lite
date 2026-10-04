@@ -669,8 +669,22 @@ def main():
     if args.work_dir:
         WORK_DIR = args.work_dir
     if not WORK_DIR:
-        print("Error: set DART_WORK_DIR or pass --work-dir", file=sys.stderr)
-        sys.exit(1)
+        WORK_DIR = os.path.join(os.path.dirname(__file__), "data", "dart-eval")
+
+    # Auto-download from Synapse if H5 files are missing
+    tasks_needed = []
+    if args.task in ("all", "activity"):
+        h5 = os.path.join(WORK_DIR, "task_4_chromatin_activity/data.h5")
+        if not os.path.exists(h5):
+            tasks_needed.append("task_4")
+    if args.task in ("all", "vep"):
+        h5 = os.path.join(WORK_DIR,
+                          "task_5_variant_effect_prediction/data.h5")
+        if not os.path.exists(h5):
+            tasks_needed.append("task_5")
+    if tasks_needed:
+        from dart_download import download_dart_data
+        download_dart_data(WORK_DIR, tasks=tuple(tasks_needed))
 
     print(f"DART-Eval benchmark")
     print(f"  Model: {args.model}")

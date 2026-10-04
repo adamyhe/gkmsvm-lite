@@ -252,15 +252,13 @@ def main():
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
-    work_dir = args.work_dir or os.environ.get("DART_WORK_DIR", "")
-    if not work_dir:
-        print("Error: set DART_WORK_DIR or pass --work-dir", file=sys.stderr)
-        sys.exit(1)
+    work_dir = (args.work_dir or os.environ.get("DART_WORK_DIR", "")
+                or str(Path(__file__).parent / "data" / "dart-eval"))
 
     h5_path = os.path.join(work_dir, "task_4_chromatin_activity/data.h5")
     if not os.path.exists(h5_path):
-        print(f"Error: {h5_path} not found", file=sys.stderr)
-        sys.exit(1)
+        from dart_download import download_dart_data
+        download_dart_data(work_dir, tasks=("task_4",))
 
     print("DART-Eval Task 4: Cell Type Activity SVR")
     print(f"  Data: {h5_path}")
