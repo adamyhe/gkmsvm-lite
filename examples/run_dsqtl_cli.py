@@ -56,7 +56,7 @@ def download_data():
             )
         print("Extracting...")
         with tarfile.open(tarball) as tar:
-            tar.extractall(DATA_DIR)
+            tar.extractall(DATA_DIR, filter="data")
 
     if not PUB_WEIGHTS.exists():
         print("Downloading published deltaSVM weights (16 MB)...")
