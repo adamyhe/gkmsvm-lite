@@ -44,7 +44,9 @@ MODEL_DIR = Path(__file__).parent / "models"
 
 SEQ_URL = "https://beerlab.org/deltasvm/downloads/gm12878_sequence_sets.tar.gz"
 GEO_URL = "https://ftp.ncbi.nlm.nih.gov/geo/series/GSE31nnn/GSE31388/suppl/GSE31388_dsQtlTable.txt.gz"
-WEIGHTS_URL = "https://beerlab.org/deltasvm/downloads/SupplementaryTable_gm12878weights.txt"
+WEIGHTS_URL = (
+    "https://beerlab.org/deltasvm/downloads/SupplementaryTable_gm12878weights.txt"
+)
 LEE2015_URL = (
     "https://static-content.springer.com/esm/"
     "art%3A10.1038%2Fng.3331/MediaObjects/41588_2015_BFng3331_MOESM26_ESM.xlsx"
@@ -62,6 +64,7 @@ FLANK = 9
 # ---------------------------------------------------------------------------
 # Download
 # ---------------------------------------------------------------------------
+
 
 def download_data(replicate_published: bool = False):
     """Download all required data files."""
@@ -100,6 +103,7 @@ def download_data(replicate_published: bool = False):
     tsv_path = DATA_DIR / "dsqtl_lee2015.tsv"
     if not tsv_path.exists():
         import openpyxl
+
         xlsx_path = DATA_DIR / "lee2015_supp.xlsx"
         if not xlsx_path.exists():
             print("Downloading Lee 2015 Supplementary Table 1...")
@@ -108,13 +112,15 @@ def download_data(replicate_published: bool = False):
         wb = openpyxl.load_workbook(xlsx_path, read_only=True)
         ws = wb["SuppTable1"]
         with open(tsv_path, "w") as f:
-            for row in ws.iter_rows(values_only=True):
-                f.write("\t".join(
-                    str(v) if v is not None else "" for v in row) + "\n")
+            f.writelines(
+                "\t".join(str(v) if v is not None else "" for v in row) + "\n"
+                for row in ws.iter_rows(values_only=True)
+            )
         wb.close()
 
     # hg19 genome
     import shutil
+
     fasta_path = DATA_DIR / "hg19.fa"
     if not fasta_path.exists():
         gz_path = DATA_DIR / "hg19.fa.gz"
@@ -122,8 +128,7 @@ def download_data(replicate_published: bool = False):
             print("Downloading hg19 genome (~900 MB compressed)...")
             urlretrieve(HG19_URL, gz_path)
         print("Decompressing hg19.fa.gz...")
-        with gzip.open(gz_path, "rb") as f_in, \
-                open(fasta_path, "wb") as f_out:
+        with gzip.open(gz_path, "rb") as f_in, open(fasta_path, "wb") as f_out:
             shutil.copyfileobj(f_in, f_out)
 
 
@@ -131,18 +136,19 @@ def download_data(replicate_published: bool = False):
 # Data loading
 # ---------------------------------------------------------------------------
 
+
 def load_training_data(n_negsets: int = 5):
     from gkmsvm import read_fasta
 
-    pos_seqs = [seq for _, seq in read_fasta(
-        str(SEQ_DIR / "gm12878_shared.fa"))]
-    print(f"Training positives: {len(pos_seqs):,} sequences, "
-          f"{len(pos_seqs[0])}bp")
+    pos_seqs = [seq for _, seq in read_fasta(str(SEQ_DIR / "gm12878_shared.fa"))]
+    print(f"Training positives: {len(pos_seqs):,} sequences, {len(pos_seqs[0])}bp")
 
     neg_sets = []
     for i in range(1, n_negsets + 1):
-        negs = [seq for _, seq in read_fasta(
-            str(SEQ_DIR / f"nullseqs_gm12878_shared.{i}.1.fa"))]
+        negs = [
+            seq
+            for _, seq in read_fasta(str(SEQ_DIR / f"nullseqs_gm12878_shared.{i}.1.fa"))
+        ]
         neg_sets.append(negs)
         print(f"  Negative set {i}: {len(negs):,} sequences")
 
@@ -150,7 +156,7 @@ def load_training_data(n_negsets: int = 5):
 
 
 def load_test_variants():
-    from gkmsvm import read_fasta, one_hot_encode
+    from gkmsvm import one_hot_encode, read_fasta
 
     pos_major = list(read_fasta(str(SEQ_DIR / "dsqtl_test_pos.major.fa")))
     pos_minor = list(read_fasta(str(SEQ_DIR / "dsqtl_test_pos.minor.fa")))
@@ -164,13 +170,14 @@ def load_test_variants():
     X_ref = np.stack([one_hot_encode(s) for s in ref_seqs])
     X_alt = np.stack([one_hot_encode(s) for s in alt_seqs])
 
-    print(f"Test variants: {len(labels)} ({labels.sum()} sig + "
-          f"{(labels == 0).sum()} ctrl), {len(ref_seqs[0])}bp")
+    print(
+        f"Test variants: {len(labels)} ({labels.sum()} sig + "
+        f"{(labels == 0).sum()} ctrl), {len(ref_seqs[0])}bp"
+    )
 
     effect_sizes = _load_effect_sizes(pos_major)
     if effect_sizes is not None:
-        effect_sizes = np.concatenate(
-            [effect_sizes, np.full(len(neg_major), np.nan)])
+        effect_sizes = np.concatenate([effect_sizes, np.full(len(neg_major), np.nan)])
 
     return X_ref, X_alt, labels, effect_sizes
 
@@ -185,7 +192,8 @@ def _load_effect_sizes(pos_major: list[tuple[str, str]]) -> np.ndarray | None:
 
     geo = pd.read_csv(geo_path, sep="\t", compression="gzip")
     geo = geo.sort_values("Pr(>|t|)").drop_duplicates(
-        subset=["Chr", "SNP"], keep="first")
+        subset=["Chr", "SNP"], keep="first"
+    )
 
     n_pos = len(pos_major)
     effects = np.full(n_pos, np.nan)
@@ -214,6 +222,7 @@ def _load_effect_sizes(pos_major: list[tuple[str, str]]) -> np.ndarray | None:
 # Model training with caching
 # ---------------------------------------------------------------------------
 
+
 def _model_path(pk: str, neg_idx: int) -> Path:
     return MODEL_DIR / f"gm12878_{pk}_neg{neg_idx}.npz"
 
@@ -222,13 +231,23 @@ def _dsvm_path(pk: str, neg_idx: int) -> Path:
     return MODEL_DIR / f"gm12878_{pk}_neg{neg_idx}_dsvm.npz"
 
 
-def train_models(pos_seqs, neg_sets, params: dict, device: str,
-                 pk: str, force_train: bool = False, C: float = 1.0):
+def train_models(
+    pos_seqs,
+    neg_sets,
+    params: dict,
+    device: str,
+    pk: str,
+    force_train: bool = False,
+    C: float = 1.0,
+):
     from gkmsvm import train_gkmsvm
-    from gkmsvm.serialization import (
-        save_npz, load_model, save_deltasvm_npz, load_deltasvm_npz,
-    )
     from gkmsvm.backend import to_cpu
+    from gkmsvm.serialization import (
+        load_deltasvm_npz,
+        load_model,
+        save_deltasvm_npz,
+        save_npz,
+    )
 
     models = []
     dsvms = []
@@ -238,19 +257,28 @@ def train_models(pos_seqs, neg_sets, params: dict, device: str,
         dsvm_cached = _dsvm_path(pk, i + 1)
 
         if cached.exists() and not force_train:
-            print(f"\n── Model {i+1}/{len(neg_sets)} "
-                  f"(l={params['l']} k={params['k']}) ── [cached]")
+            print(
+                f"\n── Model {i + 1}/{len(neg_sets)} "
+                f"(l={params['l']} k={params['k']}) ── [cached]"
+            )
             m = load_model(str(cached))
         else:
-            print(f"\n── Model {i+1}/{len(neg_sets)} "
-                  f"(l={params['l']} k={params['k']}) ──")
+            print(
+                f"\n── Model {i + 1}/{len(neg_sets)} "
+                f"(l={params['l']} k={params['k']}) ──"
+            )
             t0 = time.time()
             m = train_gkmsvm(
-                pos_seqs, neg_seqs,
+                pos_seqs,
+                neg_seqs,
                 kernel_type=params["kernel_type"],
-                l=params["l"], k=params["k"], d=params["d"],
-                C=C, solver="auto",
-                device=device, verbose=True,
+                l=params["l"],
+                k=params["k"],
+                d=params["d"],
+                C=C,
+                solver="auto",
+                device=device,
+                verbose=True,
             )
             print(f"  {m.num_support_vectors} SVs, {time.time() - t0:.1f}s")
             MODEL_DIR.mkdir(parents=True, exist_ok=True)
@@ -259,7 +287,7 @@ def train_models(pos_seqs, neg_sets, params: dict, device: str,
             print(f"  Saved {cached}")
 
         if dsvm_cached.exists() and not force_train:
-            print(f"  DeltaSVM weights: [cached]")
+            print("  DeltaSVM weights: [cached]")
             d = load_deltasvm_npz(str(dsvm_cached))
         else:
             if device == "cuda":
@@ -289,8 +317,10 @@ def train_models(pos_seqs, neg_sets, params: dict, device: str,
 # Scoring
 # ---------------------------------------------------------------------------
 
+
 def score_deltasvm(dsvm, X_ref, X_alt):
     from gkmsvm.backend import to_cpu
+
     t0 = time.time()
     scores = to_cpu(dsvm.score_variants(X_ref, X_alt).flatten())
     print(f"  DeltaSVM: {len(scores)} variants in {time.time() - t0:.2f}s")
@@ -317,13 +347,13 @@ def score_kernel(model, X_ref, X_alt, device: str, batch_size: int = 64):
 
     elapsed = time.time() - t0
     model.cpu()
-    print(f"  Kernel VEP: {N} variants in {elapsed:.1f}s "
-          f"({N * 2 / elapsed:.0f} seqs/s)")
+    print(
+        f"  Kernel VEP: {N} variants in {elapsed:.1f}s ({N * 2 / elapsed:.0f} seqs/s)"
+    )
     return scores
 
 
-def score_gkmexplain(model, X_ref, X_alt, device: str,
-                     batch_size: int = 32):
+def score_gkmexplain(model, X_ref, X_alt, device: str, batch_size: int = 32):
     from gkmsvm.backend import to_cpu
 
     if device == "cuda":
@@ -337,20 +367,24 @@ def score_gkmexplain(model, X_ref, X_alt, device: str,
         end = min(start + batch_size, N)
         ref_b = model._match_device(X_ref[start:end])
         alt_b = model._match_device(X_alt[start:end])
-        s = model.score_variants(ref_b, alt_b, method="gkmexplain",
-                                 batch_size=end - start, verbose=False)
+        s = model.score_variants(
+            ref_b, alt_b, method="gkmexplain", batch_size=end - start, verbose=False
+        )
         scores[start:end] = to_cpu(s).flatten()
 
     elapsed = time.time() - t0
     model.cpu()
-    print(f"  GkmExplain VEP: {N} variants in {elapsed:.1f}s "
-          f"({N / elapsed:.0f} variants/s)")
+    print(
+        f"  GkmExplain VEP: {N} variants in {elapsed:.1f}s "
+        f"({N / elapsed:.0f} variants/s)"
+    )
     return scores
 
 
 # ---------------------------------------------------------------------------
 # Published deltaSVM replication
 # ---------------------------------------------------------------------------
+
 
 def load_published_variants(tsv_path: Path, fasta_path: Path) -> dict:
     """Load Lee 2015 variants and extract flanking sequences from hg19."""
@@ -413,8 +447,7 @@ def load_effect_sizes_by_snp(gz_path: Path) -> dict[str, float]:
     return effects
 
 
-def replicate_published(variants: dict, effect_sizes: dict,
-                        device: str):
+def replicate_published(variants: dict, effect_sizes: dict, device: str):
     """Score with published deltaSVM weights and compare."""
     from gkmsvm.codec import one_hot_encode
     from gkmsvm.importers.deltasvm import load_deltasvm_model
@@ -422,7 +455,8 @@ def replicate_published(variants: dict, effect_sizes: dict,
     print("Loading published deltaSVM weights...")
     model = load_deltasvm_model(
         str(DATA_DIR / "gm12878_deltasvm_weights.txt"),
-        l=10, include_rc=False,
+        l=10,
+        include_rc=False,
     )
     if device == "cuda":
         model.cuda()
@@ -442,12 +476,14 @@ def replicate_published(variants: dict, effect_sizes: dict,
         ref_b = np.stack([one_hot_encode(s) for s in ref_seqs[start:end]])
         alt_b = np.stack([one_hot_encode(s) for s in alt_seqs[start:end]])
         if device == "cuda":
-            from gkmsvm.backend import to_gpu, to_cpu
+            from gkmsvm.backend import to_cpu, to_gpu
+
             ref_b, alt_b = to_gpu(ref_b), to_gpu(alt_b)
             delta = model.score_variants(ref_b, alt_b)
             scores[start:end] = to_cpu(delta.squeeze(1))
         elif device == "mlx":
             from gkmsvm.backend import to_mlx
+
             ref_b, alt_b = to_mlx(ref_b), to_mlx(alt_b)
             delta = model.score_variants(ref_b, alt_b)
             scores[start:end] = np.asarray(delta.squeeze(1))
@@ -460,8 +496,7 @@ def replicate_published(variants: dict, effect_sizes: dict,
     published = variants["published_score"]
     max_diff = np.max(np.abs(scores - published))
     corr = np.corrcoef(scores, published)[0, 1]
-    print(f"  {n} variants in {elapsed:.2f}s "
-          f"({n / elapsed:.0f} variants/s)")
+    print(f"  {n} variants in {elapsed:.2f}s ({n / elapsed:.0f} variants/s)")
     print(f"  Max diff from published: {max_diff:.2e}")
     print(f"  Correlation with published: {corr:.6f}")
 
@@ -487,8 +522,10 @@ def replicate_published(variants: dict, effect_sizes: dict,
 # Evaluation
 # ---------------------------------------------------------------------------
 
-def evaluate(scores: np.ndarray, labels: np.ndarray,
-             effect_sizes: np.ndarray | None, method: str) -> dict:
+
+def evaluate(
+    scores: np.ndarray, labels: np.ndarray, effect_sizes: np.ndarray | None, method: str
+) -> dict:
     abs_scores = np.abs(scores)
     auroc = roc_auc_score(labels, abs_scores)
     auprc = average_precision_score(labels, abs_scores)
@@ -513,42 +550,55 @@ def print_results(results: list[dict], param_label: str):
     print(f"\n{'=' * 70}")
     print(f"Results: {param_label}")
     print(f"{'=' * 70}")
-    print(f"  {'Method':<25s} {'AUROC':>8s} {'AUPRC':>8s} "
-          f"{'Pearson':>8s} {'Spearman':>8s}")
+    print(
+        f"  {'Method':<25s} {'AUROC':>8s} {'AUPRC':>8s} "
+        f"{'Pearson':>8s} {'Spearman':>8s}"
+    )
     print(f"  {'-' * 25} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8}")
     for r in results:
         pear = f"{r['pearson']:.4f}" if "pearson" in r else "N/A"
         spear = f"{r['spearman']:.4f}" if "spearman" in r else "N/A"
-        print(f"  {r['method']:<25s} {r['auroc']:>8.4f} {r['auprc']:>8.4f} "
-              f"{pear:>8s} {spear:>8s}")
+        print(
+            f"  {r['method']:<25s} {r['auroc']:>8.4f} {r['auprc']:>8.4f} "
+            f"{pear:>8s} {spear:>8s}"
+        )
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main():
     parser = argparse.ArgumentParser(
-        description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--device", default="cpu",
-                        choices=["cpu", "cuda", "mlx", "auto"])
-    parser.add_argument("--params", default="both",
-                        choices=["l10k6", "l11k7", "both"],
-                        help="Parameter set to train (default: both)")
-    parser.add_argument("--n-negsets", type=int, default=5,
-                        help="Number of negative sets (default: 5)")
-    parser.add_argument("--replicate-published", action="store_true",
-                        help="Compare against Lee 2015 published scores "
-                             "(downloads hg19, ~900 MB)")
-    parser.add_argument("--force-train", action="store_true",
-                        help="Retrain even if cached models exist")
-    parser.add_argument("--output", default=None,
-                        help="Save results to TSV file")
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--device", default="cpu", choices=["cpu", "cuda", "mlx", "auto"]
+    )
+    parser.add_argument(
+        "--params",
+        default="both",
+        choices=["l10k6", "l11k7", "both"],
+        help="Parameter set to train (default: both)",
+    )
+    parser.add_argument(
+        "--n-negsets", type=int, default=5, help="Number of negative sets (default: 5)"
+    )
+    parser.add_argument(
+        "--replicate-published",
+        action="store_true",
+        help="Compare against Lee 2015 published scores (downloads hg19, ~900 MB)",
+    )
+    parser.add_argument(
+        "--force-train", action="store_true", help="Retrain even if cached models exist"
+    )
+    parser.add_argument("--output", default=None, help="Save results to TSV file")
     args = parser.parse_args()
 
     if args.device == "auto":
         from gkmsvm.backend import HAS_CUPY, HAS_MLX
+
         if HAS_CUPY:
             args.device = "cuda"
         elif HAS_MLX:
@@ -565,11 +615,12 @@ def main():
         print("Published DeltaSVM Replication (Lee et al. 2015)")
         print("=" * 70)
         pub_variants = load_published_variants(
-            DATA_DIR / "dsqtl_lee2015.tsv", DATA_DIR / "hg19.fa")
-        pub_effects = load_effect_sizes_by_snp(
-            DATA_DIR / "GSE31388_dsQtlTable.txt.gz")
-        print(f"  {len(pub_variants['label'])} variants, "
-              f"{len(pub_effects)} effect sizes")
+            DATA_DIR / "dsqtl_lee2015.tsv", DATA_DIR / "hg19.fa"
+        )
+        pub_effects = load_effect_sizes_by_snp(DATA_DIR / "GSE31388_dsQtlTable.txt.gz")
+        print(
+            f"  {len(pub_variants['label'])} variants, {len(pub_effects)} effect sizes"
+        )
         replicate_published(pub_variants, pub_effects, args.device)
 
     # --- Train and evaluate ---
@@ -577,47 +628,45 @@ def main():
     pos_seqs, neg_sets = load_training_data(n_negsets=args.n_negsets)
     X_ref, X_alt, labels, effect_sizes = load_test_variants()
 
-    param_keys = (["l10k6", "l11k7"] if args.params == "both"
-                  else [args.params])
+    param_keys = ["l10k6", "l11k7"] if args.params == "both" else [args.params]
 
     all_results = []
 
     for pk in param_keys:
         params = PARAM_SETS[pk]
         print(f"\n{'=' * 70}")
-        print(f"Training: l={params['l']} k={params['k']} d={params['d']} "
-              f"({args.n_negsets} neg sets)")
+        print(
+            f"Training: l={params['l']} k={params['k']} d={params['d']} "
+            f"({args.n_negsets} neg sets)"
+        )
         print(f"{'=' * 70}")
 
         models, avg_dsvm = train_models(
-            pos_seqs, neg_sets, params, args.device,
-            pk=pk, force_train=args.force_train)
+            pos_seqs, neg_sets, params, args.device, pk=pk, force_train=args.force_train
+        )
 
         results = []
 
         print("\nScoring with deltaSVM (averaged weights)...")
         dsvm_scores = score_deltasvm(avg_dsvm, X_ref, X_alt)
-        results.append(evaluate(dsvm_scores, labels, effect_sizes,
-                                f"deltaSVM ({pk})"))
+        results.append(evaluate(dsvm_scores, labels, effect_sizes, f"deltaSVM ({pk})"))
 
         print("\nScoring with kernel VEP (model 1)...")
-        kernel_scores = score_kernel(
-            models[0], X_ref, X_alt, args.device)
-        results.append(evaluate(kernel_scores, labels, effect_sizes,
-                                f"kernel ({pk})"))
+        kernel_scores = score_kernel(models[0], X_ref, X_alt, args.device)
+        results.append(evaluate(kernel_scores, labels, effect_sizes, f"kernel ({pk})"))
 
         explain_device = args.device if args.device != "mlx" else "cpu"
         if explain_device != args.device:
             print("\nGkmExplain unsupported on MLX, falling back to CPU...")
-        print(f"\nScoring with GkmExplain VEP (model 1)...")
-        explain_scores = score_gkmexplain(
-            models[0], X_ref, X_alt, explain_device)
-        results.append(evaluate(explain_scores, labels, effect_sizes,
-                                f"gkmexplain ({pk})"))
+        print("\nScoring with GkmExplain VEP (model 1)...")
+        explain_scores = score_gkmexplain(models[0], X_ref, X_alt, explain_device)
+        results.append(
+            evaluate(explain_scores, labels, effect_sizes, f"gkmexplain ({pk})")
+        )
 
         corr_dk = np.corrcoef(dsvm_scores, kernel_scores)[0, 1]
         corr_de = np.corrcoef(dsvm_scores, explain_scores)[0, 1]
-        print(f"\n  Score correlations (all variants):")
+        print("\n  Score correlations (all variants):")
         print(f"    deltaSVM vs kernel:     r = {corr_dk:.4f}")
         print(f"    deltaSVM vs gkmexplain: r = {corr_de:.4f}")
 
@@ -632,6 +681,7 @@ def main():
 
     if args.output:
         import pandas as pd
+
         pd.DataFrame(all_results).to_csv(args.output, sep="\t", index=False)
         print(f"\nSaved results to {args.output}")
 
