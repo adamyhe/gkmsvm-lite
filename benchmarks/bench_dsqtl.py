@@ -168,6 +168,9 @@ def load_test_variants():
           f"{(labels == 0).sum()} ctrl), {len(ref_seqs[0])}bp")
 
     effect_sizes = _load_effect_sizes(pos_major)
+    if effect_sizes is not None:
+        effect_sizes = np.concatenate(
+            [effect_sizes, np.full(len(neg_major), np.nan)])
 
     return X_ref, X_alt, labels, effect_sizes
 
