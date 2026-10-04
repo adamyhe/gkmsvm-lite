@@ -533,13 +533,15 @@ class GkmSVM:
         weights = np.zeros(n_lmers, dtype=np.float32)
 
         S = self.num_support_vectors
+        # [B, S] intermediate × 2 (RC) × 2 (norm + accumulation)
+        bytes_per_seq = S * 8 * 4
         if self._on_gpu:
             import cupy as cp
             free, _ = cp.cuda.Device().mem_info
-            chunk = max(256, min(100_000, int(free * 0.4) // (S * 8)))
+            chunk = max(256, min(100_000, int(free * 0.3) // bytes_per_seq))
         else:
             mem_budget = 2 * 1024**3
-            chunk = max(256, min(100_000, mem_budget // (S * 8)))
+            chunk = max(256, min(100_000, mem_budget // bytes_per_seq))
 
         chunks = range(0, n_lmers, chunk)
         if verbose:
