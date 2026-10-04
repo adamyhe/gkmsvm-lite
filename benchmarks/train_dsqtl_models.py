@@ -42,6 +42,25 @@ from sklearn.metrics import average_precision_score, roc_auc_score
 SEQ_DIR = Path(__file__).parent.parent / "examples" / "data" / "gm12878_sequence_sets"
 DATA_DIR = Path(__file__).parent / "data"
 
+SEQ_URL = "https://beerlab.org/deltasvm/downloads/gm12878_sequence_sets.tar.gz"
+
+
+def download_data():
+    """Download Beer lab GM12878 sequences if not present."""
+    if SEQ_DIR.exists():
+        return
+    import tarfile
+    from urllib.request import urlretrieve
+
+    SEQ_DIR.parent.mkdir(parents=True, exist_ok=True)
+    tarball = SEQ_DIR.parent / "gm12878_sequence_sets.tar.gz"
+    if not tarball.exists():
+        print("Downloading Beer lab sequence sets (14 MB)...")
+        urlretrieve(SEQ_URL, tarball)
+    print("Extracting...")
+    with tarfile.open(tarball) as tar:
+        tar.extractall(SEQ_DIR.parent)
+
 
 PARAM_SETS = {
     "l10k6": {"l": 10, "k": 6, "d": 3, "kernel_type": "estimated"},
@@ -273,6 +292,7 @@ def main():
                         help="Directory to save trained models")
     args = parser.parse_args()
 
+    download_data()
     print("Loading data...")
     pos_seqs, neg_sets = load_training_data(n_negsets=args.n_negsets)
     X_ref, X_alt, labels, effect_sizes = load_test_variants()

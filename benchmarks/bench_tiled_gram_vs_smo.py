@@ -37,6 +37,25 @@ DATA = REPO / "examples" / "data" / "gm12878_sequence_sets"
 
 KERNEL_PARAMS = dict(kernel_type="estimated", l=10, k=6, d=3, C=1.0)
 
+SEQ_URL = "https://beerlab.org/deltasvm/downloads/gm12878_sequence_sets.tar.gz"
+
+
+def download_data():
+    """Download Beer lab GM12878 sequences if not present."""
+    if DATA.exists():
+        return
+    import tarfile
+    from urllib.request import urlretrieve
+
+    DATA.parent.mkdir(parents=True, exist_ok=True)
+    tarball = DATA.parent / "gm12878_sequence_sets.tar.gz"
+    if not tarball.exists():
+        print("Downloading Beer lab sequence sets (14 MB)...")
+        urlretrieve(SEQ_URL, tarball)
+    print("Extracting...")
+    with tarfile.open(tarball) as tar:
+        tar.extractall(DATA.parent)
+
 
 def load_sequences():
     from gkmsvm import read_fasta
@@ -117,6 +136,7 @@ def main():
     ram = psutil.virtual_memory()
     print(f"System RAM: {ram.total / 1024**3:.1f} GB total, {ram.available / 1024**3:.1f} GB available")
 
+    download_data()
     print("\nLoading GM12878 dsQTL dataset...")
     pos_train, neg_train = load_sequences()
     pos_test, neg_test = load_test_sequences()
