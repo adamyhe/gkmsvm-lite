@@ -54,7 +54,7 @@ def download_data():
         urlretrieve(SEQ_URL, tarball)
     print("Extracting...")
     with tarfile.open(tarball) as tar:
-        tar.extractall(DATA.parent)
+        tar.extractall(DATA.parent, filter="data")
 
 
 def load_sequences():

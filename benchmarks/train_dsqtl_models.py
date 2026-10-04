@@ -59,7 +59,7 @@ def download_data():
         urlretrieve(SEQ_URL, tarball)
     print("Extracting...")
     with tarfile.open(tarball) as tar:
-        tar.extractall(SEQ_DIR.parent)
+        tar.extractall(SEQ_DIR.parent, filter="data")
 
 
 PARAM_SETS = {
