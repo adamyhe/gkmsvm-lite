@@ -248,14 +248,10 @@ def train_models(pos_seqs, neg_sets, params: dict, device: str,
             save_npz(m, str(cached))
             print(f"  Saved {cached}")
 
-        if device == "cuda":
-            m.cuda()
-
         t0 = time.time()
-        d = m.to_deltasvm(device=device, verbose=True)
+        d = m.to_deltasvm(device="cpu", verbose=True)
         print(f"  DeltaSVM conversion: {time.time() - t0:.1f}s")
 
-        m.cpu()
         models.append(m)
         dsvms.append(d)
 
