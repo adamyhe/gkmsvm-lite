@@ -89,7 +89,7 @@ def train_timed(pos, neg, device, verbose=True):
     return model, t_total
 
 
-def evaluate(model, test_pos, test_neg, device):
+def evaluate(model, test_pos, test_neg, device, batch_size=512):
     from gkmsvm import one_hot_encode
     from gkmsvm.backend import to_cpu
 
@@ -99,7 +99,14 @@ def evaluate(model, test_pos, test_neg, device):
 
     if device in ("cuda", "gpu"):
         model.cuda()
-    scores = to_cpu(model(model._match_device(X_test), verbose=True).flatten())
+
+    N = len(X_test)
+    scores = np.zeros(N, dtype=np.float64)
+    for start in range(0, N, batch_size):
+        end = min(start + batch_size, N)
+        batch = model._match_device(X_test[start:end])
+        scores[start:end] = to_cpu(model(batch, verbose=False).flatten())
+
     model.cpu()
     t_eval = time.time() - t0
 
