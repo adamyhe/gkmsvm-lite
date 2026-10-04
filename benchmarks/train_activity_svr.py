@@ -128,17 +128,19 @@ def load_test_data(h5_path: str, cell_line: str, target_len: int):
     return result
 
 
-def train_svr(seqs, targets, l, k, d, C, epsilon, device, verbose):
+def train_svr(seqs, targets, l, k, d, C, epsilon, device, solver,
+              verbose):
     from gkmsvm.train import train_gkmsvr
 
     print(f"\n  Training gkm-SVR (l={l}, k={k}, d={d}, C={C}, "
-          f"epsilon={epsilon})...")
+          f"epsilon={epsilon}, solver={solver})...")
     t0 = time.perf_counter()
     model = train_gkmsvr(
         seqs, targets,
         l=l, k=k, d=d,
         C=C, epsilon=epsilon,
         kernel_type="estimated",
+        solver=solver,
         device=device,
         verbose=verbose,
     )
@@ -148,7 +150,7 @@ def train_svr(seqs, targets, l, k, d, C, epsilon, device, verbose):
 
 
 def get_or_train_model(cell_line, seqs, targets, l, k, d, C, epsilon,
-                       device, force_train, verbose):
+                       device, solver, force_train, verbose):
     from gkmsvm.serialization import save_npz, load_model
 
     path = _model_path(cell_line, l, k, d, C, epsilon)
@@ -160,7 +162,8 @@ def get_or_train_model(cell_line, seqs, targets, l, k, d, C, epsilon,
             model.cuda()
         return model
 
-    model = train_svr(seqs, targets, l, k, d, C, epsilon, device, verbose)
+    model = train_svr(seqs, targets, l, k, d, C, epsilon, device, solver,
+                      verbose)
 
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     model.cpu()
@@ -242,6 +245,9 @@ def main():
                         help="Crop sequences to this length (default: 300).")
     parser.add_argument("--max-train-seqs", type=int, default=None,
                         help="Subsample training peaks for speed.")
+    parser.add_argument("--solver", default="nystrom",
+                        choices=["auto", "nystrom", "libsvm"],
+                        help="Training solver (default: nystrom).")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--work-dir", default=None,
                         help="DART-Eval data directory (overrides DART_WORK_DIR).")
@@ -282,7 +288,7 @@ def main():
             cell_line, seqs, targets,
             args.l_param, args.k, args.d_param,
             args.C_param, args.epsilon,
-            args.device, args.force_train, args.verbose)
+            args.device, args.solver, args.force_train, args.verbose)
 
         del seqs, targets
         import gc; gc.collect()

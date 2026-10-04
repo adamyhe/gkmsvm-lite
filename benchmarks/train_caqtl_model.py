@@ -1,23 +1,18 @@
 """Train a gkm-SVM on GM12878 ATAC peaks and evaluate on African caQTLs.
 
-Uses DART-Eval Task 4 training data (GM12878 IDR peaks vs nonpeaks) to train
-a gkm-SVM, then evaluates VEP on Task 5 African caQTLs. This tests whether
-a matched chromatin model can predict causal QTL variants.
-
-The DART-Eval Task 4 H5 contains ~51K IDR peaks and ~95K nonpeaks for GM12878
-training. We subsample to balanced pos/neg sets for SVM training (gkm-SVMs
-are trained on balanced data by convention), then score the ~85K filtered
-caQTL variants with kernel VEP.
+Trains on Beer lab GM12878 DNase-seq peaks (same training data as the
+pretrained SVC models in bench_dsqtl.py), then evaluates VEP on DART-Eval
+Task 5 African caQTLs. Only Task 5 data is downloaded from Synapse.
 
 Data:
-  - Task 4 H5: benchmarks/data/dart-eval/task_4_chromatin_activity/data.h5
+  - Training: examples/data/gm12878_sequence_sets/ (Beer lab, 14 MB)
   - Task 5 H5: benchmarks/data/dart-eval/task_5_variant_effect_prediction/data.h5
   - Task 5 TSV: benchmarks/data/dart-eval/task_5_variant_effect_prediction/
                 input_data/Afr.CaQTLS.tsv
 
 Usage:
   python benchmarks/train_caqtl_model.py --device cuda
-  python benchmarks/train_caqtl_model.py --device cuda --max-train-seqs 10000  # quick
+  python benchmarks/train_caqtl_model.py --device cuda --model benchmarks/models/gm12878_l11k7_neg1.npz
 """
 
 from __future__ import annotations
@@ -34,8 +29,10 @@ import pandas as pd
 from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import average_precision_score, roc_auc_score
 
-DART_WORK_DIR = os.environ.get("DART_WORK_DIR", "benchmarks/data/dart-eval")
-CROP = 557
+REPO = Path(__file__).resolve().parent.parent
+SEQ_DIR = REPO / "examples" / "data" / "gm12878_sequence_sets"
+SEQ_URL = "https://beerlab.org/deltasvm/downloads/gm12878_sequence_sets.tar.gz"
+
 DART_SEQ_LEN = 2114
 MODEL_DIR = Path(__file__).parent / "models"
 
@@ -53,50 +50,41 @@ def _center_crop(seqs: np.ndarray, target_len: int) -> np.ndarray:
     return seqs[:, :, start:start + target_len]
 
 
-def load_training_data(max_seqs: int | None, target_len: int) -> tuple:
-    """Load GM12878 ATAC IDR peaks + nonpeaks from Task 4 H5."""
-    import h5py
+def download_training_data():
+    """Download Beer lab GM12878 sequences if not present."""
+    if SEQ_DIR.exists():
+        return
+    import tarfile
+    from urllib.request import urlretrieve
 
-    h5_path = os.path.join(DART_WORK_DIR,
-                           "task_4_chromatin_activity/data.h5")
-    if not os.path.exists(h5_path):
-        print(f"Error: {h5_path} not found", file=sys.stderr)
-        sys.exit(1)
+    SEQ_DIR.parent.mkdir(parents=True, exist_ok=True)
+    tarball = SEQ_DIR.parent / "gm12878_sequence_sets.tar.gz"
+    if not tarball.exists():
+        print("Downloading Beer lab sequence sets (14 MB)...")
+        urlretrieve(SEQ_URL, tarball)
+    print("Extracting...")
+    with tarfile.open(tarball) as tar:
+        tar.extractall(SEQ_DIR.parent, filter="data")
 
-    with h5py.File(h5_path, "r") as f:
-        train = f["GM12878"]["train"]
 
-        n_pos = train["idr_peaks"]["seqs"].shape[0]
-        n_neg = train["nonpeaks"]["seqs"].shape[0]
-        print(f"  Available: {n_pos} IDR peaks, {n_neg} nonpeaks")
+def load_training_data():
+    """Load GM12878 pos/neg sequences from Beer lab data."""
+    from gkmsvm import read_fasta
 
-        n_use = min(n_pos, n_neg)
-        if max_seqs:
-            n_use = min(n_use, max_seqs // 2)
-        print(f"  Using: {n_use} pos + {n_use} neg = {2 * n_use} sequences")
+    pos_seqs = [seq for _, seq in read_fasta(
+        str(SEQ_DIR / "gm12878_shared.fa"))]
+    neg_seqs = [seq for _, seq in read_fasta(
+        str(SEQ_DIR / "nullseqs_gm12878_shared.1.1.fa"))]
 
-        rng = np.random.default_rng(42)
-        pos_idx = np.sort(rng.choice(n_pos, n_use, replace=False))
-        neg_idx = np.sort(rng.choice(n_neg, n_use, replace=False))
-
-        print(f"  Loading positive sequences...")
-        pos_seqs = _h5_to_channels_first(train["idr_peaks"]["seqs"][pos_idx])
-        print(f"  Loading negative sequences...")
-        neg_seqs = _h5_to_channels_first(train["nonpeaks"]["seqs"][neg_idx])
-
-    pos_seqs = _center_crop(pos_seqs, target_len)
-    neg_seqs = _center_crop(neg_seqs, target_len)
-    print(f"  Center-cropped {DART_SEQ_LEN} bp → {target_len} bp")
-
+    print(f"  Training: {len(pos_seqs)} pos + {len(neg_seqs)} neg, "
+          f"{len(pos_seqs[0])}bp")
     return pos_seqs, neg_seqs
 
 
 def train_model(pos_seqs, neg_seqs, l, k, d, C, device, solver="auto"):
-    """Train a gkm-SVM model."""
     from gkmsvm.train import train_gkmsvm
 
     print(f"\n  Training gkm-SVM (l={l}, k={k}, d={d}, C={C})...")
-    print(f"  Training set: {len(pos_seqs)} pos + {len(neg_seqs)} neg")
 
     t0 = time.perf_counter()
     model = train_gkmsvm(
@@ -113,15 +101,15 @@ def train_model(pos_seqs, neg_seqs, l, k, d, C, device, solver="auto"):
     return model
 
 
-def load_caqtl_data(sv_len: int):
+def load_caqtl_data(work_dir: str, sv_len: int):
     """Load caQTL variants, pre-filtered to IsUsed & in_peaks."""
     import h5py
 
     tsv_path = os.path.join(
-        DART_WORK_DIR,
+        work_dir,
         "task_5_variant_effect_prediction/input_data/Afr.CaQTLS.tsv")
     h5_path = os.path.join(
-        DART_WORK_DIR,
+        work_dir,
         "task_5_variant_effect_prediction/data.h5")
 
     if not os.path.exists(tsv_path) or not os.path.exists(h5_path):
@@ -149,7 +137,6 @@ def load_caqtl_data(sv_len: int):
 
 
 def score_vep(model, a1_seqs, a2_seqs, batch_size, device, verbose=True):
-    """Compute VEP scores: score(alt) - score(ref)."""
     from gkmsvm.backend import to_cpu
 
     N = a1_seqs.shape[0]
@@ -173,7 +160,6 @@ def score_vep(model, a1_seqs, a2_seqs, batch_size, device, verbose=True):
 
 
 def evaluate_caqtl(df, scores):
-    """Compute DART-Eval caQTL metrics."""
     sig = df[df["label"] == 1]
     ctrl = df[df["label"] == 0]
     n_sig = len(sig)
@@ -218,32 +204,21 @@ def main():
     parser.add_argument("--k", type=int, default=7)
     parser.add_argument("--d", type=int, default=3, dest="d_param")
     parser.add_argument("--C", type=float, default=1.0, dest="C_param")
-    parser.add_argument("--max-train-seqs", type=int, default=None,
-                        help="Max training sequences (subsample for speed).")
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--solver", default="auto",
-                        help="Training solver (default: auto).")
+    parser.add_argument("--solver", default="nystrom",
+                        choices=["auto", "nystrom", "libsvm"],
+                        help="Training solver (default: nystrom).")
     parser.add_argument("--output", default=None,
                         help="Save results to TSV file.")
+    parser.add_argument("--work-dir", default=None,
+                        help="DART-Eval data directory (overrides DART_WORK_DIR).")
     parser.add_argument("--force-train", action="store_true",
                         help="Retrain even if cached model exists.")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
-    global DART_WORK_DIR
-    if os.environ.get("DART_WORK_DIR"):
-        DART_WORK_DIR = os.environ["DART_WORK_DIR"]
-    if not DART_WORK_DIR:
-        DART_WORK_DIR = str(Path(__file__).parent / "data" / "dart-eval")
-
-    # Auto-download from Synapse if H5 files are missing
-    h5_task4 = os.path.join(DART_WORK_DIR,
-                            "task_4_chromatin_activity/data.h5")
-    h5_task5 = os.path.join(DART_WORK_DIR,
-                            "task_5_variant_effect_prediction/data.h5")
-    if not os.path.exists(h5_task4) or not os.path.exists(h5_task5):
-        from dart_download import download_dart_data
-        download_dart_data(DART_WORK_DIR, tasks=("task_4", "task_5"))
+    work_dir = (args.work_dir or os.environ.get("DART_WORK_DIR", "")
+                or str(Path(__file__).parent / "data" / "dart-eval"))
 
     print("=" * 60)
     print("caQTL Benchmark: Train GM12878 ATAC → Score African caQTLs")
@@ -268,10 +243,9 @@ def main():
             if args.device == "cuda":
                 model.cuda()
         else:
-            sv_len = 300
+            download_training_data()
             print(f"\n--- Loading training data ---")
-            pos_seqs, neg_seqs = load_training_data(args.max_train_seqs,
-                                                    sv_len)
+            pos_seqs, neg_seqs = load_training_data()
             model = train_model(pos_seqs, neg_seqs,
                                 l=args.l_param, k=args.k, d=args.d_param,
                                 C=args.C_param, device=args.device,
@@ -291,8 +265,15 @@ def main():
           f"L={model.kernel.l}, k={model.kernel.k}, "
           f"SV length: {sv_len} bp")
 
+    # Download Task 5 only when needed for evaluation
+    h5_task5 = os.path.join(work_dir,
+                            "task_5_variant_effect_prediction/data.h5")
+    if not os.path.exists(h5_task5):
+        from dart_download import download_dart_data
+        download_dart_data(work_dir, tasks=("task_5",))
+
     print(f"\n--- Loading caQTL data ---")
-    df, a1_seqs, a2_seqs = load_caqtl_data(sv_len)
+    df, a1_seqs, a2_seqs = load_caqtl_data(work_dir, sv_len)
 
     print(f"\n--- Scoring caQTL variants (kernel VEP) ---")
     t0 = time.perf_counter()

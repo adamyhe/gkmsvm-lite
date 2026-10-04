@@ -180,6 +180,8 @@ def train_gkmsvr(
     M: int | None = None,
     H: float | None = None,
     include_rc: bool = True,
+    solver: str = "auto",
+    n_components: int | None = None,
     sv_chunk_size: int | None = None,
     gram_chunk_size: int = 1000,
     device: str = "auto",
@@ -203,6 +205,10 @@ def train_gkmsvr(
         M: Center-weight window size (for -t 4, -t 5).
         H: Center-weight decay (for -t 4, -t 5).
         include_rc: Include reverse complement in kernel.
+        solver: ``"auto"`` (precomputed Gram if it fits), ``"nystrom"``
+            (Nyström low-rank approximation — faster but approximate),
+            or ``"libsvm"`` (precomputed Gram + sklearn solver).
+        n_components: Number of landmark points for Nyström approximation.
         sv_chunk_size: Chunk size for inference on the returned model.
         gram_chunk_size: Tile size for Gram matrix computation.
         device: ``"auto"`` (MLX if available), ``"mlx"``, or ``"cpu"``.
@@ -224,9 +230,17 @@ def train_gkmsvr(
         kernel_type, l, k, d, gamma, M, H, include_rc,
     )
 
+    if solver == "nystrom":
+        return _fit_nystrom(
+            kernel, X, y, C, kernel_type, kernel_params,
+            epsilon=epsilon, n_components=n_components,
+            gram_chunk_size=gram_chunk_size,
+            sv_chunk_size=sv_chunk_size, verbose=verbose,
+        )
+
     xp = get_array_module(X)
     N = X.shape[0]
-    if xp is not np and not _gram_fits_in_memory(N, xp) and _gram_fits_on_cpu(N):
+    if solver == "auto" and xp is not np and not _gram_fits_in_memory(N, xp) and _gram_fits_on_cpu(N):
         if verbose:
             gram_gb = N * N * 8 / 1024**3
             print(
@@ -409,7 +423,8 @@ def _fit_sklearn(gram, y, C, *, epsilon=None, verbose=False):
 
 def _fit_nystrom(
     kernel, X, y, C, kernel_type, kernel_params, *,
-    n_components=None, gram_chunk_size, sv_chunk_size, verbose=False,
+    epsilon=None, n_components=None, gram_chunk_size, sv_chunk_size,
+    verbose=False,
 ) -> GkmSVM:
     """Train SVM using Nyström low-rank kernel approximation.
 
@@ -486,7 +501,7 @@ def _fit_nystrom(
         gram_approx[i:end] = features[i:end] @ features.T
     del features
 
-    clf = _fit_sklearn(gram_approx, y, C, verbose=verbose)
+    clf = _fit_sklearn(gram_approx, y, C, epsilon=epsilon, verbose=verbose)
 
     sv_indices = clf.support_
     if is_mlx(X):
