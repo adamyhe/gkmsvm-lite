@@ -41,6 +41,7 @@ from sklearn.metrics import average_precision_score, roc_auc_score
 
 SEQ_DIR = Path(__file__).parent.parent / "examples" / "data" / "gm12878_sequence_sets"
 DATA_DIR = Path(__file__).parent / "data"
+MODEL_DIR = Path(__file__).parent / "models"
 
 SEQ_URL = "https://beerlab.org/deltasvm/downloads/gm12878_sequence_sets.tar.gz"
 
@@ -142,25 +143,42 @@ def _load_effect_sizes(pos_major: list[tuple[str, str]]) -> np.ndarray | None:
     return effects
 
 
-def train_models(pos_seqs, neg_sets, params: dict, device: str, C: float = 1.0):
+def _model_path(pk: str, neg_idx: int) -> Path:
+    return MODEL_DIR / f"gm12878_{pk}_neg{neg_idx}.npz"
+
+
+def train_models(pos_seqs, neg_sets, params: dict, device: str,
+                 pk: str, force_train: bool = False, C: float = 1.0):
     from gkmsvm import train_gkmsvm
+    from gkmsvm.serialization import save_npz, load_model
     from gkmsvm.backend import to_cpu
 
     models = []
     dsvms = []
 
     for i, neg_seqs in enumerate(neg_sets):
-        print(f"\n── Model {i+1}/{len(neg_sets)} "
-              f"(l={params['l']} k={params['k']}) ──")
-        t0 = time.time()
-        m = train_gkmsvm(
-            pos_seqs, neg_seqs,
-            kernel_type=params["kernel_type"],
-            l=params["l"], k=params["k"], d=params["d"],
-            C=C, solver="auto",
-            device=device, verbose=True,
-        )
-        print(f"  {m.num_support_vectors} SVs, {time.time() - t0:.1f}s")
+        cached = _model_path(pk, i + 1)
+
+        if cached.exists() and not force_train:
+            print(f"\n── Model {i+1}/{len(neg_sets)} "
+                  f"(l={params['l']} k={params['k']}) ── [cached]")
+            m = load_model(str(cached))
+        else:
+            print(f"\n── Model {i+1}/{len(neg_sets)} "
+                  f"(l={params['l']} k={params['k']}) ──")
+            t0 = time.time()
+            m = train_gkmsvm(
+                pos_seqs, neg_seqs,
+                kernel_type=params["kernel_type"],
+                l=params["l"], k=params["k"], d=params["d"],
+                C=C, solver="auto",
+                device=device, verbose=True,
+            )
+            print(f"  {m.num_support_vectors} SVs, {time.time() - t0:.1f}s")
+            MODEL_DIR.mkdir(parents=True, exist_ok=True)
+            m.cpu()
+            save_npz(m, str(cached))
+            print(f"  Saved {cached}")
 
         if device == "cuda":
             m.cuda()
@@ -288,8 +306,8 @@ def main():
                         help="Number of negative sets to train on (default: 5)")
     parser.add_argument("--output", default=None,
                         help="Save results to TSV file")
-    parser.add_argument("--save-models", default=None,
-                        help="Directory to save trained models")
+    parser.add_argument("--force-train", action="store_true",
+                        help="Retrain even if cached models exist")
     args = parser.parse_args()
 
     download_data()
@@ -310,16 +328,8 @@ def main():
         print(f"{'=' * 70}")
 
         models, avg_dsvm = train_models(
-            pos_seqs, neg_sets, params, args.device)
-
-        if args.save_models:
-            from gkmsvm.serialization import save_model
-            save_dir = Path(args.save_models)
-            save_dir.mkdir(parents=True, exist_ok=True)
-            for i, m in enumerate(models):
-                path = save_dir / f"gm12878_{pk}_neg{i+1}.npz"
-                save_model(m, str(path))
-                print(f"  Saved {path}")
+            pos_seqs, neg_sets, params, args.device,
+            pk=pk, force_train=args.force_train)
 
         results = []
 

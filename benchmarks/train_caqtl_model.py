@@ -37,6 +37,7 @@ from sklearn.metrics import average_precision_score, roc_auc_score
 DART_WORK_DIR = os.environ.get("DART_WORK_DIR", "benchmarks/data/dart-eval")
 CROP = 557
 DART_SEQ_LEN = 2114
+MODEL_DIR = Path(__file__).parent / "models"
 
 
 def _h5_to_channels_first(seqs_h5: np.ndarray) -> np.ndarray:
@@ -224,8 +225,8 @@ def main():
                         help="Training solver (default: auto).")
     parser.add_argument("--output", default=None,
                         help="Save results to TSV file.")
-    parser.add_argument("--save-model", default=None,
-                        help="Save trained model to file.")
+    parser.add_argument("--force-train", action="store_true",
+                        help="Retrain even if cached model exists.")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -244,21 +245,35 @@ def main():
         if args.device == "cuda":
             model.cuda()
     else:
-        sv_len = 300
-        print(f"\n--- Loading training data ---")
-        pos_seqs, neg_seqs = load_training_data(args.max_train_seqs, sv_len)
-        model = train_model(pos_seqs, neg_seqs,
-                            l=args.l_param, k=args.k, d=args.d_param,
-                            C=args.C_param, device=args.device,
-                            solver=args.solver)
-        del pos_seqs, neg_seqs
-        gc.collect()
+        from gkmsvm.serialization import save_npz, load_model
 
-        if args.save_model:
-            from gkmsvm.serialization import save_model
-            os.makedirs(os.path.dirname(args.save_model) or ".", exist_ok=True)
-            save_model(model, args.save_model)
-            print(f"  Saved model to {args.save_model}")
+        cached = (MODEL_DIR /
+                  f"caqtl_svc_l{args.l_param}k{args.k}d{args.d_param}"
+                  f"_C{args.C_param}.npz")
+
+        if cached.exists() and not args.force_train:
+            print(f"\nLoading cached model: {cached}")
+            model = load_model(str(cached))
+            if args.device == "cuda":
+                model.cuda()
+        else:
+            sv_len = 300
+            print(f"\n--- Loading training data ---")
+            pos_seqs, neg_seqs = load_training_data(args.max_train_seqs,
+                                                    sv_len)
+            model = train_model(pos_seqs, neg_seqs,
+                                l=args.l_param, k=args.k, d=args.d_param,
+                                C=args.C_param, device=args.device,
+                                solver=args.solver)
+            del pos_seqs, neg_seqs
+            gc.collect()
+
+            MODEL_DIR.mkdir(parents=True, exist_ok=True)
+            model.cpu()
+            save_npz(model, str(cached))
+            print(f"  Saved model to {cached}")
+            if args.device == "cuda":
+                model.cuda()
 
     sv_len = model.support_sequences.shape[2]
     print(f"\n  Model: {model.num_support_vectors} SVs, "
