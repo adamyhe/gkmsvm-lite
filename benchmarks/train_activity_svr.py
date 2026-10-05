@@ -249,7 +249,7 @@ def main():
     parser.add_argument("--solver", default="auto",
                         choices=["auto", "nystrom", "libsvm"],
                         help="Training solver (default: auto).")
-    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--work-dir", default=None,
                         help="DART-Eval data directory (overrides DART_WORK_DIR).")
     parser.add_argument("--force-train", action="store_true",

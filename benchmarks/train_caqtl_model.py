@@ -204,7 +204,7 @@ def main():
     parser.add_argument("--k", type=int, default=7)
     parser.add_argument("--d", type=int, default=3, dest="d_param")
     parser.add_argument("--C", type=float, default=1.0, dest="C_param")
-    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--solver", default="auto",
                         choices=["auto", "nystrom", "libsvm"],
                         help="Training solver (default: auto).")

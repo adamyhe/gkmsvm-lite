@@ -645,8 +645,8 @@ def main():
     parser.add_argument("--device", default="cpu",
                         choices=["cpu", "cuda"],
                         help="Compute device (default: cpu).")
-    parser.add_argument("--batch-size", type=int, default=32,
-                        help="Batch size (default: 32).")
+    parser.add_argument("--batch-size", type=int, default=256,
+                        help="Batch size (default: 256).")
     parser.add_argument("--sv-chunk-size", default=None,
                         type=lambda s: None if s.lower() == 'none' else int(s),
                         help="SV chunk size (default: None = no chunking).")
