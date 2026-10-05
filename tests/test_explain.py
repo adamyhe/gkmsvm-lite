@@ -179,7 +179,8 @@ class TestGkmExplainChunked:
         x = one_hot_encode(_make_seqs(1, 20, seed=19)[0])[np.newaxis]
 
         full = gkmexplain(model, x, mode="importance")
-        chunked = gkmexplain(model, x, mode="importance", sv_chunk_size=3)
+        model.sv_chunk_size = 3
+        chunked = gkmexplain(model, x, mode="importance")
         np.testing.assert_allclose(full, chunked, atol=1e-8)
 
     def test_chunked_hypothetical(self):
@@ -190,7 +191,8 @@ class TestGkmExplainChunked:
         x = one_hot_encode(_make_seqs(1, 20, seed=21)[0])[np.newaxis]
 
         full = gkmexplain(model, x, mode="hypothetical")
-        chunked = gkmexplain(model, x, mode="hypothetical", sv_chunk_size=4)
+        model.sv_chunk_size = 4
+        chunked = gkmexplain(model, x, mode="hypothetical")
         np.testing.assert_allclose(full, chunked, atol=1e-8)
 
     def test_chunked_perturbation(self):
@@ -201,7 +203,8 @@ class TestGkmExplainChunked:
         x = one_hot_encode(_make_seqs(1, 20, seed=21)[0])[np.newaxis]
 
         full = gkmexplain(model, x, mode="perturbation")
-        chunked = gkmexplain(model, x, mode="perturbation", sv_chunk_size=4)
+        model.sv_chunk_size = 4
+        chunked = gkmexplain(model, x, mode="perturbation")
         np.testing.assert_allclose(full, chunked, atol=1e-8)
 
 
@@ -311,7 +314,8 @@ class TestCompletenessAxiom:
         x = np.stack([one_hot_encode(s) for s in _make_seqs(2, 20, seed=203)])
 
         attr_full = gkmexplain(model, x, mode="importance")
-        attr_chunked = gkmexplain(model, x, mode="importance", sv_chunk_size=4)
+        model.sv_chunk_size = 4
+        attr_chunked = gkmexplain(model, x, mode="importance")
 
         scores = model(x).squeeze(-1)
         expected = scores - model.bias

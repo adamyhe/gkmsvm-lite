@@ -102,23 +102,7 @@ def _center_crop(seqs: np.ndarray, target_len: int) -> np.ndarray:
 def _score_sequences(model, seqs_ohe: np.ndarray, batch_size: int,
                      device: str, verbose: bool = True) -> np.ndarray:
     """Score [N, 4, L] one-hot sequences, return [N] scores."""
-    from gkmsvm.backend import to_cpu
-    N = seqs_ohe.shape[0]
-    scores = np.zeros(N, dtype=np.float64)
-
-    chunks = range(0, N, batch_size)
-    if verbose:
-        from tqdm import tqdm
-        chunks = tqdm(chunks, desc="scoring",
-                      total=(N + batch_size - 1) // batch_size)
-
-    for start in chunks:
-        end = min(start + batch_size, N)
-        xb = model._match_device(seqs_ohe[start:end])
-        sb = model(xb, verbose=False).flatten()
-        scores[start:end] = to_cpu(sb)
-
-    return scores
+    return model(seqs_ohe, batch_size=batch_size, verbose=verbose).flatten()
 
 
 def _h5_to_channels_first(seqs_h5: np.ndarray) -> np.ndarray:
@@ -375,32 +359,16 @@ def _vep_gkmexplain(model, a1_seqs: np.ndarray, a2_seqs: np.ndarray,
                     sv_len: int, batch_size: int, device: str,
                     verbose: bool) -> np.ndarray:
     """VEP via model.score_variants(method='gkmexplain')."""
-    from gkmsvm.backend import to_cpu
-
     a1_crop = _center_crop(a1_seqs, sv_len)
     a2_crop = _center_crop(a2_seqs, sv_len)
 
-    N = a1_crop.shape[0]
     print(f"  [gkmexplain] Center-cropped {a1_seqs.shape[2]} bp → {sv_len} bp")
     print(f"  [gkmexplain] Computing via score_variants(method='gkmexplain')...")
 
-    logfc = np.zeros(N, dtype=np.float64)
-    chunks = range(0, N, batch_size)
-    if verbose:
-        from tqdm import tqdm
-        chunks = tqdm(chunks, desc="gkmexplain VEP",
-                      total=(N + batch_size - 1) // batch_size)
-
-    for start in chunks:
-        end = min(start + batch_size, N)
-        ref_b = model._match_device(a1_crop[start:end])
-        alt_b = model._match_device(a2_crop[start:end])
-        scores = model.score_variants(ref_b, alt_b, method="gkmexplain",
-                                      batch_size=end - start,
-                                      verbose=False)
-        logfc[start:end] = to_cpu(scores).flatten()
-
-    return logfc
+    return model.score_variants(
+        a1_crop, a2_crop, method="gkmexplain",
+        batch_size=batch_size, verbose=verbose,
+    ).flatten()
 
 
 def _run_vep_task(model, df: pd.DataFrame, a1_seqs: np.ndarray,

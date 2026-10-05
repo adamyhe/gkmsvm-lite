@@ -116,24 +116,6 @@ def _to_numpy(arr, device):
     return np.asarray(arr)
 
 
-def _gkmexplain_batched(model, x, mode, batch_size=50, device="cpu", verbose=False):
-    """Run GkmExplain in batches to avoid GPU OOM."""
-    from gkmsvm.explain import gkmexplain
-    results = []
-    N = len(x)
-    chunks = range(0, N, batch_size)
-    if verbose:
-        from tqdm import tqdm
-        chunks = tqdm(chunks, desc="GkmExplain",
-                      total=(N + batch_size - 1) // batch_size)
-    for i in chunks:
-        batch_np = x[i:i + batch_size]
-        batch = _to_device(batch_np, device)
-        exp = gkmexplain(model, batch, mode=mode, verbose=False)
-        results.append(_to_numpy(exp, device))
-    return np.concatenate(results)
-
-
 def main():
     parser = argparse.ArgumentParser(description="Nanog H1-ESC replication")
     parser.add_argument(
@@ -269,13 +251,13 @@ def main():
     else:
         exp_model = ref_model
 
-    # Mode 1: hypothetical contribution scores (mode 0 = mode 1 × OHE)
+    from gkmsvm.explain import gkmexplain
+
     t0 = time.perf_counter()
-    hyp_scores = _gkmexplain_batched(
-        exp_model, pos_x_np, mode=1,
-        batch_size=args.batch_size, device=explain_device,
-        verbose=args.verbose,
-    )
+    hyp_scores = _to_numpy(gkmexplain(
+        exp_model, pos_x_np, mode="hypothetical",
+        batch_size=args.batch_size, verbose=args.verbose,
+    ), explain_device)
     t_explain = time.perf_counter() - t0
     print(f"  GkmExplain: {len(pos_x_np)} seqs in {t_explain:.1f}s "
           f"({len(pos_x_np)/t_explain:.1f} seq/s)")

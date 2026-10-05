@@ -497,7 +497,6 @@ def gkmexplain(
     x: np.ndarray,
     *,
     mode: int | str = "importance",
-    sv_chunk_size: int | None = None,
     batch_size: int = 50,
     verbose: bool = False,
 ) -> np.ndarray:
@@ -518,9 +517,8 @@ def gkmexplain(
                 each possible single-base mutation (lsgkm C mode 3,
                 ``perturbation_eff=1``).  Use for variant effect
                 prediction via ``score_variants(method="gkmexplain")``.
-        sv_chunk_size: Chunk size for SV processing.
-        batch_size: Number of input sequences to process at a time.
-        verbose: Show tqdm progress bar.
+        batch_size: Process inputs in batches of this size (default 50).
+        verbose: Show tqdm progress bar over input batches.
 
     Returns:
         [B, 4, L] attribution scores.
@@ -534,7 +532,7 @@ def gkmexplain(
 
     if resolved == "importance":
         hyp = gkmexplain(
-            model, x, mode="hypothetical", sv_chunk_size=sv_chunk_size,
+            model, x, mode="hypothetical",
             batch_size=batch_size, verbose=verbose,
         )
         return hyp * model._match_device(x)
@@ -561,8 +559,7 @@ def gkmexplain(
         return to_mlx(
             gkmexplain(
                 cpu_model, to_cpu(x), mode=resolved,
-                sv_chunk_size=sv_chunk_size, batch_size=batch_size,
-                verbose=verbose,
+                batch_size=batch_size, verbose=verbose,
             )
         )
 
@@ -572,7 +569,6 @@ def gkmexplain(
     l = kernel.l
     d = getattr(kernel, "d", l)
     W = seqlen - l + 1
-    chunk = sv_chunk_size if sv_chunk_size is not None else model.sv_chunk_size
 
     sv = model.support_sequences
     S = sv.shape[0]
@@ -592,39 +588,35 @@ def gkmexplain(
     table_a = xp.asarray(table_a_cpu)
     table_b = xp.asarray(table_b_cpu)
 
-    diag_chunk = chunk if chunk is not None else 1000
-    if do_norm:
-        diag_sv = kernel._raw_diagonal(sv, chunk_size=diag_chunk)
-
-    cs = chunk if chunk is not None else min(S, 2000)
+    cs = model.sv_chunk_size if model.sv_chunk_size is not None else min(S, 2000)
     use_packed = min_matches > 0
     use_gpu = xp is not np
 
-    result = xp.zeros((B, 4, seqlen), dtype=np.float64)
+    if do_norm:
+        diag_sv = kernel._raw_diagonal(sv, chunk_size=cs or 1000)
 
-    n_sv_chunks = (S + cs - 1) // cs
-    n_seq_batches = (B + batch_size - 1) // batch_size
-    total_iters = n_sv_chunks * n_seq_batches
-    pbar = None
-    if verbose:
-        from tqdm import tqdm
-        pbar = tqdm(total=total_iters, desc="GkmExplain")
-
+    # --- Pre-compute SV chunk data (packed uint32, small) ---
+    sv_chunks = []
     for sv_start in range(0, S, cs):
         sv_end = min(sv_start + cs, S)
         sv_c = sv[sv_start:sv_end]
         S_c = sv_end - sv_start
         coefs_c = coefs[sv_start:sv_end]
 
-        wy = kernel.flat_windows(sv_c)
-        wy_4l = wy.reshape(S_c, -1, 4, l)
-        Wy = wy_4l.shape[1]
-
-        if do_rc:
-            wy_rc = kernel.flat_windows(reverse_complement(sv_c))
-            wy_rc_4l = wy_rc.reshape(S_c, -1, 4, l)
+        chunk_info = {
+            "sv_start": sv_start, "sv_end": sv_end, "S_c": S_c,
+            "coefs_c": coefs_c,
+        }
 
         if use_packed:
+            wy = kernel.flat_windows(sv_c)
+            wy_4l = wy.reshape(S_c, -1, 4, l)
+            Wy = wy_4l.shape[1]
+
+            if do_rc:
+                wy_rc = kernel.flat_windows(reverse_complement(sv_c))
+                wy_rc_4l = wy_rc.reshape(S_c, -1, 4, l)
+
             if use_gpu:
                 by = xp.argmax(wy_4l, axis=2).astype(xp.int8)
                 packed_y = _pack_windows_uint32(by, xp)
@@ -634,8 +626,8 @@ def gkmexplain(
                         [packed_y, _pack_windows_uint32(by_rc, xp)],
                         axis=1,
                     )
-                packed_y_t = xp.ascontiguousarray(packed_y.T)
-                Wy_total = packed_y.shape[1]
+                chunk_info["packed_y_t"] = xp.ascontiguousarray(packed_y.T)
+                chunk_info["Wy_total"] = packed_y.shape[1]
             else:
                 by = np.argmax(wy_4l, axis=2).astype(np.int8)
                 packed_y = _pack_windows_cpu(by)
@@ -644,18 +636,50 @@ def gkmexplain(
                     packed_y = np.concatenate(
                         [packed_y, _pack_windows_cpu(by_rc)], axis=1,
                     )
-                Wy_total = packed_y.shape[1]
+                chunk_info["packed_y"] = packed_y
+                chunk_info["Wy_total"] = packed_y.shape[1]
 
-        for b_start in range(0, B, batch_size):
-            b_end = min(b_start + batch_size, B)
-            x_b = x[b_start:b_end]
-            Bb = b_end - b_start
+        sv_chunks.append(chunk_info)
 
-            wx_b = kernel.flat_windows(x_b)
-            wx_4l_b = wx_b.reshape(Bb, W, 4, l)
+    result = xp.zeros((B, 4, seqlen), dtype=np.float64)
+
+    # --- Main loop: input-outer, SV-inner ---
+    seq_iter = range(0, B, batch_size)
+    if verbose:
+        from tqdm import tqdm
+        seq_iter = tqdm(
+            seq_iter, desc="GkmExplain",
+            total=(B + batch_size - 1) // batch_size,
+        )
+
+    for b_start in seq_iter:
+        b_end = min(b_start + batch_size, B)
+        x_b = x[b_start:b_end]
+        Bb = b_end - b_start
+
+        wx_b = kernel.flat_windows(x_b)
+        wx_4l_b = wx_b.reshape(Bb, W, 4, l)
+
+        if do_norm:
+            diag_x_b = kernel._raw_diagonal(x_b)
+
+        if use_packed:
+            if use_gpu:
+                bx = xp.argmax(wx_4l_b, axis=2).astype(xp.int8)
+                packed_x = xp.ascontiguousarray(
+                    _pack_windows_uint32(bx, xp)
+                )
+            else:
+                bx = np.argmax(wx_4l_b, axis=2).astype(np.int8)
+                packed_x = _pack_windows_cpu(bx)
+
+        for ci in sv_chunks:
+            sv_start = ci["sv_start"]
+            sv_end = ci["sv_end"]
+            S_c = ci["S_c"]
+            coefs_c = ci["coefs_c"]
 
             if do_norm:
-                diag_x_b = kernel._raw_diagonal(x_b)
                 norm = xp.clip(
                     xp.sqrt(
                         diag_x_b[:, None]
@@ -664,8 +688,6 @@ def gkmexplain(
                     1e-10,
                     None,
                 )
-
-            if do_norm:
                 eff_coef = coefs_c[None, :] / norm
             else:
                 eff_coef = xp.broadcast_to(
@@ -673,35 +695,32 @@ def gkmexplain(
                 )
 
             if use_packed and use_gpu:
-                bx = xp.argmax(wx_4l_b, axis=2).astype(xp.int8)
-                packed_x = xp.ascontiguousarray(
-                    _pack_windows_uint32(bx, xp)
-                )
                 gpu_fn = (
                     _perturbation_gpu_fused_reduced if is_perturbation
                     else _explain_gpu_fused_reduced
                 )
                 gpu_fn(
-                    packed_x, packed_y_t,
+                    packed_x, ci["packed_y_t"],
                     table_a, table_b,
                     xp.ascontiguousarray(eff_coef),
                     result[b_start:b_end],
-                    Bb, S_c, W, Wy_total,
+                    Bb, S_c, W, ci["Wy_total"],
                     l, min_matches, seqlen, xp,
                 )
             elif use_packed:
-                bx = np.argmax(wx_4l_b, axis=2).astype(np.int8)
-                packed_x = _pack_windows_cpu(bx)
                 cpu_fn = (
                     _fused_perturbation_reduced if is_perturbation
                     else _fused_explain_reduced
                 )
                 result[b_start:b_end] += cpu_fn(
-                    packed_x, packed_y, table_a, table_b,
+                    packed_x, ci["packed_y"], table_a, table_b,
                     np.ascontiguousarray(eff_coef.astype(np.float64)),
-                    l, min_matches, Bb, S_c, W, Wy_total, seqlen,
+                    l, min_matches, Bb, S_c, W, ci["Wy_total"], seqlen,
                 )
             else:
+                sv_c = sv[sv_start:sv_end]
+                wy = kernel.flat_windows(sv_c)
+                wy_4l = wy.reshape(S_c, -1, 4, l)
                 dense_fn = (
                     _explain_windows_dense_perturbation if is_perturbation
                     else _explain_windows_dense
@@ -711,6 +730,8 @@ def gkmexplain(
                     l, Bb, W, seqlen, S_c, xp,
                 )
                 if do_rc:
+                    wy_rc = kernel.flat_windows(reverse_complement(sv_c))
+                    wy_rc_4l = wy_rc.reshape(S_c, -1, 4, l)
                     persv = persv + dense_fn(
                         wx_b, wy_rc_4l, table_a, table_b,
                         l, Bb, W, seqlen, S_c, xp,
@@ -718,11 +739,5 @@ def gkmexplain(
                 if do_norm:
                     persv = persv / norm[:, None, None, :]
                 result[b_start:b_end] += (persv * coefs_c).sum(axis=-1)
-
-            if pbar is not None:
-                pbar.update(1)
-
-    if pbar is not None:
-        pbar.close()
 
     return result.astype(x.dtype)

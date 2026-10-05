@@ -55,20 +55,9 @@ def cmd_predict(args: argparse.Namespace) -> None:
     names = [name for name, seq in records]
     X = _encode_seqs(records)
 
-    batch = args.batch_size
-    all_scores = []
-    chunks = range(0, len(X), batch)
-    if args.verbose and len(X) > batch:
-        from tqdm import tqdm
-        chunks = tqdm(chunks, desc="predict", total=(len(X) + batch - 1) // batch)
-
-    for start in chunks:
-        xb = model._match_device(X[start:start + batch])
-        scores = model(xb, verbose=False).flatten()
-        from gkmsvm.backend import to_cpu
-        all_scores.append(to_cpu(scores))
-
-    scores = np.concatenate(all_scores)
+    scores = model(
+        X, batch_size=args.batch_size, verbose=args.verbose,
+    ).flatten()
 
     out = sys.stdout if args.output is None else open(args.output, "w")
     try:

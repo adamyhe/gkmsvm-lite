@@ -57,20 +57,7 @@ def _center_crop(seqs: np.ndarray, target_len: int) -> np.ndarray:
 
 def _score_batched(model, seqs: np.ndarray, batch_size: int,
                    verbose: bool = True) -> np.ndarray:
-    from gkmsvm.backend import to_cpu
-
-    N = seqs.shape[0]
-    scores = np.zeros(N, dtype=np.float64)
-    chunks = range(0, N, batch_size)
-    if verbose:
-        from tqdm import tqdm
-        chunks = tqdm(chunks, desc="scoring",
-                      total=(N + batch_size - 1) // batch_size)
-    for start in chunks:
-        end = min(start + batch_size, N)
-        xb = model._match_device(seqs[start:end])
-        scores[start:end] = to_cpu(model(xb, verbose=False).flatten())
-    return scores
+    return model(seqs, batch_size=batch_size, verbose=verbose).flatten()
 
 
 def load_train_data(h5_path: str, cell_line: str, target_len: int,

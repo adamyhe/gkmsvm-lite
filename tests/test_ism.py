@@ -145,5 +145,6 @@ class TestISMChunked:
         x = one_hot_encode(_make_seqs(1, 20, seed=16)[0])[np.newaxis]
 
         full = ism(model, x)
-        chunked = ism(model, x, sv_chunk_size=3)
+        model.sv_chunk_size = 3
+        chunked = ism(model, x)
         np.testing.assert_allclose(full, chunked, atol=1e-5)

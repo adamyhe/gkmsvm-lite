@@ -291,7 +291,8 @@ class TestGPUGkmExplain:
         x_gpu = cp.asarray(x)
 
         full = gkmexplain(esttrunc_model, x_gpu, mode=0)
-        chunked = gkmexplain(esttrunc_model, x_gpu, mode=0, sv_chunk_size=3)
+        esttrunc_model.sv_chunk_size = 3
+        chunked = gkmexplain(esttrunc_model, x_gpu, mode=0)
 
         np.testing.assert_allclose(
             cp.asnumpy(full), cp.asnumpy(chunked), atol=1e-8,

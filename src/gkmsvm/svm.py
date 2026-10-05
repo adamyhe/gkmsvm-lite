@@ -334,17 +334,45 @@ class GkmSVM:
                         )
         return self._sv_idx_windows, self._sv_rc_idx_windows
 
-    def __call__(self, x: np.ndarray, *, verbose: bool = False) -> np.ndarray:
+    def __call__(
+        self, x: np.ndarray, *,
+        batch_size: int | None = None,
+        verbose: bool = False,
+    ) -> np.ndarray:
         """Compute SVM decision values.
 
         Args:
             x: [B, 4, L] one-hot encoded DNA sequences.
-            verbose: Show tqdm progress bar over SV chunks.
+            batch_size: Process inputs in batches of this size.  ``None``
+                means process all at once.  When set, ``verbose`` shows
+                progress over input batches instead of SV chunks.
+            verbose: Show tqdm progress bar.
 
         Returns:
             [B, 1] uncalibrated decision values.
         """
+        if batch_size is not None and x.shape[0] > batch_size:
+            chunks = range(0, x.shape[0], batch_size)
+            if verbose:
+                from tqdm import tqdm
+                chunks = tqdm(
+                    chunks, desc="Scoring",
+                    total=(x.shape[0] + batch_size - 1) // batch_size,
+                )
+            parts = []
+            for start in chunks:
+                end = min(start + batch_size, x.shape[0])
+                batch = self._match_device(x[start:end])
+                parts.append(to_cpu(self._score_unbatched(batch)))
+            return np.concatenate(parts, axis=0)
+
         x = self._match_device(x)
+        return self._score_unbatched(x, verbose=verbose)
+
+    def _score_unbatched(
+        self, x: np.ndarray, *, verbose: bool = False,
+    ) -> np.ndarray:
+        """Score a single batch (no input-level chunking)."""
         xp = get_array_module(x)
         S = self.num_support_vectors
         chunk = self.sv_chunk_size
@@ -444,7 +472,7 @@ class GkmSVM:
     def score_variants(
         self, ref: np.ndarray, alt: np.ndarray, *,
         method: str = "kernel",
-        batch_size: int = 50,
+        batch_size: int | None = None,
         verbose: bool = False,
     ) -> np.ndarray:
         """Variant effect scores.
@@ -461,16 +489,17 @@ class GkmSVM:
                     position where ref and alt differ.  Faster than
                     kernel when the model has many SVs, because only
                     one attribution pass is needed per sequence.
-            batch_size: Batch size for gkmexplain (ignored for kernel).
+            batch_size: Process inputs in batches of this size.  ``None``
+                means process all at once (for kernel) or use
+                ``gkmexplain``'s default of 50 (for gkmexplain).
             verbose: Show tqdm progress bar.
 
         Returns:
             [B, 1] score differences.
         """
         if method == "kernel":
-            ref = self._match_device(ref)
-            alt = self._match_device(alt)
-            return self(alt, verbose=verbose) - self(ref, verbose=verbose)
+            return (self(alt, batch_size=batch_size, verbose=verbose)
+                    - self(ref, batch_size=batch_size, verbose=verbose))
 
         if method == "gkmexplain":
             from gkmsvm.explain import gkmexplain
@@ -478,8 +507,10 @@ class GkmSVM:
 
             ref = self._match_device(ref)
             alt = self._match_device(alt)
-            pert = gkmexplain(self, ref, mode="perturbation",
-                              batch_size=batch_size, verbose=verbose)
+            kwargs = {"verbose": verbose}
+            if batch_size is not None:
+                kwargs["batch_size"] = batch_size
+            pert = gkmexplain(self, ref, mode="perturbation", **kwargs)
             diff_mask = ref != alt
             ref_contrib = (pert * ref * diff_mask).sum(axis=(1, 2))
             alt_contrib = (pert * alt * diff_mask).sum(axis=(1, 2))

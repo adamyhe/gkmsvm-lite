@@ -138,26 +138,9 @@ def load_caqtl_data(work_dir: str, sv_len: int):
 
 
 def score_vep(model, a1_seqs, a2_seqs, batch_size, device, verbose=True):
-    from gkmsvm.backend import to_cpu
-
-    N = a1_seqs.shape[0]
-    scores = np.zeros(N, dtype=np.float64)
-
-    chunks = range(0, N, batch_size)
-    if verbose:
-        from tqdm import tqdm
-        chunks = tqdm(chunks, desc="VEP scoring",
-                      total=(N + batch_size - 1) // batch_size)
-
-    for start in chunks:
-        end = min(start + batch_size, N)
-        a1_b = model._match_device(a1_seqs[start:end])
-        a2_b = model._match_device(a2_seqs[start:end])
-        s1 = to_cpu(model(a1_b, verbose=False).flatten())
-        s2 = to_cpu(model(a2_b, verbose=False).flatten())
-        scores[start:end] = s2 - s1
-
-    return scores
+    return model.score_variants(
+        a1_seqs, a2_seqs, batch_size=batch_size, verbose=verbose,
+    ).flatten()
 
 
 def evaluate_caqtl(df, scores):

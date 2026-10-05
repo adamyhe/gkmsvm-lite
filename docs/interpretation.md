@@ -61,12 +61,12 @@ hyp = gkmexplain(model, x, mode="hypothetical")  # [1, 4, 20]
 pert = gkmexplain(model, x, mode="perturbation")  # [1, 4, 20]
 ```
 
-### Memory and chunking
+### Batching and memory
 
-GkmExplain processes support vectors in chunks to avoid GPU OOM on large models. The default chunk size is 2000 SVs. For very large models:
+GkmExplain processes input sequences in batches (default 50) and support vectors in internal chunks (default 2000 SVs, tunable via `model.sv_chunk_size`). For large inputs, `batch_size` controls memory and enables progress bars:
 
 ```python
-attr = gkmexplain(model, x, mode=0, sv_chunk_size=1000)
+attr = gkmexplain(model, x, mode="importance", batch_size=20, verbose=True)
 ```
 
 GkmExplain uses a packed uint32 pre-filter to skip ~99.88% of window pairs (those beyond the mismatch threshold `d`), then decomposes only the contributing pairs per-position. Per-position base identity is extracted directly from packed uint32 via bit shifts, eliminating all float intermediate arrays.

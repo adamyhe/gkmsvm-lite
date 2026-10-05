@@ -88,7 +88,6 @@ def train_timed(pos, neg, solver, device, cache_size=512, verbose=True):
 
 def evaluate(model, test_pos, test_neg, device, batch_size=512, verbose=False):
     from gkmsvm import one_hot_encode
-    from gkmsvm.backend import to_cpu
 
     t0 = time.time()
     X_test = np.stack([one_hot_encode(s) for s in test_pos + test_neg])
@@ -97,18 +96,7 @@ def evaluate(model, test_pos, test_neg, device, batch_size=512, verbose=False):
     if device in ("cuda", "gpu"):
         model.cuda()
 
-    N = len(X_test)
-    scores = np.zeros(N, dtype=np.float64)
-    chunks = range(0, N, batch_size)
-    if verbose:
-        from tqdm import tqdm
-        chunks = tqdm(chunks, desc="Scoring",
-                      total=(N + batch_size - 1) // batch_size)
-    for start in chunks:
-        end = min(start + batch_size, N)
-        batch = model._match_device(X_test[start:end])
-        scores[start:end] = to_cpu(model(batch, verbose=False).flatten())
-
+    scores = model(X_test, batch_size=batch_size, verbose=verbose).flatten()
     model.cpu()
     t_eval = time.time() - t0
 

@@ -54,12 +54,13 @@ src/gkmsvm/
 - Score = `Σ coef_i × K(x, sv_i) + bias` where `bias = -rho` (LS-GKM) or `+rho` (classic gkmSVM)
 - `resolve_kernel_type()` maps aliases and integers to canonical internal names
 - Kernel modes: `-t 0` gkm_cnt/direct, `-t 1` gkm_estfull/estimated_full, `-t 2` gkm_esttrunc/estimated (default), `-t 3` gkmrbf/rbf, `-t 4` wgkm/weighted, `-t 5` wgkmrbf/weighted_rbf
-- ISM: `ism(model, x)` → `[B, 4, L]` score deltas (window-delta optimization)
-- GkmExplain: `gkmexplain(model, x, mode=...)` → `[B, 4, L]` attribution scores. MLX unsupported (float32 violates completeness axiom). Modes (string or legacy int):
+- ISM: `ism(model, x, batch_size=N)` → `[B, 4, L]` score deltas (window-delta optimization)
+- GkmExplain: `gkmexplain(model, x, mode=..., batch_size=50)` → `[B, 4, L]` attribution scores. MLX unsupported (float32 violates completeness axiom). Modes (string or legacy int):
   - `"importance"` (0) — hypothetical × one-hot. Sum = score - bias (completeness axiom). For visualization.
   - `"hypothetical"` (1) — all 4 bases. For TF-MoDISco.
   - `"perturbation"` (2) — discrete kernel-value Δ per mutation (lsgkm C mode 3, `perturbation_eff=1`). For variant effect prediction via `score_variants(method="gkmexplain")`.
-- `verbose=True` on `model()`, `score_variants()`, `ism()`, `gkmexplain()` enables tqdm progress bars
+- `batch_size` on `model()`, `score_variants()`, `ism()`, `gkmexplain()` chunks over inputs. SV chunking is internal via `model.sv_chunk_size`.
+- `verbose=True` on `model()`, `score_variants()`, `ism()`, `gkmexplain()` enables tqdm progress bars over input batches
 - No PyTorch dependency. Gradient-based methods are incompatible — use GkmExplain or ISM
 - tangermeme interop is vendored (pyfaidx for FASTA extraction)
 
