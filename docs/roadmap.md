@@ -65,3 +65,5 @@
 ## Next
 
 - [ ] **SMO SVR** — column-cached SMO solver for epsilon-SVR (2N dual variables, epsilon-tube working set selection). Currently SVR uses precomputed Gram only; SMO SVR needed for large-scale regression where the Gram matrix exceeds available memory. Reference implementation: kundajelab/lsgkm-svr
+- [ ] **Binary Platt scaling** — calibrated probability output for binary SVC models. Fit sigmoid (A, B) on held-out decision values; store parameters in GkmSVM and serialize to npz; add `predict_proba()` method. Post-hoc calibration avoids the 5-fold CV overhead of sklearn's `probability=True`. See mLS-GKM (Howard & Harmston, 2026) for reference.
+- [ ] **Multiclass SVC** — one-vs-one classification with K(K-1)/2 binary sub-models. Requires architectural changes to GkmSVM (multiple SV sets, per-pair coefficients/bias). Wu-Lin-Weng coupling converts pairwise probabilities into K-class vector (requires Platt scaling). See mLS-GKM (Howard & Harmston, 2026) for reference.
