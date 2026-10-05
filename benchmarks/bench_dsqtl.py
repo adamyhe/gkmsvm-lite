@@ -1,14 +1,20 @@
 """Benchmark: dsQTL variant effect prediction.
 
 Trains gkm-SVMs on GM12878 DNase-seq peaks (Beer lab data) and evaluates
-three variant effect prediction methods:
-  - DeltaSVM: k-mer weight linear approximation (averaged across neg sets)
-  - Kernel VEP: score(alt) - score(ref)
-  - GkmExplain VEP: hypothetical importance at variant position
+variant effect prediction methods per-model across negative sets:
+  - DeltaSVM: k-mer weight linear approximation (per-model and averaged)
+  - Kernel VEP: score(alt) - score(ref) (exact)
+  - GkmExplain VEP: perturbation mode (non-RBF kernels only)
 
-Supports two parameter settings:
-  - l=10, k=6, d=3 (Lee 2015 original, matching published deltaSVM)
-  - l=11, k=7, d=3 (LS-GKM defaults, matching ENCODE models)
+Supports three parameter settings:
+  - l=10, k=6, d=3, -t 2 (Lee 2015 original, matching published deltaSVM)
+  - l=11, k=7, d=3, -t 2 (LS-GKM defaults, matching ENCODE models)
+  - l=10, k=6, d=3, -t 3, gamma=2, C=10 (Shrikumar 2019 gkmrbf)
+
+For -t 3 (RBF), kernel VEP is the exact method matching gkmexplain mode 5
+(Shrikumar et al. 2019 §5.2). The non-linear exp() transformation makes
+kernel VEP outperform deltaSVM's linear approximation. GkmExplain
+perturbation mode is not valid for RBF kernels.
 
 Pass --replicate-published to also compare against Lee 2015 published
 deltaSVM scores (downloads hg19 genome, ~900 MB compressed).
@@ -19,6 +25,8 @@ benchmarks/models/ and reloaded on subsequent runs.
 Usage:
   python benchmarks/bench_dsqtl.py --device cuda
   python benchmarks/bench_dsqtl.py --device cuda --params l10k6
+  python benchmarks/bench_dsqtl.py --params l10k6_rbf     # gkmexplain paper
+  python benchmarks/bench_dsqtl.py --params all            # all three
   python benchmarks/bench_dsqtl.py --n-negsets 1 --params l10k6  # quick
   python benchmarks/bench_dsqtl.py --replicate-published
   python benchmarks/bench_dsqtl.py --force-train
@@ -56,6 +64,7 @@ HG19_URL = "https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa.gz"
 PARAM_SETS = {
     "l10k6": {"l": 10, "k": 6, "d": 3, "kernel_type": "estimated"},
     "l11k7": {"l": 11, "k": 7, "d": 3, "kernel_type": "estimated"},
+    "l10k6_rbf": {"l": 10, "k": 6, "d": 3, "kernel_type": "rbf", "gamma": 2.0, "C": 10.0},
 }
 
 FLANK = 9
@@ -238,7 +247,6 @@ def train_models(
     device: str,
     pk: str,
     force_train: bool = False,
-    C: float = 1.0,
     verbose: bool = False,
 ):
     from gkmsvm import train_gkmsvm
@@ -249,6 +257,11 @@ def train_models(
         save_deltasvm_npz,
         save_npz,
     )
+
+    C = params.get("C", 1.0)
+    train_kwargs = {}
+    if "gamma" in params:
+        train_kwargs["gamma"] = params["gamma"]
 
     models = []
     dsvms = []
@@ -280,6 +293,7 @@ def train_models(
                 solver="auto",
                 device=device,
                 verbose=verbose,
+                **train_kwargs,
             )
             print(f"  {m.num_support_vectors} SVs, {time.time() - t0:.1f}s")
             MODEL_DIR.mkdir(parents=True, exist_ok=True)
@@ -311,7 +325,7 @@ def train_models(
     avg_dsvm.weights = avg_weights
     print(f"\nAveraged {len(dsvms)} deltaSVM weight tables")
 
-    return models, avg_dsvm
+    return models, dsvms, avg_dsvm
 
 
 # ---------------------------------------------------------------------------
@@ -337,24 +351,12 @@ def score_kernel(
         model.cuda()
 
     N = len(X_ref)
-    scores = np.zeros(N, dtype=np.float64)
-
-    chunks = range(0, N, batch_size)
-    if verbose:
-        from tqdm import tqdm
-        chunks = tqdm(chunks, desc="Kernel VEP",
-                      total=(N + batch_size - 1) // batch_size)
-
     t0 = time.time()
-    for start in chunks:
-        end = min(start + batch_size, N)
-        ref_b = model._match_device(X_ref[start:end])
-        alt_b = model._match_device(X_alt[start:end])
-        s_ref = model(ref_b, verbose=False).flatten()
-        s_alt = model(alt_b, verbose=False).flatten()
-        scores[start:end] = to_cpu(s_alt - s_ref)
-
+    scores = to_cpu(
+        model.score_variants(X_ref, X_alt, batch_size=batch_size, verbose=verbose)
+    ).flatten()
     elapsed = time.time() - t0
+
     model.cpu()
     print(
         f"  Kernel VEP: {N} variants in {elapsed:.1f}s ({N * 2 / elapsed:.0f} seqs/s)"
@@ -371,25 +373,15 @@ def score_gkmexplain(
         model.cuda()
 
     N = len(X_ref)
-    scores = np.zeros(N, dtype=np.float64)
-
-    chunks = range(0, N, batch_size)
-    if verbose:
-        from tqdm import tqdm
-        chunks = tqdm(chunks, desc="GkmExplain VEP",
-                      total=(N + batch_size - 1) // batch_size)
-
     t0 = time.time()
-    for start in chunks:
-        end = min(start + batch_size, N)
-        ref_b = model._match_device(X_ref[start:end])
-        alt_b = model._match_device(X_alt[start:end])
-        s = model.score_variants(
-            ref_b, alt_b, method="gkmexplain", batch_size=end - start, verbose=False
+    scores = to_cpu(
+        model.score_variants(
+            X_ref, X_alt, method="gkmexplain",
+            batch_size=batch_size, verbose=verbose,
         )
-        scores[start:end] = to_cpu(s).flatten()
-
+    ).flatten()
     elapsed = time.time() - t0
+
     model.cpu()
     print(
         f"  GkmExplain VEP: {N} variants in {elapsed:.1f}s "
@@ -596,8 +588,8 @@ def main():
     parser.add_argument(
         "--params",
         default="both",
-        choices=["l10k6", "l11k7", "both"],
-        help="Parameter set to train (default: both)",
+        choices=["l10k6", "l11k7", "l10k6_rbf", "both", "all"],
+        help="Parameter set to train (default: both=l10k6+l11k7, all=+rbf)",
     )
     parser.add_argument(
         "--n-negsets", type=int, default=5, help="Number of negative sets (default: 5)"
@@ -647,55 +639,91 @@ def main():
     pos_seqs, neg_sets = load_training_data(n_negsets=args.n_negsets)
     X_ref, X_alt, labels, effect_sizes = load_test_variants()
 
-    param_keys = ["l10k6", "l11k7"] if args.params == "both" else [args.params]
+    param_keys = (
+        ["l10k6", "l11k7"] if args.params == "both"
+        else list(PARAM_SETS.keys()) if args.params == "all"
+        else [args.params]
+    )
 
     all_results = []
 
     for pk in param_keys:
         params = PARAM_SETS[pk]
+        is_rbf = params["kernel_type"] == "rbf"
         print(f"\n{'=' * 70}")
         print(
             f"Training: l={params['l']} k={params['k']} d={params['d']} "
-            f"({args.n_negsets} neg sets)"
+            f"-t {params['kernel_type']}"
+            + (f" gamma={params['gamma']}" if is_rbf else "")
+            + f" ({args.n_negsets} neg sets)"
         )
         print(f"{'=' * 70}")
 
-        models, avg_dsvm = train_models(
+        models, dsvms, avg_dsvm = train_models(
             pos_seqs, neg_sets, params, args.device, pk=pk,
             force_train=args.force_train, verbose=args.verbose,
         )
 
         results = []
 
+        # --- Per-model evaluation ---
+        per_model_dsvm = np.zeros((len(models), len(labels)))
+        per_model_kernel = np.zeros((len(models), len(labels)))
+
+        for mi in range(len(models)):
+            print(f"\n── Evaluating model {mi + 1}/{len(models)} ──")
+
+            print(f"  deltaSVM (model {mi + 1})...")
+            per_model_dsvm[mi] = score_deltasvm(dsvms[mi], X_ref, X_alt)
+
+            print(f"  kernel VEP (model {mi + 1})...")
+            per_model_kernel[mi] = score_kernel(
+                models[mi], X_ref, X_alt, args.device, verbose=args.verbose,
+            )
+
+        # Per-model AUPRC
+        print(f"\n  Per-model AUPRC:")
+        print(f"  {'Model':>8s}  {'deltaSVM':>10s}  {'kernel':>10s}")
+        for mi in range(len(models)):
+            d_ap = average_precision_score(labels, np.abs(per_model_dsvm[mi]))
+            k_ap = average_precision_score(labels, np.abs(per_model_kernel[mi]))
+            print(f"  {mi + 1:>8d}  {d_ap:>10.4f}  {k_ap:>10.4f}")
+
+        # Combined (sum across models)
+        combined_dsvm = per_model_dsvm.sum(axis=0)
+        combined_kernel = per_model_kernel.sum(axis=0)
+
+        # Also score with averaged deltaSVM weights
         print("\nScoring with deltaSVM (averaged weights)...")
-        dsvm_scores = score_deltasvm(avg_dsvm, X_ref, X_alt)
-        results.append(evaluate(dsvm_scores, labels, effect_sizes, f"deltaSVM ({pk})"))
+        avg_dsvm_scores = score_deltasvm(avg_dsvm, X_ref, X_alt)
 
-        print("\nScoring with kernel VEP (model 1)...")
-        kernel_scores = score_kernel(models[0], X_ref, X_alt, args.device,
-                                     verbose=args.verbose)
-        results.append(evaluate(kernel_scores, labels, effect_sizes, f"kernel ({pk})"))
+        results.append(evaluate(avg_dsvm_scores, labels, effect_sizes, f"deltaSVM-avg ({pk})"))
+        results.append(evaluate(combined_dsvm, labels, effect_sizes, f"deltaSVM-sum ({pk})"))
+        results.append(evaluate(combined_kernel, labels, effect_sizes, f"kernel-sum ({pk})"))
 
-        explain_device = args.device if args.device != "mlx" else "cpu"
-        if explain_device != args.device:
-            print("\nGkmExplain unsupported on MLX, falling back to CPU...")
-        print("\nScoring with GkmExplain VEP (model 1)...")
-        explain_scores = score_gkmexplain(models[0], X_ref, X_alt, explain_device,
-                                         verbose=args.verbose)
-        results.append(
-            evaluate(explain_scores, labels, effect_sizes, f"gkmexplain ({pk})")
-        )
+        # GkmExplain VEP — only for non-RBF (perturbation mode is not valid for RBF)
+        if not is_rbf:
+            explain_device = args.device if args.device != "mlx" else "cpu"
+            if explain_device != args.device:
+                print("\nGkmExplain unsupported on MLX, falling back to CPU...")
+            per_model_explain = np.zeros((len(models), len(labels)))
+            for mi in range(len(models)):
+                print(f"\n  gkmexplain VEP (model {mi + 1})...")
+                per_model_explain[mi] = score_gkmexplain(
+                    models[mi], X_ref, X_alt, explain_device, verbose=args.verbose,
+                )
+            combined_explain = per_model_explain.sum(axis=0)
+            results.append(evaluate(combined_explain, labels, effect_sizes, f"gkmexplain-sum ({pk})"))
 
-        corr_dk = np.corrcoef(dsvm_scores, kernel_scores)[0, 1]
-        corr_de = np.corrcoef(dsvm_scores, explain_scores)[0, 1]
-        print("\n  Score correlations (all variants):")
-        print(f"    deltaSVM vs kernel:     r = {corr_dk:.4f}")
-        print(f"    deltaSVM vs gkmexplain: r = {corr_de:.4f}")
+            print(f"\n  Per-model AUPRC (gkmexplain):")
+            for mi in range(len(models)):
+                e_ap = average_precision_score(labels, np.abs(per_model_explain[mi]))
+                print(f"    Model {mi + 1}: {e_ap:.4f}")
 
         print_results(results, pk)
         all_results.extend(results)
 
-        del models, avg_dsvm
+        del models, dsvms, avg_dsvm
         gc.collect()
 
     if len(param_keys) > 1:
