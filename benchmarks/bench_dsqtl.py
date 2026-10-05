@@ -65,6 +65,7 @@ PARAM_SETS = {
     "l10k6": {"l": 10, "k": 6, "d": 3, "kernel_type": "estimated"},
     "l11k7": {"l": 11, "k": 7, "d": 3, "kernel_type": "estimated"},
     "l10k6_rbf": {"l": 10, "k": 6, "d": 3, "kernel_type": "rbf", "gamma": 2.0, "C": 10.0},
+    "l11k7_rbf": {"l": 11, "k": 7, "d": 3, "kernel_type": "rbf", "gamma": 2.0, "C": 10.0},
 }
 
 FLANK = 9
@@ -587,9 +588,9 @@ def main():
     )
     parser.add_argument(
         "--params",
-        default="both",
-        choices=["l10k6", "l11k7", "l10k6_rbf", "both", "all"],
-        help="Parameter set to train (default: both=l10k6+l11k7, all=+rbf)",
+        default="all",
+        choices=list(PARAM_SETS.keys()) + ["all"],
+        help="Parameter set to train (default: all)",
     )
     parser.add_argument(
         "--n-negsets", type=int, default=5, help="Number of negative sets (default: 5)"
@@ -639,11 +640,7 @@ def main():
     pos_seqs, neg_sets = load_training_data(n_negsets=args.n_negsets)
     X_ref, X_alt, labels, effect_sizes = load_test_variants()
 
-    param_keys = (
-        ["l10k6", "l11k7"] if args.params == "both"
-        else list(PARAM_SETS.keys()) if args.params == "all"
-        else [args.params]
-    )
+    param_keys = list(PARAM_SETS.keys()) if args.params == "all" else [args.params]
 
     all_results = []
 
