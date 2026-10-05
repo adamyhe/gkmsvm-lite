@@ -55,7 +55,10 @@ src/gkmsvm/
 - `resolve_kernel_type()` maps aliases and integers to canonical internal names
 - Kernel modes: `-t 0` gkm_cnt/direct, `-t 1` gkm_estfull/estimated_full, `-t 2` gkm_esttrunc/estimated (default), `-t 3` gkmrbf/rbf, `-t 4` wgkm/weighted, `-t 5` wgkmrbf/weighted_rbf
 - ISM: `ism(model, x)` → `[B, 4, L]` score deltas (window-delta optimization)
-- GkmExplain: `gkmexplain(model, x, mode=0|1)` → `[B, 4, L]` attribution scores. Mode 0 = mode 1 × OHE (single unified kernel). MLX unsupported (float32 violates completion axiom)
+- GkmExplain: `gkmexplain(model, x, mode=...)` → `[B, 4, L]` attribution scores. MLX unsupported (float32 violates completeness axiom). Modes (string or legacy int):
+  - `"importance"` (0) — hypothetical × one-hot. Sum = score - bias (completeness axiom). For visualization.
+  - `"hypothetical"` (1) — all 4 bases. For TF-MoDISco.
+  - `"perturbation"` (2) — discrete kernel-value Δ per mutation (lsgkm C mode 3, `perturbation_eff=1`). For variant effect prediction via `score_variants(method="gkmexplain")`.
 - `verbose=True` on `model()`, `score_variants()`, `ism()`, `gkmexplain()` enables tqdm progress bars
 - No PyTorch dependency. Gradient-based methods are incompatible — use GkmExplain or ISM
 - tangermeme interop is vendored (pyfaidx for FASTA extraction)

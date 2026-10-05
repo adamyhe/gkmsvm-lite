@@ -199,7 +199,7 @@ def cmd_explain(args: argparse.Namespace) -> None:
     one_hot = X.astype(np.float32)
 
     X = model._match_device(X)
-    hyp = to_cpu(gkmexplain(model, X, mode=1, verbose=args.verbose))
+    hyp = to_cpu(gkmexplain(model, X, mode="hypothetical", verbose=args.verbose))
 
     # Two files: sequences and attributions, each [B, 4, L] as arr_0.
     # Directly usable with: modisco motifs -s seqs.npz -a attr.npz ...

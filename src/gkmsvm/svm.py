@@ -454,12 +454,13 @@ class GkmSVM:
             alt: [B, 4, L] alternate sequences.
             method: Scoring strategy.
                 "kernel" — score(alt) - score(ref) via full kernel (default).
-                "gkmexplain" — GkmExplain hypothetical importance at the
-                    variant position (Shrikumar et al. 2019 §5.2).  Computes
-                    mode-1 attributions on ref, then reads off the predicted
-                    effect at each position where ref and alt differ.  Faster
-                    than kernel when the model has many SVs, because only one
-                    attribution pass is needed per sequence.
+                "gkmexplain" — GkmExplain perturbation effect scores
+                    (Shrikumar et al. 2019 §5.2, lsgkm C mode 3).
+                    Computes discrete kernel-value deltas on ref, then
+                    reads off the predicted mutation effect at each
+                    position where ref and alt differ.  Faster than
+                    kernel when the model has many SVs, because only
+                    one attribution pass is needed per sequence.
             batch_size: Batch size for gkmexplain (ignored for kernel).
             verbose: Show tqdm progress bar.
 
@@ -473,16 +474,16 @@ class GkmSVM:
 
         if method == "gkmexplain":
             from gkmsvm.explain import gkmexplain
-            from gkmsvm.backend import get_array_module, to_cpu
+            from gkmsvm.backend import get_array_module
 
             ref = self._match_device(ref)
             alt = self._match_device(alt)
-            hyp = gkmexplain(self, ref, mode=1, batch_size=batch_size,
-                             verbose=verbose)
+            pert = gkmexplain(self, ref, mode="perturbation",
+                              batch_size=batch_size, verbose=verbose)
             diff_mask = ref != alt
-            ref_contrib = (hyp * ref * diff_mask).sum(axis=(1, 2))
-            alt_contrib = (hyp * alt * diff_mask).sum(axis=(1, 2))
-            xp = get_array_module(hyp)
+            ref_contrib = (pert * ref * diff_mask).sum(axis=(1, 2))
+            alt_contrib = (pert * alt * diff_mask).sum(axis=(1, 2))
+            xp = get_array_module(pert)
             return xp.reshape(alt_contrib - ref_contrib, (-1, 1))
 
         raise ValueError(

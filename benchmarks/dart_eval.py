@@ -10,8 +10,8 @@ NeurIPS):
   Task 5 — Variant effect prediction
     Three VEP scoring methods:
       kernel:     score(alt) - score(ref)  (full kernel, two evals per variant)
-      gkmexplain: hyp[alt_base] - hyp[ref_base] at variant position (one
-                  gkmexplain call per variant; Shrikumar et al. 2019 §5.2)
+      gkmexplain: perturbation effect at variant position (one gkmexplain
+                  call per variant; Shrikumar et al. 2019 §5.2, lsgkm C mode 3)
       deltasvm:   Σ Δw_kmer  (linear k-mer weight approximation)
     dsQTLs: Yoruban LCL (hg19), caQTLs: African (hg38).
 

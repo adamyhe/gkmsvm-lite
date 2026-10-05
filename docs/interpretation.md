@@ -13,23 +13,29 @@ GkmExplain analytically decomposes the SVM decision function into per-base impor
 ```python
 from gkmsvm import gkmexplain
 
-# Mode 0: importance scores
-# Non-zero only at reference bases (what the model "sees")
-attr = gkmexplain(model, x, mode=0)  # [B, 4, L]
+# Importance scores — non-zero only at reference bases
+attr = gkmexplain(model, x, mode="importance")    # [B, 4, L]
 
-# Mode 1: hypothetical importance scores
-# All 4 bases get values at each position (what the model "would see")
-hyp = gkmexplain(model, x, mode=1)   # [B, 4, L]
+# Hypothetical importance — all 4 bases at each position
+hyp = gkmexplain(model, x, mode="hypothetical")   # [B, 4, L]
+
+# Perturbation effect — discrete kernel Δ per single-base mutation
+pert = gkmexplain(model, x, mode="perturbation")  # [B, 4, L]
 ```
 
-### Mode 0 vs Mode 1
+### Modes
 
-**Mode 0 (importance)** attributes the kernel value to the positions that actually match between the query and each support vector. Only the reference base at each position gets a non-zero score. Use this for understanding what drives the current prediction.
+**Importance** (`mode="importance"`, legacy `mode=0`) attributes the kernel value to the positions that actually match between the query and each support vector. Only the reference base at each position gets a non-zero score. Satisfies the completeness axiom: attributions sum to `score - bias`. Use for understanding what drives the current prediction.
 
-**Mode 1 (hypothetical)** computes what the importance would be if each base were present at each position. All four channels can be non-zero. Use this for:
-- Motif discovery with TF-MoDISco
-- Understanding what mutations would do (similar to ISM)
+**Hypothetical** (`mode="hypothetical"`, legacy `mode=1`) computes what the importance would be if each base were present at each position. All four channels can be non-zero. Corresponds to lsgkm C mode 1 (`perturbation_eff=0`). Use for:
+- Motif discovery with TF-MoDISco (hypothetical contribution input)
 - Generating sequence logos
+
+Importance is exactly `hypothetical * one_hot_input`. Internally, only the hypothetical computation runs — importance is derived by element-wise multiplication with the input one-hot.
+
+**Perturbation** (`mode="perturbation"`, legacy `mode=2`) computes the discrete kernel-value change from each possible single-base mutation. At each position, the reference base channel is zero; alternate base channels contain the predicted score change from that mutation. Corresponds to lsgkm C mode 3 (`perturbation_eff=1`). Uses `gamma[m] = mismatch_table[m+1] - mismatch_table[m]` for match-to-mismatch and `kappa[m] = mismatch_table[m-1] - mismatch_table[m]` for mismatch-to-match. Use for:
+- Variant effect prediction via `model.score_variants(ref, alt, method="gkmexplain")`
+- Mutation impact scoring (Shrikumar et al. 2019)
 
 ### Practical usage
 
@@ -41,7 +47,7 @@ model = load_model("model.npz")
 x = one_hot_encode("ACGTACGTACGTACGTACGT")[None, ...]
 
 # Get importance scores
-attr = gkmexplain(model, x, mode=0)  # [1, 4, 20]
+attr = gkmexplain(model, x, mode="importance")  # [1, 4, 20]
 
 # Find most important positions
 importance = attr[0].sum(axis=0)  # [20] — sum over bases
@@ -49,12 +55,11 @@ top_positions = np.argsort(-np.abs(importance))[:5]
 print(f"Top 5 positions: {top_positions}")
 
 # Get hypothetical scores for motif discovery
-hyp = gkmexplain(model, x, mode=1)  # [1, 4, 20]
+hyp = gkmexplain(model, x, mode="hypothetical")  # [1, 4, 20]
+
+# Variant effect prediction
+pert = gkmexplain(model, x, mode="perturbation")  # [1, 4, 20]
 ```
-
-### Relationship between modes
-
-Mode 0 is exactly `mode_1 * one_hot_input`: the hypothetical importance at the reference base equals the importance score. Internally, only mode 1 is computed — mode 0 is derived by element-wise multiplication with the input one-hot encoding. This avoids maintaining a separate kernel and guarantees consistency between modes.
 
 ### Memory and chunking
 
@@ -98,12 +103,13 @@ ISM works on all backends (CPU, NVIDIA GPU, and Apple Silicon MLX). On MLX, ISM 
 | Output | Analytical decomposition | Exact score deltas | Shapley values |
 | Interpretation | What contributes to the kernel | What happens if you mutate | Feature importance with interactions |
 | Epistatic logic | Handles OR/redundant motifs correctly | Saturates (misses redundant motifs) | Handles interactions |
-| Mode 1 | Hypothetical importance at all bases | N/A (inherently hypothetical) | N/A |
+| Hypothetical | What each base would contribute | N/A (inherently hypothetical) | N/A |
+| Perturbation | Discrete kernel Δ per mutation | N/A | N/A |
 | Use case | Recommended default | Exact mutation effects | When Shapley guarantees are needed |
 
-GkmExplain is both faster and more informative than ISM. ISM suffers from **saturation effects**: when multiple motifs can independently drive the score (OR logic), mutating one motif has no effect if the other is intact, so ISM reports both as unimportant. GkmExplain analytically decomposes the kernel and correctly attributes importance to all contributing motifs regardless of redundancy. Mode 1 hypothetical importance scores (what each base *would* contribute at each position) enable motif discovery with TF-MoDISco and are not available from ISM.
+GkmExplain is both faster and more informative than ISM. ISM suffers from **saturation effects**: when multiple motifs can independently drive the score (OR logic), mutating one motif has no effect if the other is intact, so ISM reports both as unimportant. GkmExplain analytically decomposes the kernel and correctly attributes importance to all contributing motifs regardless of redundancy. Hypothetical importance scores enable motif discovery with TF-MoDISco and are not available from ISM.
 
-Use ISM when you need exact mutation impact scores (e.g., variant effect sizes). KernelSHAP provides formal Shapley value guarantees but is impractical for routine use due to the cost of repeated kernel evaluations.
+For variant effect prediction, use `mode="perturbation"` (or `model.score_variants(method="gkmexplain")`), which computes the discrete kernel-value change from each mutation. Use ISM when you need exact mutation impact scores. KernelSHAP provides formal Shapley value guarantees but is impractical for routine use due to the cost of repeated kernel evaluations.
 
 ## Paired REF/ALT scoring
 
@@ -133,5 +139,5 @@ All methods support `verbose=True` for tqdm progress bars on large inputs:
 ```python
 scores = model(x, verbose=True)
 deltas = ism(model, x, verbose=True)
-attr = gkmexplain(model, x, mode=0, verbose=True)
+attr = gkmexplain(model, x, mode="importance", verbose=True)
 ```
