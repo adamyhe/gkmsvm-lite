@@ -63,7 +63,7 @@ def train_and_time(pos, neg, solver, device, verbose=True, **kwargs):
     return model, elapsed
 
 
-def evaluate(model, test_pos, test_neg, device):
+def evaluate(model, test_pos, test_neg, device, verbose=False):
     from gkmsvm import one_hot_encode
     from gkmsvm.backend import to_cpu
 
@@ -72,7 +72,7 @@ def evaluate(model, test_pos, test_neg, device):
 
     if device == "cuda":
         model.cuda()
-    scores = to_cpu(model(model._match_device(X_test)).flatten())
+    scores = to_cpu(model(model._match_device(X_test), verbose=verbose).flatten())
     model.cpu()
 
     preds = np.sign(scores)
@@ -90,6 +90,8 @@ def main():
                         help="Use small test fixture (N=200) instead of full dataset")
     parser.add_argument("--cache-size", type=int, default=512,
                         help="SMO kernel column cache size in MB (default: 512)")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="Show progress bars during training and scoring")
     args = parser.parse_args()
 
     device = args.device
@@ -129,9 +131,10 @@ def main():
     print(f"{'=' * 60}")
     model_gram, t_gram = train_and_time(
         pos_train, neg_train, solver="libsvm", device=device,
+        verbose=args.verbose,
     )
     scores_gram, acc_gram, auroc_gram = evaluate(
-        model_gram, pos_test, neg_test, device,
+        model_gram, pos_test, neg_test, device, verbose=args.verbose,
     )
     print(f"  Time:    {t_gram:.1f}s")
     print(f"  SVs:     {model_gram.num_support_vectors}")
@@ -145,10 +148,10 @@ def main():
     print(f"{'=' * 60}")
     model_smo, t_smo = train_and_time(
         pos_train, neg_train, solver="smo", device=device,
-        cache_size=args.cache_size,
+        cache_size=args.cache_size, verbose=args.verbose,
     )
     scores_smo, acc_smo, auroc_smo = evaluate(
-        model_smo, pos_test, neg_test, device,
+        model_smo, pos_test, neg_test, device, verbose=args.verbose,
     )
     print(f"  Time:    {t_smo:.1f}s")
     print(f"  SVs:     {model_smo.num_support_vectors}")

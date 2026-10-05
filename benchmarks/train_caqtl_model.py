@@ -81,7 +81,8 @@ def load_training_data():
     return pos_seqs, neg_seqs
 
 
-def train_model(pos_seqs, neg_seqs, l, k, d, C, device, solver="auto"):
+def train_model(pos_seqs, neg_seqs, l, k, d, C, device, solver="auto",
+                verbose=False):
     from gkmsvm.train import train_gkmsvm
 
     print(f"\n  Training gkm-SVM (l={l}, k={k}, d={d}, C={C})...")
@@ -94,7 +95,7 @@ def train_model(pos_seqs, neg_seqs, l, k, d, C, device, solver="auto"):
         kernel_type="estimated",
         device=device,
         solver=solver,
-        verbose=True,
+        verbose=verbose,
     )
     elapsed = time.perf_counter() - t0
     print(f"  Trained in {elapsed:.1f}s: {model.num_support_vectors} SVs")
@@ -249,7 +250,7 @@ def main():
             model = train_model(pos_seqs, neg_seqs,
                                 l=args.l_param, k=args.k, d=args.d_param,
                                 C=args.C_param, device=args.device,
-                                solver=args.solver)
+                                solver=args.solver, verbose=args.verbose)
             del pos_seqs, neg_seqs
             gc.collect()
 

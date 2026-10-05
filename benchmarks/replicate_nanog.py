@@ -154,6 +154,8 @@ def main():
         "--batch-size", type=int, default=50,
         help="Batch size for GkmExplain (lower if GPU OOM)",
     )
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="Show progress bars during scoring and attribution")
     args = parser.parse_args()
 
     print("=" * 70)
@@ -200,8 +202,8 @@ def main():
     neg_x = _to_device(neg_x_np, args.device)
 
     t0 = time.perf_counter()
-    pos_scores = _to_numpy(ref_model(pos_x, verbose=True).squeeze(-1), args.device)
-    neg_scores = _to_numpy(ref_model(neg_x, verbose=True).squeeze(-1), args.device)
+    pos_scores = _to_numpy(ref_model(pos_x, verbose=args.verbose).squeeze(-1), args.device)
+    neg_scores = _to_numpy(ref_model(neg_x, verbose=args.verbose).squeeze(-1), args.device)
     t_score = time.perf_counter() - t0
 
     print(f"  Scored {len(pos_scores) + len(neg_scores)} sequences in {t_score:.2f}s")
@@ -235,7 +237,7 @@ def main():
             kernel_type="estimated", l=11, k=7, d=3, C=1.0,
             solver=args.solver,
             device=args.device if args.device != "auto" else "auto",
-            verbose=True,
+            verbose=args.verbose,
         )
         t_train = time.perf_counter() - t0
         print(f"  Trained in {t_train:.1f}s — {our_model.num_support_vectors} SVs")
@@ -268,6 +270,7 @@ def main():
     hyp_scores = _gkmexplain_batched(
         exp_model, pos_x_np, mode=1,
         batch_size=args.batch_size, device=explain_device,
+        verbose=args.verbose,
     )
     t_explain = time.perf_counter() - t0
     print(f"  GkmExplain: {len(pos_x_np)} seqs in {t_explain:.1f}s "
@@ -276,7 +279,7 @@ def main():
 
     # Completeness check on full set
     ref_full_scores = _to_numpy(
-        ref_model(pos_x, verbose=False).squeeze(-1), args.device
+        ref_model(pos_x, verbose=args.verbose).squeeze(-1), args.device
     )
     exp_sums = (imp_scores * pos_x_np).sum(axis=(1, 2))
     expected = ref_full_scores - ref_model.bias

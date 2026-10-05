@@ -239,6 +239,7 @@ def train_models(
     pk: str,
     force_train: bool = False,
     C: float = 1.0,
+    verbose: bool = False,
 ):
     from gkmsvm import train_gkmsvm
     from gkmsvm.backend import to_cpu
@@ -278,7 +279,7 @@ def train_models(
                 C=C,
                 solver="auto",
                 device=device,
-                verbose=True,
+                verbose=verbose,
             )
             print(f"  {m.num_support_vectors} SVs, {time.time() - t0:.1f}s")
             MODEL_DIR.mkdir(parents=True, exist_ok=True)
@@ -293,7 +294,7 @@ def train_models(
             if device == "cuda":
                 m.cuda()
             t0 = time.time()
-            d = m.to_deltasvm(device=device, verbose=True)
+            d = m.to_deltasvm(device=device, verbose=verbose)
             print(f"  DeltaSVM conversion: {time.time() - t0:.1f}s")
             m.cpu()
             d.cpu()
@@ -327,7 +328,9 @@ def score_deltasvm(dsvm, X_ref, X_alt):
     return scores
 
 
-def score_kernel(model, X_ref, X_alt, device: str, batch_size: int = 64):
+def score_kernel(
+    model, X_ref, X_alt, device: str, batch_size: int = 64, verbose: bool = False,
+):
     from gkmsvm.backend import to_cpu
 
     if device == "cuda":
@@ -341,8 +344,8 @@ def score_kernel(model, X_ref, X_alt, device: str, batch_size: int = 64):
         end = min(start + batch_size, N)
         ref_b = model._match_device(X_ref[start:end])
         alt_b = model._match_device(X_alt[start:end])
-        s_ref = model(ref_b, verbose=False).flatten()
-        s_alt = model(alt_b, verbose=False).flatten()
+        s_ref = model(ref_b, verbose=verbose).flatten()
+        s_alt = model(alt_b, verbose=verbose).flatten()
         scores[start:end] = to_cpu(s_alt - s_ref)
 
     elapsed = time.time() - t0
@@ -353,7 +356,9 @@ def score_kernel(model, X_ref, X_alt, device: str, batch_size: int = 64):
     return scores
 
 
-def score_gkmexplain(model, X_ref, X_alt, device: str, batch_size: int = 32):
+def score_gkmexplain(
+    model, X_ref, X_alt, device: str, batch_size: int = 32, verbose: bool = False,
+):
     from gkmsvm.backend import to_cpu
 
     if device == "cuda":
@@ -368,7 +373,7 @@ def score_gkmexplain(model, X_ref, X_alt, device: str, batch_size: int = 32):
         ref_b = model._match_device(X_ref[start:end])
         alt_b = model._match_device(X_alt[start:end])
         s = model.score_variants(
-            ref_b, alt_b, method="gkmexplain", batch_size=end - start, verbose=False
+            ref_b, alt_b, method="gkmexplain", batch_size=end - start, verbose=verbose
         )
         scores[start:end] = to_cpu(s).flatten()
 
@@ -594,6 +599,8 @@ def main():
         "--force-train", action="store_true", help="Retrain even if cached models exist"
     )
     parser.add_argument("--output", default=None, help="Save results to TSV file")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="Show progress bars during scoring and training")
     args = parser.parse_args()
 
     if args.device == "auto":
@@ -642,7 +649,8 @@ def main():
         print(f"{'=' * 70}")
 
         models, avg_dsvm = train_models(
-            pos_seqs, neg_sets, params, args.device, pk=pk, force_train=args.force_train
+            pos_seqs, neg_sets, params, args.device, pk=pk,
+            force_train=args.force_train, verbose=args.verbose,
         )
 
         results = []
@@ -652,14 +660,16 @@ def main():
         results.append(evaluate(dsvm_scores, labels, effect_sizes, f"deltaSVM ({pk})"))
 
         print("\nScoring with kernel VEP (model 1)...")
-        kernel_scores = score_kernel(models[0], X_ref, X_alt, args.device)
+        kernel_scores = score_kernel(models[0], X_ref, X_alt, args.device,
+                                     verbose=args.verbose)
         results.append(evaluate(kernel_scores, labels, effect_sizes, f"kernel ({pk})"))
 
         explain_device = args.device if args.device != "mlx" else "cpu"
         if explain_device != args.device:
             print("\nGkmExplain unsupported on MLX, falling back to CPU...")
         print("\nScoring with GkmExplain VEP (model 1)...")
-        explain_scores = score_gkmexplain(models[0], X_ref, X_alt, explain_device)
+        explain_scores = score_gkmexplain(models[0], X_ref, X_alt, explain_device,
+                                         verbose=args.verbose)
         results.append(
             evaluate(explain_scores, labels, effect_sizes, f"gkmexplain ({pk})")
         )
