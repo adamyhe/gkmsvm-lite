@@ -116,17 +116,21 @@ def _to_numpy(arr, device):
     return np.asarray(arr)
 
 
-def _gkmexplain_batched(model, x, mode, batch_size=50, device="cpu", verbose=True):
+def _gkmexplain_batched(model, x, mode, batch_size=50, device="cpu", verbose=False):
     """Run GkmExplain in batches to avoid GPU OOM."""
     from gkmsvm.explain import gkmexplain
     results = []
-    for i in range(0, len(x), batch_size):
+    N = len(x)
+    chunks = range(0, N, batch_size)
+    if verbose:
+        from tqdm import tqdm
+        chunks = tqdm(chunks, desc="GkmExplain",
+                      total=(N + batch_size - 1) // batch_size)
+    for i in chunks:
         batch_np = x[i:i + batch_size]
         batch = _to_device(batch_np, device)
         exp = gkmexplain(model, batch, mode=mode, verbose=False)
         results.append(_to_numpy(exp, device))
-    if verbose:
-        print(f"    {len(x)} seqs, batch_size={batch_size}")
     return np.concatenate(results)
 
 

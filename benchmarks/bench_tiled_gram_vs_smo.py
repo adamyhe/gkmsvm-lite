@@ -99,10 +99,15 @@ def evaluate(model, test_pos, test_neg, device, batch_size=512, verbose=False):
 
     N = len(X_test)
     scores = np.zeros(N, dtype=np.float64)
-    for start in range(0, N, batch_size):
+    chunks = range(0, N, batch_size)
+    if verbose:
+        from tqdm import tqdm
+        chunks = tqdm(chunks, desc="Scoring",
+                      total=(N + batch_size - 1) // batch_size)
+    for start in chunks:
         end = min(start + batch_size, N)
         batch = model._match_device(X_test[start:end])
-        scores[start:end] = to_cpu(model(batch, verbose=verbose).flatten())
+        scores[start:end] = to_cpu(model(batch, verbose=False).flatten())
 
     model.cpu()
     t_eval = time.time() - t0

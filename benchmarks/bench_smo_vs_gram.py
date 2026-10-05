@@ -72,7 +72,8 @@ def evaluate(model, test_pos, test_neg, device, verbose=False):
 
     if device == "cuda":
         model.cuda()
-    scores = to_cpu(model(model._match_device(X_test), verbose=verbose).flatten())
+    scores = to_cpu(model(model._match_device(X_test),
+                          verbose=verbose).flatten())
     model.cpu()
 
     preds = np.sign(scores)

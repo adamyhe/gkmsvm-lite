@@ -339,13 +339,19 @@ def score_kernel(
     N = len(X_ref)
     scores = np.zeros(N, dtype=np.float64)
 
+    chunks = range(0, N, batch_size)
+    if verbose:
+        from tqdm import tqdm
+        chunks = tqdm(chunks, desc="Kernel VEP",
+                      total=(N + batch_size - 1) // batch_size)
+
     t0 = time.time()
-    for start in range(0, N, batch_size):
+    for start in chunks:
         end = min(start + batch_size, N)
         ref_b = model._match_device(X_ref[start:end])
         alt_b = model._match_device(X_alt[start:end])
-        s_ref = model(ref_b, verbose=verbose).flatten()
-        s_alt = model(alt_b, verbose=verbose).flatten()
+        s_ref = model(ref_b, verbose=False).flatten()
+        s_alt = model(alt_b, verbose=False).flatten()
         scores[start:end] = to_cpu(s_alt - s_ref)
 
     elapsed = time.time() - t0
@@ -367,13 +373,19 @@ def score_gkmexplain(
     N = len(X_ref)
     scores = np.zeros(N, dtype=np.float64)
 
+    chunks = range(0, N, batch_size)
+    if verbose:
+        from tqdm import tqdm
+        chunks = tqdm(chunks, desc="GkmExplain VEP",
+                      total=(N + batch_size - 1) // batch_size)
+
     t0 = time.time()
-    for start in range(0, N, batch_size):
+    for start in chunks:
         end = min(start + batch_size, N)
         ref_b = model._match_device(X_ref[start:end])
         alt_b = model._match_device(X_alt[start:end])
         s = model.score_variants(
-            ref_b, alt_b, method="gkmexplain", batch_size=end - start, verbose=verbose
+            ref_b, alt_b, method="gkmexplain", batch_size=end - start, verbose=False
         )
         scores[start:end] = to_cpu(s).flatten()
 
