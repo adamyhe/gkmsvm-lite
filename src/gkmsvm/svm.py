@@ -482,16 +482,11 @@ class GkmSVM:
             alt: [B, 4, L] alternate sequences.
             method: Scoring strategy.
                 "kernel" — score(alt) - score(ref) via full kernel (default).
-                "gkmexplain" — GkmExplain perturbation effect scores
-                    (Shrikumar et al. 2019 §5.2, lsgkm C mode 3).
-                    Computes discrete kernel-value deltas on ref, then
-                    reads off the predicted mutation effect at each
-                    position where ref and alt differ.  Faster than
-                    kernel when the model has many SVs, because only
-                    one attribution pass is needed per sequence.
+                "gkmexplain" — GkmExplain mutation impact score
+                    (Shrikumar et al. 2019, lsgkm ``gkmexplain -m 5``).
+                    See :func:`gkmsvm.explain.mutation_impact`.
             batch_size: Process inputs in batches of this size.  ``None``
-                means process all at once (for kernel) or use
-                ``gkmexplain``'s default of 50 (for gkmexplain).
+                means process all at once.
             verbose: Show tqdm progress bar.
 
         Returns:
@@ -502,20 +497,11 @@ class GkmSVM:
                     - self(ref, batch_size=batch_size, verbose=verbose))
 
         if method == "gkmexplain":
-            from gkmsvm.explain import gkmexplain
-            from gkmsvm.backend import get_array_module
+            from gkmsvm.explain import mutation_impact
 
-            ref = self._match_device(ref)
-            alt = self._match_device(alt)
-            kwargs = {"verbose": verbose}
-            if batch_size is not None:
-                kwargs["batch_size"] = batch_size
-            pert = gkmexplain(self, ref, mode="perturbation", **kwargs)
-            diff_mask = ref != alt
-            ref_contrib = (pert * ref * diff_mask).sum(axis=(1, 2))
-            alt_contrib = (pert * alt * diff_mask).sum(axis=(1, 2))
-            xp = get_array_module(pert)
-            return xp.reshape(alt_contrib - ref_contrib, (-1, 1))
+            return mutation_impact(
+                self, ref, alt, batch_size=batch_size, verbose=verbose,
+            )
 
         raise ValueError(
             f"method must be 'kernel' or 'gkmexplain', got {method!r}"
@@ -524,7 +510,8 @@ class GkmSVM:
     _MAX_LMER_TABLE_L = 14  # 4^14 ≈ 268M entries, ~1 GB
 
     def to_deltasvm(
-        self, *, device: str = "cpu", verbose: bool = False,
+        self, *, device: str = "cpu", query_norm: bool = False,
+        verbose: bool = False,
     ) -> "DeltaSVM":
         """Convert to a DeltaSVM linear scoring model.
 
@@ -543,6 +530,9 @@ class GkmSVM:
 
         Args:
             device: Device for the returned DeltaSVM model.
+            query_norm: Keep the per-l-mer normalization, so each weight
+                equals ``gkmpredict`` on that l-mer minus bias (how
+                deltaSVM weights are built from lsgkm models).
             verbose: Show progress bar during weight computation.
 
         Returns:
@@ -588,17 +578,18 @@ class GkmSVM:
 
         kernel = self.kernel
         adj_coefs = to_cpu(self.coefficients).astype(np.float64)
-        if kernel.normalize:
+        if kernel.normalize and not query_norm:
             sv_diag = to_cpu(self._get_sv_diag()).astype(np.float64)
             adj_coefs = adj_coefs / np.sqrt(np.clip(sv_diag, 1e-10, None))
 
         saved_norm = kernel.normalize
         saved_coefs = self.coefficients
         coef_dtype = to_cpu(saved_coefs).dtype
-        kernel.normalize = False
-        self.coefficients = self._match_device(
-            adj_coefs.astype(coef_dtype)
-        )
+        if not query_norm:
+            kernel.normalize = False
+            self.coefficients = self._match_device(
+                adj_coefs.astype(coef_dtype)
+            )
         try:
             for start in chunks:
                 end = min(start + chunk, n_lmers)

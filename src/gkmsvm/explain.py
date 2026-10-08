@@ -741,3 +741,119 @@ def gkmexplain(
                 result[b_start:b_end] += (persv * coefs_c).sum(axis=-1)
 
     return result.astype(x.dtype)
+
+
+def _base_kernel_and_gamma(kernel):
+    from gkmsvm.kernels.rbf import RbfGkmKernel
+    from gkmsvm.kernels.weighted import CenterWeightedRbfGkmKernel
+
+    if isinstance(kernel, (RbfGkmKernel, CenterWeightedRbfGkmKernel)):
+        return kernel._base, kernel.gamma
+    return kernel, None
+
+
+def _sv_windows(base, sv):
+    """Base-index + packed SV windows (fwd, rc) for the packed fast path."""
+    from gkmsvm.backend import to_cpu
+
+    def _pack(by):
+        xp = get_array_module(by)
+        if xp is np:
+            return _pack_windows_cpu(np.ascontiguousarray(by))
+        if is_mlx(by):
+            return xp.asarray(_pack_windows_cpu(np.ascontiguousarray(to_cpu(by))))
+        return xp.ascontiguousarray(_pack_windows_uint32(by, xp).T)
+
+    by = base.base_index_windows(sv)
+    out = [(by, _pack(by))]
+    if base.include_rc:
+        by_rc = base.base_index_windows(reverse_complement(sv))
+        out.append((by_rc, _pack(by_rc)))
+    return out
+
+
+def _base_raw_vs_sv(base, x, sv, sv_windows):
+    if sv_windows is None:
+        return base._raw_pairwise(x, sv)
+    bx = base.base_index_windows(x)
+    raw = None
+    for by, by_packed in sv_windows:
+        r = base.pairwise_from_indices(bx, by, by_packed_t=by_packed)
+        raw = r if raw is None else raw + r
+    return raw.astype(x.dtype)
+
+
+def mutation_impact(
+    model: GkmSVM,
+    ref: np.ndarray,
+    alt: np.ndarray,
+    *,
+    batch_size: int | None = None,
+    verbose: bool = False,
+) -> np.ndarray:
+    """GkmExplain mutation impact score (lsgkm ``gkmexplain -m 5``).
+
+    Shrikumar et al. 2019, as used for the dsQTL evaluation. Per support
+    vector j, with base (pre-RBF) kernel values normalized by the *reference*
+    sequence's norm::
+
+        K_j  = K_raw(ref, sv_j) / (|ref| |sv_j|)
+        dK_j = (K_raw(alt, sv_j) - K_raw(ref, sv_j)) / (|ref| |sv_j|)
+
+    Linear kernels: ``impact = sum_j coef_j * dK_j``. RBF kernels distribute
+    the kernel value above its K=0 floor proportionally::
+
+        impact = sum_j coef_j * (exp(g(K_j - 1)) - exp(-g)) * dK_j / K_j
+
+    (contribution is 0 when K_j <= 0). This is a linearization, so it differs
+    from ``score(alt) - score(ref)``.
+
+    Args:
+        model: Trained GkmSVM.
+        ref: [B, 4, L] reference sequences.
+        alt: [B, 4, L] alternate sequences.
+        batch_size: Process inputs in batches of this size.
+        verbose: Show tqdm progress bar over input batches.
+
+    Returns:
+        [B, 1] mutation impact scores.
+    """
+    from gkmsvm.backend import to_cpu
+
+    base, gamma = _base_kernel_and_gamma(model.kernel)
+    sv = model.support_sequences
+    coef = model.coefficients
+    sv_windows = (
+        _sv_windows(base, sv) if hasattr(base, "pairwise_from_indices") else None
+    )
+    if base.normalize:
+        cs = 1000 if sv.shape[0] > base._DIAG_CHUNK_THRESHOLD else None
+        sv_diag = base._raw_diagonal(sv, chunk_size=cs)
+
+    B = ref.shape[0]
+    bs = B if batch_size is None else batch_size
+    starts = range(0, B, bs)
+    if verbose:
+        from tqdm import tqdm
+        starts = tqdm(starts, desc="Mutation impact", total=(B + bs - 1) // bs)
+
+    parts = []
+    for s in starts:
+        r = model._match_device(ref[s:s + bs])
+        a = model._match_device(alt[s:s + bs])
+        xp = get_array_module(r)
+        k_ref = _base_raw_vs_sv(base, r, sv, sv_windows)
+        dk = _base_raw_vs_sv(base, a, sv, sv_windows) - k_ref
+        if base.normalize:
+            norm = xp.sqrt(base._raw_diagonal(r)[:, None] * sv_diag[None, :])
+            norm = xp.clip(norm, 1e-10, None)
+            k_ref = k_ref / norm
+            dk = dk / norm
+        if gamma is not None:
+            pos = k_ref > 0
+            safe_k = xp.where(pos, k_ref, 1.0)
+            scale = (xp.exp(gamma * (k_ref - 1)) - np.exp(-gamma)) / safe_k
+            dk = xp.where(pos, dk * scale, 0.0)
+        parts.append(to_cpu((dk * coef).sum(axis=1, keepdims=True)))
+
+    return np.concatenate(parts, axis=0)

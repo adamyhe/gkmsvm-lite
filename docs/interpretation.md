@@ -33,9 +33,9 @@ pert = gkmexplain(model, x, mode="perturbation")  # [B, 4, L]
 
 Importance is exactly `hypothetical * one_hot_input`. Internally, only the hypothetical computation runs — importance is derived by element-wise multiplication with the input one-hot.
 
-**Perturbation** (`mode="perturbation"`, legacy `mode=2`) computes the discrete kernel-value change from each possible single-base mutation. At each position, the reference base channel is zero; alternate base channels contain the predicted score change from that mutation. Corresponds to lsgkm C mode 3 (`perturbation_eff=1`). Uses `gamma[m] = mismatch_table[m+1] - mismatch_table[m]` for match-to-mismatch and `kappa[m] = mismatch_table[m-1] - mismatch_table[m]` for mismatch-to-match. Use for:
-- Variant effect prediction via `model.score_variants(ref, alt, method="gkmexplain")`
-- Mutation impact scoring (Shrikumar et al. 2019)
+**Perturbation** (`mode="perturbation"`, legacy `mode=2`) computes the discrete kernel-value change from each possible single-base mutation. At each position, the reference base channel is zero; alternate base channels contain the predicted score change from that mutation. Corresponds to lsgkm C mode 3 (`perturbation_eff=1`). Uses `gamma[m] = mismatch_table[m+1] - mismatch_table[m]` for match-to-mismatch and `kappa[m] = mismatch_table[m-1] - mismatch_table[m]` for mismatch-to-match. Exact for linear kernels; does not account for the RBF `exp()` in `-t 3`/`-t 5`. Use for per-position mutation maps.
+
+**Mutation impact score** (`mutation_impact(model, ref, alt)`, or `model.score_variants(ref, alt, method="gkmexplain")`) is the variant effect score used in the GkmExplain paper's dsQTL evaluation (lsgkm `gkmexplain -m 5`). Per support vector, the base-kernel change is normalized by the *reference* sequence's norm; for RBF kernels the kernel value above its floor, `exp(γ(K-1)) - exp(-γ)`, is distributed in proportion to `ΔK / K`. It is a linearization, so it differs slightly from ISM (`score(alt) - score(ref)`). Verified against lsgkm `gkmexplain -m 5` output.
 
 ### Practical usage
 
@@ -109,7 +109,7 @@ ISM works on all backends (CPU, NVIDIA GPU, and Apple Silicon MLX). On MLX, ISM 
 
 GkmExplain is both faster and more informative than ISM. ISM suffers from **saturation effects**: when multiple motifs can independently drive the score (OR logic), mutating one motif has no effect if the other is intact, so ISM reports both as unimportant. GkmExplain analytically decomposes the kernel and correctly attributes importance to all contributing motifs regardless of redundancy. Hypothetical importance scores enable motif discovery with TF-MoDISco and are not available from ISM.
 
-For variant effect prediction, use `mode="perturbation"` (or `model.score_variants(method="gkmexplain")`), which computes the discrete kernel-value change from each mutation. Use ISM when you need exact mutation impact scores. KernelSHAP provides formal Shapley value guarantees but is impractical for routine use due to the cost of repeated kernel evaluations.
+For variant effect prediction, use `model.score_variants(method="gkmexplain")` (the paper's mutation impact score) or ISM (`method="kernel"`) for the exact score change. KernelSHAP provides formal Shapley value guarantees but is impractical for routine use due to the cost of repeated kernel evaluations.
 
 ## Paired REF/ALT scoring
 

@@ -411,3 +411,59 @@ class TestGkmExplainEdgeCases:
         exp_sum = (exp * x).sum(axis=(1, 2))
         expected = score - model.bias
         np.testing.assert_allclose(exp_sum, expected.astype(exp_sum.dtype), atol=1e-6)
+
+
+class TestMutationImpactOracle:
+    """Mutation impact vs lsgkm ``gkmexplain -m 5`` on -t 2 and -t 3 models."""
+
+    FIXTURES = __import__("pathlib").Path(__file__).parent / "fixtures"
+
+    def _load(self, kind):
+        from gkmsvm.fasta import read_fasta
+        from gkmsvm.importers.lsgkm import load_lsgkm_model
+
+        model = load_lsgkm_model(
+            str(self.FIXTURES / f"lsgkm_mode5_{kind}.model.txt.gz"), dtype=np.float64
+        )
+        seqs = [s for _, s in read_fasta(str(self.FIXTURES / "lsgkm_mode5_test51.fa"))]
+        rows = [l.split("\t") for l in open(self.FIXTURES / f"lsgkm_mode5_{kind}.txt")]
+        oracle = np.array([[float(v) for v in r[2].split(",")] for r in rows])
+        pred = np.array(
+            [float(l.split("\t")[1]) for l in open(self.FIXTURES / f"lsgkm_mode5_{kind}.pred.txt")]
+        )
+        return model, seqs, oracle, pred
+
+    @pytest.mark.parametrize("kind", ["rbf", "est"])
+    def test_matches_lsgkm_mode5(self, kind):
+        from gkmsvm.explain import mutation_impact
+
+        model, seqs, oracle, _ = self._load(kind)
+        c = len(seqs[0]) // 2
+        ref, alt = [], []
+        for s in seqs:
+            for b in "ACGT":
+                ref.append(one_hot_encode(s, dtype=np.float64))
+                alt.append(one_hot_encode(s[:c] + b + s[c + 1:], dtype=np.float64))
+        got = mutation_impact(model, np.stack(ref), np.stack(alt)).reshape(-1, 4)
+        np.testing.assert_allclose(got, oracle, rtol=1e-4, atol=1e-6)
+
+    @pytest.mark.parametrize("kind", ["rbf", "est"])
+    def test_forward_matches_gkmpredict(self, kind):
+        model, seqs, _, pred = self._load(kind)
+        x = np.stack([one_hot_encode(s, dtype=np.float64) for s in seqs])
+        np.testing.assert_allclose(model(x).ravel(), pred, rtol=1e-4, atol=1e-6)
+
+    def test_score_variants_uses_mutation_impact(self):
+        from gkmsvm.explain import mutation_impact
+
+        model, seqs, _, _ = self._load("rbf")
+        c = len(seqs[0]) // 2
+        ref = np.stack([one_hot_encode(s, dtype=np.float64) for s in seqs])
+        alt = np.stack([
+            one_hot_encode(s[:c] + ("A" if s[c] != "A" else "C") + s[c + 1:], dtype=np.float64)
+            for s in seqs
+        ])
+        np.testing.assert_allclose(
+            model.score_variants(ref, alt, method="gkmexplain", batch_size=7),
+            mutation_impact(model, ref, alt),
+        )

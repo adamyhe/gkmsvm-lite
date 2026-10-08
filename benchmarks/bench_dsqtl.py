@@ -1,32 +1,29 @@
-"""Benchmark: dsQTL variant effect prediction.
+"""Benchmark: dsQTL variant effect prediction (Shrikumar et al. 2019, Fig. 8).
 
-Trains gkm-SVMs on GM12878 DNase-seq peaks (Beer lab data) and evaluates
-variant effect prediction methods per-model across negative sets:
-  - DeltaSVM: k-mer weight linear approximation (per-model and averaged)
-  - Kernel VEP: score(alt) - score(ref) (exact)
-  - GkmExplain VEP: perturbation mode (non-RBF kernels only)
+Replicates the GkmExplain dsQTL evaluation
+(github.com/kundajelab/gkmexplain/tree/master/dsQTL). Per model (one per
+negative set), with per-model AUPRC and scores summed across models:
+  - deltaSVM: l-mer weights = gkmpredict on each 10-mer (19bp Beer lab seqs)
+  - ISM: score(alt) - score(ref) (51bp hg18 context, as in the paper)
+  - GkmExplain: mutation impact score, lsgkm ``gkmexplain -m 5`` (51bp)
 
-Supports three parameter settings:
-  - l=10, k=6, d=3, -t 2 (Lee 2015 original, matching published deltaSVM)
-  - l=11, k=7, d=3, -t 2 (LS-GKM defaults, matching ENCODE models)
-  - l=10, k=6, d=3, -t 3, gamma=2, C=10 (Shrikumar 2019 gkmrbf)
+Parameter sets:
+  - l10k6, l11k7: -t 2, trained here
+  - l10k6_rbf, l11k7_rbf: -t 3 gkmrbf, gamma=2, C=10, trained here
+  - paper_t2, paper_t3: the paper's published lsgkm models (downloaded)
 
-For -t 3 (RBF), kernel VEP is the exact method matching gkmexplain mode 5
-(Shrikumar et al. 2019 §5.2). The non-linear exp() transformation makes
-kernel VEP outperform deltaSVM's linear approximation. GkmExplain
-perturbation mode is not valid for RBF kernels.
+The paper's per-negset AUPRCs are printed for the l=10 k=6 sets.
 
 Pass --replicate-published to also compare against Lee 2015 published
 deltaSVM scores (downloads hg19 genome, ~900 MB compressed).
 
-All data auto-downloaded on first run. Trained models cached to
-benchmarks/models/ and reloaded on subsequent runs.
+All data auto-downloaded on first run (hg18 genome, ~940 MB compressed, for
+51bp context). Trained models cached to benchmarks/models/.
 
 Usage:
   python benchmarks/bench_dsqtl.py --device cuda
-  python benchmarks/bench_dsqtl.py --device cuda --params l10k6
-  python benchmarks/bench_dsqtl.py --params l10k6_rbf     # gkmexplain paper
-  python benchmarks/bench_dsqtl.py --params all            # all three
+  python benchmarks/bench_dsqtl.py --params paper_t3     # paper's models
+  python benchmarks/bench_dsqtl.py --params l10k6_rbf    # retrained gkmrbf
   python benchmarks/bench_dsqtl.py --n-negsets 1 --params l10k6  # quick
   python benchmarks/bench_dsqtl.py --replicate-published
   python benchmarks/bench_dsqtl.py --force-train
@@ -60,15 +57,37 @@ LEE2015_URL = (
     "art%3A10.1038%2Fng.3331/MediaObjects/41588_2015_BFng3331_MOESM26_ESM.xlsx"
 )
 HG19_URL = "https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa.gz"
+HG18_URL = "https://hgdownload.soe.ucsc.edu/goldenPath/hg18/bigZips/hg18.fa.gz"
+PAPER_MODEL_URL = (
+    "https://raw.githubusercontent.com/kundajelab/gkmexplain/master/dsQTL/"
+    "gm12878_sequence_sets/gkmsvm_{tag}_negset{i}.model.txt"
+)
 
 PARAM_SETS = {
     "l10k6": {"l": 10, "k": 6, "d": 3, "kernel_type": "estimated"},
     "l11k7": {"l": 11, "k": 7, "d": 3, "kernel_type": "estimated"},
     "l10k6_rbf": {"l": 10, "k": 6, "d": 3, "kernel_type": "rbf", "gamma": 2.0, "C": 10.0},
     "l11k7_rbf": {"l": 11, "k": 7, "d": 3, "kernel_type": "rbf", "gamma": 2.0, "C": 10.0},
+    "paper_t2": {"l": 10, "k": 6, "d": 3, "kernel_type": "estimated",
+                 "paper": "t2_l10_k6_d3_t16"},
+    "paper_t3": {"l": 10, "k": 6, "d": 3, "kernel_type": "rbf", "gamma": 2.0, "C": 10.0,
+                 "paper": "t3_l10_k6_d3_c10_g2_t16"},
+}
+
+# Shrikumar et al. 2019 per-negset AUPRCs (gkmexplain repo, summarize_auprcs.sh).
+PAPER_AUPRC = {
+    "GkmExplain": [0.18905, 0.19101, 0.18523, 0.18698, 0.19477],
+    "ISM": [0.18808, 0.18968, 0.18433, 0.18569, 0.19432],
+    "deltaSVM-gkmrbf": [0.18287, 0.18649, 0.18001, 0.18028, 0.18733],
+    "deltaSVM-gkm": [0.17918, 0.18565, 0.17697, 0.17943, 0.18483],
+}
+PAPER_REF_COLUMNS = {
+    "rbf": {"deltaSVM": "deltaSVM-gkmrbf", "ISM": "ISM", "GkmExplain": "GkmExplain"},
+    "estimated": {"deltaSVM": "deltaSVM-gkm"},
 }
 
 FLANK = 9
+CONTEXT_HALF = 25
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +112,7 @@ def download_data(replicate_published: bool = False):
             tar.extractall(SEQ_DIR.parent, filter="data")
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _download_genome(HG18_URL, "hg18")
 
     # GEO effect sizes
     geo_path = DATA_DIR / "GSE31388_dsQtlTable.txt.gz"
@@ -128,18 +148,23 @@ def download_data(replicate_published: bool = False):
             )
         wb.close()
 
-    # hg19 genome
-    import shutil
+    _download_genome(HG19_URL, "hg19")
 
-    fasta_path = DATA_DIR / "hg19.fa"
-    if not fasta_path.exists():
-        gz_path = DATA_DIR / "hg19.fa.gz"
-        if not gz_path.exists():
-            print("Downloading hg19 genome (~900 MB compressed)...")
-            urlretrieve(HG19_URL, gz_path)
-        print("Decompressing hg19.fa.gz...")
-        with gzip.open(gz_path, "rb") as f_in, open(fasta_path, "wb") as f_out:
-            shutil.copyfileobj(f_in, f_out)
+
+def _download_genome(url: str, name: str):
+    import shutil
+    from urllib.request import urlretrieve
+
+    fasta_path = DATA_DIR / f"{name}.fa"
+    if fasta_path.exists():
+        return
+    gz_path = DATA_DIR / f"{name}.fa.gz"
+    if not gz_path.exists():
+        print(f"Downloading {name} genome (~900 MB compressed)...")
+        urlretrieve(url, gz_path)
+    print(f"Decompressing {name}.fa.gz...")
+    with gzip.open(gz_path, "rb") as f_in, open(fasta_path, "wb") as f_out:
+        shutil.copyfileobj(f_in, f_out)
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +190,26 @@ def load_training_data(n_negsets: int = 5):
     return pos_seqs, neg_sets
 
 
+def _context_seqs(major, minor, genome):
+    """51bp hg18 context with the Beer lab allele at the center.
+
+    Mirrors prep_fasta_for_ism_and_gkmexplain.sh in the gkmexplain repo.
+    """
+    ref_seqs, alt_seqs = [], []
+    for (name, maj), (_, mnr) in zip(major, minor):
+        chrom, rng = name.split(":")
+        center = int(rng.split("-")[0]) + FLANK
+        ctx = str(genome[chrom][center - CONTEXT_HALF - 1:center + CONTEXT_HALF]).upper()
+        left, right = ctx[:CONTEXT_HALF], ctx[CONTEXT_HALF + 1:]
+        ref_seqs.append(left + maj[FLANK].upper() + right)
+        alt_seqs.append(left + mnr[FLANK].upper() + right)
+    return ref_seqs, alt_seqs
+
+
 def load_test_variants():
+    """Returns (19bp ref/alt for deltaSVM, 51bp ref/alt for ISM/GkmExplain)."""
+    import pyfaidx
+
     from gkmsvm import one_hot_encode, read_fasta
 
     pos_major = list(read_fasta(str(SEQ_DIR / "dsqtl_test_pos.major.fa")))
@@ -173,23 +217,29 @@ def load_test_variants():
     neg_major = list(read_fasta(str(SEQ_DIR / "dsqtl_test_neg.major.fa")))
     neg_minor = list(read_fasta(str(SEQ_DIR / "dsqtl_test_neg.minor.fa")))
 
-    ref_seqs = [s for _, s in pos_major] + [s for _, s in neg_major]
-    alt_seqs = [s for _, s in pos_minor] + [s for _, s in neg_minor]
+    major, minor = pos_major + neg_major, pos_minor + neg_minor
     labels = np.array([1] * len(pos_major) + [0] * len(neg_major))
 
-    X_ref = np.stack([one_hot_encode(s) for s in ref_seqs])
-    X_alt = np.stack([one_hot_encode(s) for s in alt_seqs])
+    def _enc(seqs):
+        return np.stack([one_hot_encode(s, dtype=np.float64, allow_n=True) for s in seqs])
+
+    X19 = (_enc([s for _, s in major]), _enc([s for _, s in minor]))
+    genome = pyfaidx.Fasta(str(DATA_DIR / "hg18.fa"))
+    ref51, alt51 = _context_seqs(major, minor, genome)
+    genome.close()
+    X51 = (_enc(ref51), _enc(alt51))
 
     print(
         f"Test variants: {len(labels)} ({labels.sum()} sig + "
-        f"{(labels == 0).sum()} ctrl), {len(ref_seqs[0])}bp"
+        f"{(labels == 0).sum()} ctrl), {X19[0].shape[2]}bp (deltaSVM), "
+        f"{X51[0].shape[2]}bp (ISM/GkmExplain)"
     )
 
     effect_sizes = _load_effect_sizes(pos_major)
     if effect_sizes is not None:
         effect_sizes = np.concatenate([effect_sizes, np.full(len(neg_major), np.nan)])
 
-    return X_ref, X_alt, labels, effect_sizes
+    return X19, X51, labels, effect_sizes
 
 
 def _load_effect_sizes(pos_major: list[tuple[str, str]]) -> np.ndarray | None:
@@ -238,7 +288,20 @@ def _model_path(pk: str, neg_idx: int) -> Path:
 
 
 def _dsvm_path(pk: str, neg_idx: int) -> Path:
-    return MODEL_DIR / f"gm12878_{pk}_neg{neg_idx}_dsvm.npz"
+    return MODEL_DIR / f"gm12878_{pk}_neg{neg_idx}_dsvm_qn.npz"
+
+
+def _load_paper_model(tag: str, neg_idx: int):
+    from urllib.request import urlretrieve
+
+    from gkmsvm.importers.lsgkm import load_lsgkm_model
+
+    path = MODEL_DIR / f"gkmsvm_{tag}_negset{neg_idx}.model.txt"
+    if not path.exists():
+        MODEL_DIR.mkdir(parents=True, exist_ok=True)
+        print(f"  Downloading {path.name}...")
+        urlretrieve(PAPER_MODEL_URL.format(tag=tag, i=neg_idx), path)
+    return load_lsgkm_model(str(path), dtype=np.float64)
 
 
 def train_models(
@@ -271,7 +334,10 @@ def train_models(
         cached = _model_path(pk, i + 1)
         dsvm_cached = _dsvm_path(pk, i + 1)
 
-        if cached.exists() and not force_train:
+        if "paper" in params:
+            print(f"\n── Model {i + 1}/{len(neg_sets)} ({pk}) ── [published]")
+            m = _load_paper_model(params["paper"], i + 1)
+        elif cached.exists() and not force_train:
             print(
                 f"\n── Model {i + 1}/{len(neg_sets)} "
                 f"(l={params['l']} k={params['k']}) ── [cached]"
@@ -309,7 +375,7 @@ def train_models(
             if device == "cuda":
                 m.cuda()
             t0 = time.time()
-            d = m.to_deltasvm(device=device, verbose=verbose)
+            d = m.to_deltasvm(device=device, query_norm=True, verbose=verbose)
             print(f"  DeltaSVM conversion: {time.time() - t0:.1f}s")
             m.cpu()
             d.cpu()
@@ -343,51 +409,29 @@ def score_deltasvm(dsvm, X_ref, X_alt):
     return scores
 
 
-def score_kernel(
-    model, X_ref, X_alt, device: str, batch_size: int = 64, verbose: bool = False,
+def score_vep(
+    model, X_ref, X_alt, device: str, method: str, batch_size: int = 64,
+    verbose: bool = False,
 ):
     from gkmsvm.backend import to_cpu
 
     if device == "cuda":
         model.cuda()
-
-    N = len(X_ref)
-    t0 = time.time()
-    scores = to_cpu(
-        model.score_variants(X_ref, X_alt, batch_size=batch_size, verbose=verbose)
-    ).flatten()
-    elapsed = time.time() - t0
-
-    model.cpu()
-    print(
-        f"  Kernel VEP: {N} variants in {elapsed:.1f}s ({N * 2 / elapsed:.0f} seqs/s)"
-    )
-    return scores
-
-
-def score_gkmexplain(
-    model, X_ref, X_alt, device: str, batch_size: int = 32, verbose: bool = False,
-):
-    from gkmsvm.backend import to_cpu
-
-    if device == "cuda":
-        model.cuda()
+    elif device == "mlx":
+        model.mlx()
 
     N = len(X_ref)
     t0 = time.time()
     scores = to_cpu(
         model.score_variants(
-            X_ref, X_alt, method="gkmexplain",
-            batch_size=batch_size, verbose=verbose,
+            X_ref, X_alt, method=method, batch_size=batch_size, verbose=verbose,
         )
     ).flatten()
     elapsed = time.time() - t0
 
     model.cpu()
-    print(
-        f"  GkmExplain VEP: {N} variants in {elapsed:.1f}s "
-        f"({N / elapsed:.0f} variants/s)"
-    )
+    label = "ISM" if method == "kernel" else "GkmExplain"
+    print(f"  {label}: {N} variants in {elapsed:.1f}s ({N / elapsed:.0f} variants/s)")
     return scores
 
 
@@ -638,7 +682,7 @@ def main():
     # --- Train and evaluate ---
     print("\nLoading data...")
     pos_seqs, neg_sets = load_training_data(n_negsets=args.n_negsets)
-    X_ref, X_alt, labels, effect_sizes = load_test_variants()
+    X19, X51, labels, effect_sizes = load_test_variants()
 
     param_keys = list(PARAM_SETS.keys()) if args.params == "all" else [args.params]
 
@@ -662,60 +706,48 @@ def main():
         )
 
         results = []
-
-        # --- Per-model evaluation ---
-        per_model_dsvm = np.zeros((len(models), len(labels)))
-        per_model_kernel = np.zeros((len(models), len(labels)))
+        X19_ref, X19_alt = X19
+        X51_ref, X51_alt = X51
+        methods = ("deltaSVM", "ISM", "GkmExplain")
+        per_model = {name: np.zeros((len(models), len(labels))) for name in methods}
 
         for mi in range(len(models)):
             print(f"\n── Evaluating model {mi + 1}/{len(models)} ──")
-
-            print(f"  deltaSVM (model {mi + 1})...")
-            per_model_dsvm[mi] = score_deltasvm(dsvms[mi], X_ref, X_alt)
-
-            print(f"  kernel VEP (model {mi + 1})...")
-            per_model_kernel[mi] = score_kernel(
-                models[mi], X_ref, X_alt, args.device, verbose=args.verbose,
+            per_model["deltaSVM"][mi] = score_deltasvm(dsvms[mi], X19_ref, X19_alt)
+            per_model["ISM"][mi] = score_vep(
+                models[mi], X51_ref, X51_alt, args.device, "kernel",
+                verbose=args.verbose,
+            )
+            per_model["GkmExplain"][mi] = score_vep(
+                models[mi], X51_ref, X51_alt, args.device, "gkmexplain",
+                verbose=args.verbose,
             )
 
-        # Per-model AUPRC
-        print(f"\n  Per-model AUPRC:")
-        print(f"  {'Model':>8s}  {'deltaSVM':>10s}  {'kernel':>10s}")
+        paper_cols = (
+            PAPER_REF_COLUMNS[params["kernel_type"]]
+            if (params["l"], params["k"]) == (10, 6) else {}
+        )
+        header = "".join(f"  {name:>11s}" for name in methods)
+        header += "".join(f"  {'paper ' + name:>17s}" for name in paper_cols)
+        print(f"\n  Per-model AUPRC ({pk}):")
+        print(f"  {'Model':>5s}{header}")
         for mi in range(len(models)):
-            d_ap = average_precision_score(labels, np.abs(per_model_dsvm[mi]))
-            k_ap = average_precision_score(labels, np.abs(per_model_kernel[mi]))
-            print(f"  {mi + 1:>8d}  {d_ap:>10.4f}  {k_ap:>10.4f}")
+            row = "".join(
+                f"  {average_precision_score(labels, np.abs(per_model[name][mi])):>11.4f}"
+                for name in methods
+            )
+            row += "".join(
+                f"  {PAPER_AUPRC[ref][mi]:>17.4f}" for ref in paper_cols.values()
+            )
+            print(f"  {mi + 1:>5d}{row}")
 
-        # Combined (sum across models)
-        combined_dsvm = per_model_dsvm.sum(axis=0)
-        combined_kernel = per_model_kernel.sum(axis=0)
-
-        # Also score with averaged deltaSVM weights
         print("\nScoring with deltaSVM (averaged weights)...")
-        avg_dsvm_scores = score_deltasvm(avg_dsvm, X_ref, X_alt)
-
+        avg_dsvm_scores = score_deltasvm(avg_dsvm, X19_ref, X19_alt)
         results.append(evaluate(avg_dsvm_scores, labels, effect_sizes, f"deltaSVM-avg ({pk})"))
-        results.append(evaluate(combined_dsvm, labels, effect_sizes, f"deltaSVM-sum ({pk})"))
-        results.append(evaluate(combined_kernel, labels, effect_sizes, f"kernel-sum ({pk})"))
-
-        # GkmExplain VEP — only for non-RBF (perturbation mode is not valid for RBF)
-        if not is_rbf:
-            explain_device = args.device if args.device != "mlx" else "cpu"
-            if explain_device != args.device:
-                print("\nGkmExplain unsupported on MLX, falling back to CPU...")
-            per_model_explain = np.zeros((len(models), len(labels)))
-            for mi in range(len(models)):
-                print(f"\n  gkmexplain VEP (model {mi + 1})...")
-                per_model_explain[mi] = score_gkmexplain(
-                    models[mi], X_ref, X_alt, explain_device, verbose=args.verbose,
-                )
-            combined_explain = per_model_explain.sum(axis=0)
-            results.append(evaluate(combined_explain, labels, effect_sizes, f"gkmexplain-sum ({pk})"))
-
-            print(f"\n  Per-model AUPRC (gkmexplain):")
-            for mi in range(len(models)):
-                e_ap = average_precision_score(labels, np.abs(per_model_explain[mi]))
-                print(f"    Model {mi + 1}: {e_ap:.4f}")
+        for name in methods:
+            results.append(evaluate(
+                per_model[name].sum(axis=0), labels, effect_sizes, f"{name}-sum ({pk})",
+            ))
 
         print_results(results, pk)
         all_results.extend(results)

@@ -208,17 +208,12 @@ class CenterWeightedRbfGkmKernel(GkmKernel):
         self.H = H
         self.gamma = gamma
         self._base = CenterWeightedGkmKernel(
-            l, k, M=M, H=H, normalize=False, include_rc=include_rc
+            l, k, M=M, H=H, normalize=True, include_rc=include_rc
         )
 
     def _raw_pairwise(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
         xp = get_array_module(x)
-        K_xy = self._base._raw_pairwise(x, y)
-        K_xx = self._base._raw_diagonal(x)
-        cs = 1000 if y.shape[0] > self._DIAG_CHUNK_THRESHOLD else None
-        K_yy = self._base._raw_diagonal(y, chunk_size=cs)
-        dist_sq = K_xx[:, None] + K_yy[None, :] - 2 * K_xy
-        return xp.exp(-self.gamma * xp.clip(dist_sq, 0, None))
+        return xp.exp(self.gamma * (self._base.pairwise(x, y) - 1))
 
     def _raw_diagonal(
         self, x: np.ndarray, *, chunk_size: int | None = None

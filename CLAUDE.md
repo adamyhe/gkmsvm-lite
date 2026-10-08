@@ -58,7 +58,10 @@ src/gkmsvm/
 - GkmExplain: `gkmexplain(model, x, mode=..., batch_size=50)` → `[B, 4, L]` attribution scores. MLX unsupported (float32 violates completeness axiom). Modes (string or legacy int):
   - `"importance"` (0) — hypothetical × one-hot. Sum = score - bias (completeness axiom). For visualization.
   - `"hypothetical"` (1) — all 4 bases. For TF-MoDISco.
-  - `"perturbation"` (2) — discrete kernel-value Δ per mutation (lsgkm C mode 3, `perturbation_eff=1`). For variant effect prediction via `score_variants(method="gkmexplain")`.
+  - `"perturbation"` (2) — discrete kernel-value Δ per mutation (lsgkm C mode 3, `perturbation_eff=1`). Ignores the RBF `exp()`.
+- Mutation impact: `mutation_impact(model, ref, alt)` = lsgkm `gkmexplain -m 5`, the paper's dsQTL VEP score. `score_variants(method="gkmexplain")` calls it. Normalizes ΔK by the ref norm only; RBF distributes `exp(γ(K-1)) - exp(-γ)` proportionally to ΔK/K. Not equal to ISM. Oracle: `tests/fixtures/lsgkm_mode5_*`.
+- RBF (`-t 3`, `-t 5`): `K = exp(γ(K_norm - 1))` on the normalized base kernel, matching lsgkm.
+- `to_deltasvm(query_norm=True)` makes each weight = gkmpredict on that l-mer (how lsgkm deltaSVM weights are built); default drops the l-mer norm.
 - `batch_size` on `model()`, `score_variants()`, `ism()`, `gkmexplain()` chunks over inputs. SV chunking is internal via `model.sv_chunk_size`.
 - `verbose=True` on `model()`, `score_variants()`, `ism()`, `gkmexplain()` enables tqdm progress bars over input batches
 - No PyTorch dependency. Gradient-based methods are incompatible — use GkmExplain or ISM

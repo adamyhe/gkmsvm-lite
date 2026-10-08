@@ -10,7 +10,7 @@ from gkmsvm.codec import (
     validate,
 )
 from gkmsvm.deltasvm import DeltaSVM
-from gkmsvm.explain import gkmexplain
+from gkmsvm.explain import gkmexplain, mutation_impact
 from gkmsvm.fasta import extract_loci, read_fasta, write_fasta
 from gkmsvm.importers.classic import load_classic_model
 from gkmsvm.importers.deltasvm import load_deltasvm_model
@@ -47,6 +47,7 @@ __all__ = [
     "extract_loci",
     "ism",
     "gkmexplain",
+    "mutation_impact",
     "train_gkmsvm",
     "train_gkmsvr",
     "load_model",
