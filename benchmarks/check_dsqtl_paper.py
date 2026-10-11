@@ -9,6 +9,7 @@ deltaSVM is computed three ways to localize any mismatch:
   table     — to_deltasvm(query_norm=True) on --device, scored on CPU
   direct    — gkmpredict on each 10-mer the variants use, model() on --device
   direct-cpu — the same on CPU, for a random subset of those 10-mers
+  deltaSVM.pl — the table with poly-A/T zeroed, as the Beer lab script scores
 
 Usage:
   python benchmarks/check_dsqtl_paper.py --device cuda
@@ -167,6 +168,8 @@ def main():
             _compare(rows, f"{p} weights table vs cpu", table[uniq[cpu_sel]], w_cpu, None)
             _compare(rows, f"{p} deltaSVM table vs paper", table_scores, paper_dsvm, labels)
             _compare(rows, f"{p} deltaSVM direct vs paper", direct_scores, paper_dsvm, labels)
+            pl_scores = bench.deltasvm_pl(dsvm).score_variants(X19[0], X19[1]).ravel()
+            _compare(rows, f"{p} deltaSVM.pl vs paper", pl_scores, paper_dsvm, labels)
 
             if t == "t3":
                 for kind, method in (("ISM", "kernel"), ("GkmExplain", "gkmexplain")):

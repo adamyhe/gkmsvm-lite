@@ -4,6 +4,10 @@ Replicates the GkmExplain dsQTL evaluation
 (github.com/kundajelab/gkmexplain/tree/master/dsQTL). Per model (one per
 negative set), with per-model AUPRC and scores summed across models:
   - deltaSVM: l-mer weights = gkmpredict on each 10-mer (19bp Beer lab seqs)
+  - deltaSVM.pl: the same, scored as the Beer lab deltasvm.pl does. That
+    script reads the first line of the weight file as a bias header, so
+    AAAAAAAAAA/TTTTTTTTTT (first in nrkmers.py output) get weight 0. The
+    paper's deltaSVM AUPRCs come from this.
   - ISM: score(alt) - score(ref) (51bp hg18 context, as in the paper)
   - GkmExplain: mutation impact score, lsgkm ``gkmexplain -m 5`` (51bp)
 
@@ -82,8 +86,8 @@ PAPER_AUPRC = {
     "deltaSVM-gkm": [0.17918, 0.18565, 0.17697, 0.17943, 0.18483],
 }
 PAPER_REF_COLUMNS = {
-    "rbf": {"deltaSVM": "deltaSVM-gkmrbf", "ISM": "ISM", "GkmExplain": "GkmExplain"},
-    "estimated": {"deltaSVM": "deltaSVM-gkm"},
+    "rbf": {"deltaSVM.pl": "deltaSVM-gkmrbf", "ISM": "ISM", "GkmExplain": "GkmExplain"},
+    "estimated": {"deltaSVM.pl": "deltaSVM-gkm"},
 }
 
 FLANK = 9
@@ -409,6 +413,25 @@ def score_deltasvm(dsvm, X_ref, X_alt):
     return scores
 
 
+def deltasvm_pl(dsvm):
+    """Copy of an l-mer table with poly-A/T zeroed, as deltasvm.pl scores it.
+
+    deltasvm.pl discards the first line of the weight file as a bias header;
+    for gkmpredict output on nrkmers.py l-mers that line is AAAAAAAAAA, whose
+    weight is also used for its reverse complement.
+    """
+    from gkmsvm.backend import to_cpu
+
+    if dsvm.k != dsvm.l:
+        raise ValueError("deltasvm_pl() needs an l-mer table (k == l)")
+    out = copy.deepcopy(dsvm)
+    out.cpu()
+    w = np.array(to_cpu(out.weights))
+    w[0] = w[-1] = 0.0  # A...A and T...T (first base most significant)
+    out.weights = w
+    return out
+
+
 def score_vep(
     model, X_ref, X_alt, device: str, method: str, batch_size: int = 64,
     verbose: bool = False,
@@ -708,12 +731,15 @@ def main():
         results = []
         X19_ref, X19_alt = X19
         X51_ref, X51_alt = X51
-        methods = ("deltaSVM", "ISM", "GkmExplain")
+        methods = ("deltaSVM", "deltaSVM.pl", "ISM", "GkmExplain")
         per_model = {name: np.zeros((len(models), len(labels))) for name in methods}
 
         for mi in range(len(models)):
             print(f"\n── Evaluating model {mi + 1}/{len(models)} ──")
             per_model["deltaSVM"][mi] = score_deltasvm(dsvms[mi], X19_ref, X19_alt)
+            per_model["deltaSVM.pl"][mi] = score_deltasvm(
+                deltasvm_pl(dsvms[mi]), X19_ref, X19_alt
+            )
             per_model["ISM"][mi] = score_vep(
                 models[mi], X51_ref, X51_alt, args.device, "kernel",
                 verbose=args.verbose,

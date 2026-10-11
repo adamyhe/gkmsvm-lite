@@ -90,3 +90,4 @@ src/gkmsvm/
 - `-t 4`/`-t 5` (wgkm/wgkmrbf) require M and H parameters; these use per-position DP, not the matmul+table path.
 - LS-GKM C is GPL v3 — cannot wrap or link against it (gkmsvm-lite is MIT).
 - GPU float32 diagonal causes <3e-3 score difference vs CPU float64.
+- Beer lab `deltasvm.pl` drops the first weight-file line as a bias header; with gkmpredict output on `nrkmers.py` l-mers that zeros AAAAAAAAAA/TTTTTTTTTT. Published deltaSVM scores from that script (e.g. the GkmExplain paper) include this; `bench_dsqtl.deltasvm_pl()` reproduces it.
