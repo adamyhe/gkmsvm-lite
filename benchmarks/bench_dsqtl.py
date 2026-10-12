@@ -414,20 +414,22 @@ def score_deltasvm(dsvm, X_ref, X_alt):
 
 
 def deltasvm_pl(dsvm):
-    """Copy of an l-mer table with poly-A/T zeroed, as deltasvm.pl scores it.
+    """Copy of an l-mer table with poly-A/T dropped, as deltasvm.pl scores it.
 
     deltasvm.pl discards the first line of the weight file as a bias header;
     for gkmpredict output on nrkmers.py l-mers that line is AAAAAAAAAA, whose
-    weight is also used for its reverse complement.
+    weight is also used for its reverse complement. Missing l-mers score 0 in
+    the raw gkmpredict scale, which includes the bias; our table stores
+    gkmpredict - bias, so 0 there is -bias.
     """
     from gkmsvm.backend import to_cpu
 
-    if dsvm.k != dsvm.l:
-        raise ValueError("deltasvm_pl() needs an l-mer table (k == l)")
+    if dsvm.k != dsvm.l or dsvm.include_rc:
+        raise ValueError("deltasvm_pl() needs a single-strand l-mer table (k == l)")
     out = copy.deepcopy(dsvm)
     out.cpu()
     w = np.array(to_cpu(out.weights))
-    w[0] = w[-1] = 0.0  # A...A and T...T (first base most significant)
+    w[0] = w[-1] = -float(out.bias)  # A...A and T...T (first base most significant)
     out.weights = w
     return out
 

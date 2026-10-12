@@ -9,7 +9,7 @@ deltaSVM is computed three ways to localize any mismatch:
   table     — to_deltasvm(query_norm=True) on --device, scored on CPU
   direct    — gkmpredict on each 10-mer the variants use, model() on --device
   direct-cpu — the same on CPU, for a random subset of those 10-mers
-  deltaSVM.pl — the table with poly-A/T zeroed, as the Beer lab script scores
+  deltaSVM.pl — the table with poly-A/T dropped, as the Beer lab script scores
 
 Usage:
   python benchmarks/check_dsqtl_paper.py --device cuda
