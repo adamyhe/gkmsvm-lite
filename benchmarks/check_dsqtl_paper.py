@@ -5,11 +5,16 @@ to the outputs in github.com/kundajelab/gkmexplain (dsQTL/.../dsqtl_analysis):
   - deltaSVM (deltasvm_out/), -t 2 and -t 3
   - ISM (ism_out/) and GkmExplain mode 5 (gkmexplain_out/), -t 3 only
 
-deltaSVM is computed three ways to localize any mismatch:
-  table     — to_deltasvm(query_norm=True) on --device, scored on CPU
-  direct    — gkmpredict on each 10-mer the variants use, model() on --device
-  direct-cpu — the same on CPU, for a random subset of those 10-mers
-  deltaSVM.pl — the table with poly-A/T dropped, as the Beer lab script scores
+deltaSVM is computed four ways to localize any mismatch:
+  table       — to_deltasvm(query_norm=True) on --device, scored on CPU
+  direct      — gkmpredict on each 10-mer the variants use, model() on --device
+  direct-cpu  — the same on CPU, for a random subset of those 10-mers
+  deltaSVM.pl — the table scored as the Beer lab deltasvm.pl scores it (poly-A/T
+                l-mers dropped; see bench_dsqtl.deltasvm_pl). This is what the
+                paper's deltaSVM outputs match.
+
+With all five negsets, scores summed over models are also compared to the sum
+of the paper's per-negset outputs.
 
 Usage:
   python benchmarks/check_dsqtl_paper.py --device cuda
@@ -22,10 +27,9 @@ import argparse
 import time
 from urllib.request import urlretrieve
 
+import bench_dsqtl as bench
 import numpy as np
 from sklearn.metrics import average_precision_score
-
-import bench_dsqtl as bench
 
 PAPER_TAGS = {"t2": "t2_l10_k6_d3_t16", "t3": "t3_l10_k6_d3_c10_g2_t16"}
 PAPER_OUT_URL = (
@@ -42,7 +46,8 @@ def _paper_file(path: str) -> list[tuple[str, float]]:
         local.parent.mkdir(parents=True, exist_ok=True)
         print(f"  Downloading {path}...")
         urlretrieve(PAPER_OUT_URL.format(path=path), local)
-    rows = [line.rstrip("\n").split("\t") for line in open(local)]
+    with open(local) as f:
+        rows = [line.rstrip("\n").split("\t") for line in f]
     return [(r[0], float(r[1])) for r in rows]
 
 
@@ -141,6 +146,13 @@ def main():
     cpu_sel = rng.choice(len(uniq), size=min(args.n_cpu_lmers, len(uniq)), replace=False)
 
     rows = []
+    sums: dict[tuple[str, str], list[np.ndarray]] = {}
+
+    def _accumulate(t, kind, ours, ref):
+        acc = sums.setdefault((t, kind), [np.zeros_like(ours), np.zeros_like(ref)])
+        acc[0] += ours
+        acc[1] += ref
+
     for t in args.tags:
         tag = PAPER_TAGS[t]
         for negset in args.negsets:
@@ -170,6 +182,7 @@ def main():
             _compare(rows, f"{p} deltaSVM direct vs paper", direct_scores, paper_dsvm, labels)
             pl_scores = bench.deltasvm_pl(dsvm).score_variants(X19[0], X19[1]).ravel()
             _compare(rows, f"{p} deltaSVM.pl vs paper", pl_scores, paper_dsvm, labels)
+            _accumulate(t, "deltaSVM.pl", pl_scores, paper_dsvm)
 
             if t == "t3":
                 for kind, method in (("ISM", "kernel"), ("GkmExplain", "gkmexplain")):
@@ -180,9 +193,15 @@ def main():
                         X51[0], X51[1], method=method, batch_size=args.batch_size,
                     )).ravel()
                     model.cpu()
-                    _compare(rows, f"{p} {kind} vs paper", ours,
-                             _paper_scores(kind, tag, negset, names19), labels)
+                    ref = _paper_scores(kind, tag, negset, names19)
+                    _compare(rows, f"{p} {kind} vs paper", ours, ref, labels)
+                    _accumulate(t, kind, ours, ref)
             del model, dsvm
+
+    if sorted(args.negsets) == [1, 2, 3, 4, 5]:
+        print("\n=== Summed over negsets 1-5 ===")
+        for (t, kind), (ours, ref) in sums.items():
+            _compare(rows, f"{t} sum {kind} vs paper", ours, ref, labels)
 
     if args.output:
         import pandas as pd

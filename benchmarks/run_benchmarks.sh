@@ -40,18 +40,19 @@ echo "  Results:   $RESULTS_DIR"
 echo "  Quick:     $QUICK"
 echo ""
 
-# ── 1. Lee 2015 dsQTL replication: train l=10k6 and l=11k7 models ──
-echo "━━━ 1. dsQTL model training + VEP comparison ━━━"
-TRAIN_ARGS=(
+# ── 1. dsQTL VEP: GkmExplain paper reproduction + retrained models ──
+echo "━━━ 1. dsQTL VEP (deltaSVM, ISM, GkmExplain) ━━━"
+DSQTL_ARGS=(
     --device "$DEVICE"
-    --params both
-    --output "$RESULTS_DIR/dsqtl_method_comparison.tsv"
-    --save-models "$RESULTS_DIR/models"
+    --params all
+    --output "$RESULTS_DIR/bench_dsqtl.tsv"
+    --per-model-output "$RESULTS_DIR/dsqtl_per_model.tsv"
 )
 if $QUICK; then
-    TRAIN_ARGS+=(--n-negsets 1)
+    DSQTL_ARGS=(--device "$DEVICE" --params l10k6 --n-negsets 1
+                --output "$RESULTS_DIR/bench_dsqtl.tsv")
 fi
-python benchmarks/train_dsqtl_models.py "${TRAIN_ARGS[@]}"
+python benchmarks/bench_dsqtl.py "${DSQTL_ARGS[@]}"
 
 # ── 2. Task 4: Chromatin activity with ENCODE models ──
 echo ""

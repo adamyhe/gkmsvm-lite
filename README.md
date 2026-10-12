@@ -107,6 +107,7 @@ All six LS-GKM kernel types are supported:
 | [Scoring and variant effects](docs/scoring.md) | Inference, batch scoring, VEP, GPU acceleration, memory management |
 | [Interpretation](docs/interpretation.md) | GkmExplain, ISM, when to use each, why gradients don't work |
 | [Performance](docs/performance.md) | Benchmarks, optimization details, tuning guidance |
+| [Validation](docs/validation.md) | Oracle tests against LS-GKM, GkmExplain paper dsQTL reproduction |
 | [Design decisions](docs/design.md) | Architecture, kernel math, format specifications |
 | [Roadmap](docs/roadmap.md) | Completed features and what's next |
 

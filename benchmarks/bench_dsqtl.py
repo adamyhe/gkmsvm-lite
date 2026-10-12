@@ -1,13 +1,16 @@
 """Benchmark: dsQTL variant effect prediction (Shrikumar et al. 2019, Fig. 8).
 
 Replicates the GkmExplain dsQTL evaluation
-(github.com/kundajelab/gkmexplain/tree/master/dsQTL). Per model (one per
-negative set), with per-model AUPRC and scores summed across models:
+(github.com/kundajelab/gkmexplain/tree/master/dsQTL): 28,309 GM12878 SNPs
+(574 dsQTLs, 27,735 controls), ranked by |score|. One model per Beer lab
+negative set; AUPRC is reported per model and for scores summed over models.
+
+Methods:
   - deltaSVM: l-mer weights = gkmpredict on each 10-mer (19bp Beer lab seqs)
   - deltaSVM.pl: the same, scored as the Beer lab deltasvm.pl does. That
     script reads the first line of the weight file as a bias header, so
-    AAAAAAAAAA/TTTTTTTTTT (first in nrkmers.py output) get weight 0. The
-    paper's deltaSVM AUPRCs come from this.
+    AAAAAAAAAA/TTTTTTTTTT (first in nrkmers.py output) get a raw gkmpredict
+    score of 0. The paper's deltaSVM AUPRCs come from this.
   - ISM: score(alt) - score(ref) (51bp hg18 context, as in the paper)
   - GkmExplain: mutation impact score, lsgkm ``gkmexplain -m 5`` (51bp)
 
@@ -16,7 +19,8 @@ Parameter sets:
   - l10k6_rbf, l11k7_rbf: -t 3 gkmrbf, gamma=2, C=10, trained here
   - paper_t2, paper_t3: the paper's published lsgkm models (downloaded)
 
-The paper's per-negset AUPRCs are printed for the l=10 k=6 sets.
+Paper reference values are printed for the l=10 k=6 sets (per model) and for
+paper_t2/paper_t3 (summed). See docs/validation.md for the reproduction.
 
 Pass --replicate-published to also compare against Lee 2015 published
 deltaSVM scores (downloads hg19 genome, ~900 MB compressed).
@@ -27,6 +31,8 @@ All data auto-downloaded on first run (hg18 genome, ~940 MB compressed, for
 Usage:
   python benchmarks/bench_dsqtl.py --device cuda
   python benchmarks/bench_dsqtl.py --params paper_t3     # paper's models
+  python benchmarks/bench_dsqtl.py --output benchmarks/results/bench_dsqtl.tsv \
+      --per-model-output benchmarks/results/dsqtl_per_model.tsv
   python benchmarks/bench_dsqtl.py --params l10k6_rbf    # retrained gkmrbf
   python benchmarks/bench_dsqtl.py --n-negsets 1 --params l10k6  # quick
   python benchmarks/bench_dsqtl.py --replicate-published
@@ -84,6 +90,15 @@ PAPER_AUPRC = {
     "ISM": [0.18808, 0.18968, 0.18433, 0.18569, 0.19432],
     "deltaSVM-gkmrbf": [0.18287, 0.18649, 0.18001, 0.18028, 0.18733],
     "deltaSVM-gkm": [0.17918, 0.18565, 0.17697, 0.17943, 0.18483],
+}
+# AUPRC of scores summed over the 5 negsets, from the paper's per-negset output
+# files. The repo README's deltaSVM sums (0.18943 -t 3, 0.18795 -t 2) cover
+# negsets 1, 3 and 5 only: deltasvm_out/combine_folds.sh cuts columns
+# 1,2,6,10,14,18 of five pasted 2-column files. ISM/GkmExplain sums match the
+# README.
+PAPER_SUM_AUPRC = {
+    "paper_t3": {"deltaSVM.pl": 0.19021, "ISM": 0.19550, "GkmExplain": 0.19647},
+    "paper_t2": {"deltaSVM.pl": 0.18997},
 }
 PAPER_REF_COLUMNS = {
     "rbf": {"deltaSVM.pl": "deltaSVM-gkmrbf", "ISM": "ISM", "GkmExplain": "GkmExplain"},
@@ -318,7 +333,6 @@ def train_models(
     verbose: bool = False,
 ):
     from gkmsvm import train_gkmsvm
-    from gkmsvm.backend import to_cpu
     from gkmsvm.serialization import (
         load_deltasvm_npz,
         load_model,
@@ -390,13 +404,7 @@ def train_models(
         models.append(m)
         dsvms.append(d)
 
-    avg_weights = np.mean([to_cpu(d.weights) for d in dsvms], axis=0)
-    avg_dsvm = copy.deepcopy(dsvms[0])
-    avg_dsvm.cpu()
-    avg_dsvm.weights = avg_weights
-    print(f"\nAveraged {len(dsvms)} deltaSVM weight tables")
-
-    return models, dsvms, avg_dsvm
+    return models, dsvms
 
 
 # ---------------------------------------------------------------------------
@@ -630,15 +638,16 @@ def print_results(results: list[dict], param_label: str):
     print(f"Results: {param_label}")
     print(f"{'=' * 70}")
     print(
-        f"  {'Method':<25s} {'AUROC':>8s} {'AUPRC':>8s} "
+        f"  {'Method':<28s} {'AUROC':>8s} {'AUPRC':>8s} {'paper':>8s} "
         f"{'Pearson':>8s} {'Spearman':>8s}"
     )
-    print(f"  {'-' * 25} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8}")
+    print(f"  {'-' * 28} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8}")
     for r in results:
         pear = f"{r['pearson']:.4f}" if "pearson" in r else "N/A"
         spear = f"{r['spearman']:.4f}" if "spearman" in r else "N/A"
+        paper = f"{r['paper_auprc']:.4f}" if r.get("paper_auprc") is not None else ""
         print(
-            f"  {r['method']:<25s} {r['auroc']:>8.4f} {r['auprc']:>8.4f} "
+            f"  {r['method']:<28s} {r['auroc']:>8.4f} {r['auprc']:>8.4f} {paper:>8s} "
             f"{pear:>8s} {spear:>8s}"
         )
 
@@ -672,7 +681,10 @@ def main():
     parser.add_argument(
         "--force-train", action="store_true", help="Retrain even if cached models exist"
     )
-    parser.add_argument("--output", default=None, help="Save results to TSV file")
+    parser.add_argument("--output", default=None,
+                        help="Save summed-score results to TSV file")
+    parser.add_argument("--per-model-output", default=None,
+                        help="Save per-model AUPRCs (with paper values) to TSV file")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Show progress bars during scoring and training")
     args = parser.parse_args()
@@ -712,6 +724,7 @@ def main():
     param_keys = list(PARAM_SETS.keys()) if args.params == "all" else [args.params]
 
     all_results = []
+    per_model_rows = []
 
     for pk in param_keys:
         params = PARAM_SETS[pk]
@@ -725,7 +738,7 @@ def main():
         )
         print(f"{'=' * 70}")
 
-        models, dsvms, avg_dsvm = train_models(
+        models, dsvms = train_models(
             pos_seqs, neg_sets, params, args.device, pk=pk,
             force_train=args.force_train, verbose=args.verbose,
         )
@@ -760,27 +773,36 @@ def main():
         print(f"\n  Per-model AUPRC ({pk}):")
         print(f"  {'Model':>5s}{header}")
         for mi in range(len(models)):
-            row = "".join(
-                f"  {average_precision_score(labels, np.abs(per_model[name][mi])):>11.4f}"
+            auprcs = {
+                name: average_precision_score(labels, np.abs(per_model[name][mi]))
                 for name in methods
-            )
+            }
+            row = "".join(f"  {auprcs[name]:>11.4f}" for name in methods)
             row += "".join(
                 f"  {PAPER_AUPRC[ref][mi]:>17.4f}" for ref in paper_cols.values()
             )
             print(f"  {mi + 1:>5d}{row}")
+            for name in methods:
+                ref = paper_cols.get(name)
+                per_model_rows.append({
+                    "params": pk, "negset": mi + 1, "method": name,
+                    "auprc": auprcs[name],
+                    "paper_auprc": PAPER_AUPRC[ref][mi] if ref else None,
+                })
 
-        print("\nScoring with deltaSVM (averaged weights)...")
-        avg_dsvm_scores = score_deltasvm(avg_dsvm, X19_ref, X19_alt)
-        results.append(evaluate(avg_dsvm_scores, labels, effect_sizes, f"deltaSVM-avg ({pk})"))
+        paper_sums = PAPER_SUM_AUPRC.get(pk, {}) if len(models) == 5 else {}
         for name in methods:
-            results.append(evaluate(
+            r = evaluate(
                 per_model[name].sum(axis=0), labels, effect_sizes, f"{name}-sum ({pk})",
-            ))
+            )
+            r["params"] = pk
+            r["paper_auprc"] = paper_sums.get(name)
+            results.append(r)
 
         print_results(results, pk)
         all_results.extend(results)
 
-        del models, dsvms, avg_dsvm
+        del models, dsvms
         gc.collect()
 
     if len(param_keys) > 1:
@@ -789,8 +811,15 @@ def main():
     if args.output:
         import pandas as pd
 
+        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
         pd.DataFrame(all_results).to_csv(args.output, sep="\t", index=False)
         print(f"\nSaved results to {args.output}")
+    if args.per_model_output:
+        import pandas as pd
+
+        Path(args.per_model_output).parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(per_model_rows).to_csv(args.per_model_output, sep="\t", index=False)
+        print(f"Saved per-model AUPRCs to {args.per_model_output}")
 
 
 if __name__ == "__main__":

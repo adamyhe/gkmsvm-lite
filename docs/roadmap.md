@@ -34,7 +34,8 @@
 - [x] Shared-memory query caching in CUDA kernel
 - [x] Packed SV window caching (CPU + GPU, eliminates redundant packing)
 - [x] tqdm progress bars for inference, ISM, GkmExplain
-- [x] dsQTL benchmark replication (AP=0.19, r=0.73, GPU 337 seq/s, CPU 28 seq/s at 19bp)
+- [x] dsQTL benchmark: GkmExplain paper (Fig. 8) reproduced per model with the paper's models — ISM, GkmExplain mutation impact, deltaSVM ([validation](validation.md))
+- [x] GkmExplain mutation impact score (lsgkm `gkmexplain -m 5`)
 - [x] Training via precomputed Gram matrix (libsvm-official C solver)
 - [x] Tiled Gram matrix computation with symmetry exploitation
 - [x] Model serialization: npz (native) and LS-GKM text (interop) formats
