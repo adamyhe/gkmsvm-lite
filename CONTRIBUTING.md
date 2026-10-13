@@ -22,10 +22,11 @@ pytest tests/ -k "test_rc"       # pattern match
 ## Run benchmarks
 
 ```bash
-python benchmarks/solver_bench.py
-python benchmarks/throughput_sweep.py
-python benchmarks/replicate_dsqtl.py
+make -C benchmarks help      # one target per paper figure panel
+make -C benchmarks quick     # small end-to-end run, writes benchmarks/results/quick/
 ```
+
+See [benchmarks/README.md](benchmarks/README.md) for what each target produces.
 
 ## Project structure
 

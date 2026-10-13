@@ -148,6 +148,7 @@ DeltaSVM (linear k-mer scoring) gets 1.7-2.5x on MLX. The gather-heavy combinato
 python benchmarks/throughput_sweep.py --device cpu
 python benchmarks/throughput_sweep.py --device cuda
 python benchmarks/throughput_sweep.py --device both   # side-by-side with speedup table
+make -C benchmarks s2                                  # same, saved to benchmarks/results/throughput.tsv
 ```
 
 Requires the ENCODE ENCFF579AOX fixture in `tests/fixtures/`.

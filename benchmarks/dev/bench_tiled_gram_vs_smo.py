@@ -19,9 +19,9 @@ Dataset: GM12878 dsQTL (Lee et al. 2015)
   Kernel: -t estimated -l 10 -k 6 -d 3
 
 Usage:
-    python benchmarks/bench_tiled_gram_vs_smo.py                # auto GPU
-    python benchmarks/bench_tiled_gram_vs_smo.py --device cpu    # CPU only
-    python benchmarks/bench_tiled_gram_vs_smo.py --cache-size 1024
+    python benchmarks/dev/bench_tiled_gram_vs_smo.py                # auto GPU
+    python benchmarks/dev/bench_tiled_gram_vs_smo.py --device cpu    # CPU only
+    python benchmarks/dev/bench_tiled_gram_vs_smo.py --cache-size 1024
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ from pathlib import Path
 
 import numpy as np
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = Path(__file__).resolve().parents[2]
 DATA = REPO / "examples" / "data" / "gm12878_sequence_sets"
 
 KERNEL_PARAMS = dict(kernel_type="estimated", l=10, k=6, d=3, C=1.0)

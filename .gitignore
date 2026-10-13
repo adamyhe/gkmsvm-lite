@@ -1,6 +1,9 @@
 # benchmarking
 benchmarks/data/
 benchmarks/models/
+benchmarks/results/logs/
+benchmarks/results/quick/
+benchmarks/figures/quick/
 
 # data downloads and analysis outputs
 data/

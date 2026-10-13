@@ -22,10 +22,10 @@ Data requirements:
     Cached in benchmarks/data/nanog/ for subsequent runs.
 
 Usage:
-    python benchmarks/replicate_nanog.py                 # full replication
-    python benchmarks/replicate_nanog.py --skip-train    # scoring + attribution only
-    python benchmarks/replicate_nanog.py --skip-modisco  # skip TF-MoDISco
-    python benchmarks/replicate_nanog.py --device cuda   # GPU acceleration
+    python benchmarks/dev/replicate_nanog.py                 # full replication
+    python benchmarks/dev/replicate_nanog.py --skip-train    # scoring + attribution only
+    python benchmarks/dev/replicate_nanog.py --skip-modisco  # skip TF-MoDISco
+    python benchmarks/dev/replicate_nanog.py --device cuda   # GPU acceleration
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ from pathlib import Path
 
 import numpy as np
 
-DATA_DIR = Path(__file__).parent / "data" / "nanog"
+DATA_DIR = Path(__file__).parents[1] / "data" / "nanog"
 
 GKMEXPLAIN_REPO = (
     "https://raw.githubusercontent.com/kundajelab/gkmexplain/master/Nanog_H1ESC"

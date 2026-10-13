@@ -29,14 +29,15 @@ All data auto-downloaded on first run (hg18 genome, ~940 MB compressed, for
 51bp context). Trained models cached to benchmarks/models/.
 
 Usage:
-  python benchmarks/bench_dsqtl.py --device cuda
-  python benchmarks/bench_dsqtl.py --params paper_t3     # paper's models
-  python benchmarks/bench_dsqtl.py --output benchmarks/results/bench_dsqtl.tsv \
+  python benchmarks/dsqtl_auprc.py --device cuda
+  python benchmarks/dsqtl_auprc.py --params paper_t2,paper_t3     # paper's models
+  python benchmarks/dsqtl_auprc.py --params paper_t3 \
+      --output benchmarks/results/dsqtl_summed.tsv \
       --per-model-output benchmarks/results/dsqtl_per_model.tsv
-  python benchmarks/bench_dsqtl.py --params l10k6_rbf    # retrained gkmrbf
-  python benchmarks/bench_dsqtl.py --n-negsets 1 --params l10k6  # quick
-  python benchmarks/bench_dsqtl.py --replicate-published
-  python benchmarks/bench_dsqtl.py --force-train
+  python benchmarks/dsqtl_auprc.py --params l10k6_rbf    # retrained gkmrbf
+  python benchmarks/dsqtl_auprc.py --n-negsets 1 --params l10k6  # quick
+  python benchmarks/dsqtl_auprc.py --replicate-published
+  python benchmarks/dsqtl_auprc.py --force-train
 """
 
 from __future__ import annotations
@@ -50,12 +51,11 @@ import time
 from pathlib import Path
 
 import numpy as np
+from _common import DATA as DATA_DIR
+from _common import MODELS as MODEL_DIR
+from _common import SEQ_DIR, write_tsv
 from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import average_precision_score, roc_auc_score
-
-SEQ_DIR = Path(__file__).parent.parent / "examples" / "data" / "gm12878_sequence_sets"
-DATA_DIR = Path(__file__).parent / "data"
-MODEL_DIR = Path(__file__).parent / "models"
 
 SEQ_URL = "https://beerlab.org/deltasvm/downloads/gm12878_sequence_sets.tar.gz"
 GEO_URL = "https://ftp.ncbi.nlm.nih.gov/geo/series/GSE31nnn/GSE31388/suppl/GSE31388_dsQtlTable.txt.gz"
@@ -116,20 +116,9 @@ CONTEXT_HALF = 25
 
 def download_data(replicate_published: bool = False):
     """Download all required data files."""
-    import tarfile
     from urllib.request import urlretrieve
 
-    # Beer lab sequences (training + pre-extracted test variants)
-    if not SEQ_DIR.exists():
-        SEQ_DIR.parent.mkdir(parents=True, exist_ok=True)
-        tarball = SEQ_DIR.parent / "gm12878_sequence_sets.tar.gz"
-        if not tarball.exists():
-            print("Downloading Beer lab sequence sets (14 MB)...")
-            urlretrieve(SEQ_URL, tarball)
-        print("Extracting...")
-        with tarfile.open(tarball) as tar:
-            tar.extractall(SEQ_DIR.parent, filter="data")
-
+    download_sequence_sets()
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     _download_genome(HG18_URL, "hg18")
 
@@ -168,6 +157,23 @@ def download_data(replicate_published: bool = False):
         wb.close()
 
     _download_genome(HG19_URL, "hg19")
+
+
+def download_sequence_sets():
+    """Beer lab GM12878 sequence sets (training + pre-extracted test variants)."""
+    import tarfile
+    from urllib.request import urlretrieve
+
+    if SEQ_DIR.exists():
+        return
+    SEQ_DIR.parent.mkdir(parents=True, exist_ok=True)
+    tarball = SEQ_DIR.parent / "gm12878_sequence_sets.tar.gz"
+    if not tarball.exists():
+        print("Downloading Beer lab sequence sets (14 MB)...")
+        urlretrieve(SEQ_URL, tarball)
+    print("Extracting...")
+    with tarfile.open(tarball) as tar:
+        tar.extractall(SEQ_DIR.parent, filter="data")
 
 
 def _download_genome(url: str, name: str):
@@ -667,8 +673,8 @@ def main():
     parser.add_argument(
         "--params",
         default="all",
-        choices=list(PARAM_SETS.keys()) + ["all"],
-        help="Parameter set to train (default: all)",
+        help="Comma-separated parameter sets, or 'all' (default). "
+        f"Choices: {', '.join(PARAM_SETS)}",
     )
     parser.add_argument(
         "--n-negsets", type=int, default=5, help="Number of negative sets (default: 5)"
@@ -688,6 +694,10 @@ def main():
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Show progress bars during scoring and training")
     args = parser.parse_args()
+    param_keys = list(PARAM_SETS) if args.params == "all" else args.params.split(",")
+    unknown = [pk for pk in param_keys if pk not in PARAM_SETS]
+    if unknown:
+        parser.error(f"unknown parameter set(s): {', '.join(unknown)}")
 
     if args.device == "auto":
         from gkmsvm.backend import HAS_CUPY, HAS_MLX
@@ -721,7 +731,6 @@ def main():
     pos_seqs, neg_sets = load_training_data(n_negsets=args.n_negsets)
     X19, X51, labels, effect_sizes = load_test_variants()
 
-    param_keys = list(PARAM_SETS.keys()) if args.params == "all" else [args.params]
 
     all_results = []
     per_model_rows = []
@@ -790,7 +799,12 @@ def main():
                     "paper_auprc": PAPER_AUPRC[ref][mi] if ref else None,
                 })
 
-        paper_sums = PAPER_SUM_AUPRC.get(pk, {}) if len(models) == 5 else {}
+        # Retrained models share the paper's settings, so compare their sums too
+        paper_pk = next(
+            (k for k, v in PARAM_SETS.items() if "paper" in v
+             and {**v, "paper": None} == {**params, "paper": None}), pk,
+        )
+        paper_sums = PAPER_SUM_AUPRC.get(paper_pk, {}) if len(models) == 5 else {}
         for name in methods:
             r = evaluate(
                 per_model[name].sum(axis=0), labels, effect_sizes, f"{name}-sum ({pk})",
@@ -808,18 +822,16 @@ def main():
     if len(param_keys) > 1:
         print_results(all_results, "all parameter sets")
 
-    if args.output:
+    if args.output or args.per_model_output:
         import pandas as pd
 
-        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame(all_results).to_csv(args.output, sep="\t", index=False)
-        print(f"\nSaved results to {args.output}")
-    if args.per_model_output:
-        import pandas as pd
-
-        Path(args.per_model_output).parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame(per_model_rows).to_csv(args.per_model_output, sep="\t", index=False)
-        print(f"Saved per-model AUPRCs to {args.per_model_output}")
+        meta = {"params": ",".join(param_keys), "negsets": args.n_negsets}
+        if args.output:
+            write_tsv(args.output, pd.DataFrame(all_results),
+                      "dsQTL AUPRC, scores summed over models", args.device, **meta)
+        if args.per_model_output:
+            write_tsv(args.per_model_output, pd.DataFrame(per_model_rows),
+                      "dsQTL AUPRC per model", args.device, **meta)
 
 
 if __name__ == "__main__":

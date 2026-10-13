@@ -43,6 +43,10 @@ src/gkmsvm/
     └── deltasvm.py      # load_deltasvm_model()
 ```
 
+## Benchmarks
+
+`benchmarks/` holds the application-note pipeline: one script → one `results/*.tsv` (provenance header from `_common.write_tsv`) → one `make` target per figure panel; `figures.ipynb` only plots. Experiments that feed no figure go in `benchmarks/dev/`. Map of panels and files: `benchmarks/README.md`.
+
 ## Conventions
 
 - Python >=3.10, NumPy, Numba >=0.57, scikit-learn, tqdm. CuPy >=12 optional (`[gpu]` extra). MLX >=0.10 optional (`[mlx]` extra)
@@ -90,5 +94,5 @@ src/gkmsvm/
 - `-t 4`/`-t 5` (wgkm/wgkmrbf) require M and H parameters; these use per-position DP, not the matmul+table path.
 - LS-GKM C is GPL v3 — cannot wrap or link against it (gkmsvm-lite is MIT).
 - GPU float32 diagonal causes <3e-3 score difference vs CPU float64.
-- Beer lab `deltasvm.pl` drops the first weight-file line as a bias header; with gkmpredict output on `nrkmers.py` l-mers that gives AAAAAAAAAA/TTTTTTTTTT raw score 0 (bias included, so -bias in a `to_deltasvm` table). Published deltaSVM scores from that script (e.g. the GkmExplain paper) include this; `bench_dsqtl.deltasvm_pl()` reproduces it.
+- Beer lab `deltasvm.pl` drops the first weight-file line as a bias header; with gkmpredict output on `nrkmers.py` l-mers that gives AAAAAAAAAA/TTTTTTTTTT raw score 0 (bias included, so -bias in a `to_deltasvm` table). Published deltaSVM scores from that script (e.g. the GkmExplain paper) include this; `dsqtl_auprc.deltasvm_pl()` reproduces it.
 - The gkmexplain repo's summed deltaSVM AUPRCs (README 0.18943 / 0.18795) cover negsets 1, 3, 5 only (`combine_folds.sh` cuts the wrong columns). Five-model sums from its output files are 0.19021 / 0.18997 (`PAPER_SUM_AUPRC`). Reproduction write-up: `docs/validation.md`.

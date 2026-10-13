@@ -10,8 +10,8 @@ NeurIPS):
   Task 5 — Variant effect prediction
     Three VEP scoring methods:
       kernel:     score(alt) - score(ref)  (full kernel, two evals per variant)
-      gkmexplain: perturbation effect at variant position (one gkmexplain
-                  call per variant; Shrikumar et al. 2019 §5.2, lsgkm C mode 3)
+      gkmexplain: mutation impact score, lsgkm gkmexplain -m 5
+                  (Shrikumar et al. 2019; score_variants(method="gkmexplain"))
       deltasvm:   Σ Δw_kmer  (linear k-mer weight approximation)
     dsQTLs: Yoruban LCL (hg19), caQTLs: African (hg38).
 
@@ -731,9 +731,11 @@ def main():
                   f"{r['n_sig']:>8} {r['n_ctrl']:>8}")
 
     if args.output and results:
-        out_df = pd.DataFrame(results)
-        out_df.to_csv(args.output, sep="\t", index=False)
-        print(f"\nSaved results to {args.output}")
+        from _common import write_tsv
+
+        write_tsv(args.output, pd.DataFrame(results), f"DART-Eval, task {args.task}",
+                  args.device, model=os.path.basename(args.model),
+                  vep_method=args.vep_method)
 
 
 if __name__ == "__main__":

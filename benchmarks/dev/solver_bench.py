@@ -5,9 +5,9 @@ across dataset sizes. Both solvers use the same gkm kernel with the
 packed uint32 fast path.
 
 Usage:
-    python benchmarks/solver_bench.py
-    python benchmarks/solver_bench.py --sizes 100,200,500,1000,2000
-    python benchmarks/solver_bench.py --kernel estimated --sizes 100,500,1000
+    python benchmarks/dev/solver_bench.py
+    python benchmarks/dev/solver_bench.py --sizes 100,200,500,1000,2000
+    python benchmarks/dev/solver_bench.py --kernel estimated --sizes 100,500,1000
 """
 
 from __future__ import annotations

@@ -10,9 +10,9 @@ Dataset: Nanog ChIP-seq from GkmExplain (Lee 2016)
   Fixture: 100 pos + 100 neg (200bp, test subset)
 
 Usage:
-    python benchmarks/bench_smo_vs_gram.py                # full dataset, auto GPU
-    python benchmarks/bench_smo_vs_gram.py --device cpu    # force CPU
-    python benchmarks/bench_smo_vs_gram.py --fixture       # use small test fixture
+    python benchmarks/dev/bench_smo_vs_gram.py                # full dataset, auto GPU
+    python benchmarks/dev/bench_smo_vs_gram.py --device cpu    # force CPU
+    python benchmarks/dev/bench_smo_vs_gram.py --fixture       # use small test fixture
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from pathlib import Path
 
 import numpy as np
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = Path(__file__).resolve().parents[2]
 FIXTURES = REPO / "tests" / "fixtures"
 BENCHMARKS = REPO / "benchmarks" / "data" / "nanog"
 

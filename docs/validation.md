@@ -82,15 +82,13 @@ GkmExplain's mutation impact score is a linearization of the kernel change, not 
 
 ```bash
 # AUPRC tables (downloads hg18, ~940 MB, and the paper's models)
-python benchmarks/bench_dsqtl.py --device cuda --params paper_t3 \
-    --output benchmarks/results/bench_dsqtl.tsv --per-model-output benchmarks/results/dsqtl_per_model.tsv
-python benchmarks/bench_dsqtl.py --device cuda --params paper_t2
+make -C benchmarks fig1d     # or: python benchmarks/dsqtl_auprc.py --device cuda --params paper_t2,paper_t3
 
 # Per-variant comparison against the paper's output files
-python benchmarks/check_dsqtl_paper.py --device cuda
+make -C benchmarks fig1a     # or: python benchmarks/agreement_lsgkm.py --device cuda
 ```
 
-`bench_dsqtl.py` also trains and evaluates models with gkmsvm-lite (`--params l10k6`, `l11k7`, `l10k6_rbf`, `l11k7_rbf`). On a single GPU, each 51bp `-t 3` model takes about 20 minutes for ISM and 13 minutes for GkmExplain over all 28,309 variants. Building each deltaSVM weight table takes 2–7 minutes.
+`dsqtl_auprc.py` also trains and evaluates models with gkmsvm-lite (`--params l10k6`, `l11k7`, `l10k6_rbf`, `l11k7_rbf`; `make -C benchmarks s1`). On an NVIDIA Titan Xp, each 51bp `-t 3` model takes about 20 minutes for ISM and 13 minutes for GkmExplain over all 28,309 variants. Building each deltaSVM weight table takes 2–7 minutes.
 
 ## References
 

@@ -1,7 +1,7 @@
 """Train a gkm-SVM on GM12878 ATAC peaks and evaluate on African caQTLs.
 
 Trains on Beer lab GM12878 DNase-seq peaks (same training data as the
-pretrained SVC models in bench_dsqtl.py), then evaluates VEP on DART-Eval
+pretrained SVC models in dsqtl_auprc.py), then evaluates VEP on DART-Eval
 Task 5 African caQTLs. Only Task 5 data is downloaded from Synapse.
 
 Data:
@@ -11,8 +11,8 @@ Data:
                 input_data/Afr.CaQTLS.tsv
 
 Usage:
-  python benchmarks/train_caqtl_model.py --device cuda
-  python benchmarks/train_caqtl_model.py --device cuda --model benchmarks/models/gm12878_l11k7_neg1.npz
+  python benchmarks/dev/train_caqtl_model.py --device cuda
+  python benchmarks/dev/train_caqtl_model.py --device cuda --model benchmarks/models/gm12878_l11k7_neg1.npz
 """
 
 from __future__ import annotations
@@ -29,12 +29,12 @@ import pandas as pd
 from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import average_precision_score, roc_auc_score
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = Path(__file__).resolve().parents[2]
 SEQ_DIR = REPO / "examples" / "data" / "gm12878_sequence_sets"
 SEQ_URL = "https://beerlab.org/deltasvm/downloads/gm12878_sequence_sets.tar.gz"
 
 DART_SEQ_LEN = 2114
-MODEL_DIR = Path(__file__).parent / "models"
+MODEL_DIR = Path(__file__).parents[1] / "models"
 
 
 def _h5_to_channels_first(seqs_h5: np.ndarray) -> np.ndarray:
@@ -202,7 +202,7 @@ def main():
     args = parser.parse_args()
 
     work_dir = (args.work_dir or os.environ.get("DART_WORK_DIR", "")
-                or str(Path(__file__).parent / "data" / "dart-eval"))
+                or str(Path(__file__).parents[1] / "data" / "dart-eval"))
 
     print("=" * 60)
     print("caQTL Benchmark: Train GM12878 ATAC → Score African caQTLs")

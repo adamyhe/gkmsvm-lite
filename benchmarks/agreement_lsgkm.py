@@ -1,4 +1,4 @@
-"""Per-variant check against the GkmExplain paper's published dsQTL outputs.
+"""Per-variant agreement with the GkmExplain paper's lsgkm dsQTL outputs (Fig. 1A).
 
 Loads the paper's lsgkm models and compares our scores, variant by variant,
 to the outputs in github.com/kundajelab/gkmexplain (dsQTL/.../dsqtl_analysis):
@@ -10,15 +10,20 @@ deltaSVM is computed four ways to localize any mismatch:
   direct      — gkmpredict on each 10-mer the variants use, model() on --device
   direct-cpu  — the same on CPU, for a random subset of those 10-mers
   deltaSVM.pl — the table scored as the Beer lab deltasvm.pl scores it (poly-A/T
-                l-mers dropped; see bench_dsqtl.deltasvm_pl). This is what the
+                l-mers dropped; see dsqtl_auprc.deltasvm_pl). This is what the
                 paper's deltaSVM outputs match.
 
 With all five negsets, scores summed over models are also compared to the sum
 of the paper's per-negset outputs.
 
+--output writes one row per check (max error, correlation, AUPRC). --dump
+writes the paired per-variant scores (ours and lsgkm's) for plotting.
+
 Usage:
-  python benchmarks/check_dsqtl_paper.py --device cuda
-  python benchmarks/check_dsqtl_paper.py --device cuda --negsets 1 --tags t3
+  python benchmarks/agreement_lsgkm.py --device cuda
+  python benchmarks/agreement_lsgkm.py --device cuda --negsets 1 --tags t3 \
+      --output benchmarks/results/agreement_checks.tsv \
+      --dump benchmarks/results/agreement_dsqtl.tsv
 """
 
 from __future__ import annotations
@@ -27,7 +32,7 @@ import argparse
 import time
 from urllib.request import urlretrieve
 
-import bench_dsqtl as bench
+import dsqtl_auprc as bench
 import numpy as np
 from sklearn.metrics import average_precision_score
 
@@ -127,6 +132,8 @@ def main():
                         help="10-mers checked against a CPU forward pass (default: 2000)")
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--output", default=None, help="Save checks to TSV")
+    parser.add_argument("--dump", default=None,
+                        help="Save per-variant scores, ours and lsgkm's, to TSV")
     args = parser.parse_args()
 
     from gkmsvm import read_fasta
@@ -146,6 +153,7 @@ def main():
     cpu_sel = rng.choice(len(uniq), size=min(args.n_cpu_lmers, len(uniq)), replace=False)
 
     rows = []
+    dump = {"variant": names19, "label": labels.astype(int)}
     sums: dict[tuple[str, str], list[np.ndarray]] = {}
 
     def _accumulate(t, kind, ours, ref):
@@ -182,6 +190,8 @@ def main():
             _compare(rows, f"{p} deltaSVM direct vs paper", direct_scores, paper_dsvm, labels)
             pl_scores = bench.deltasvm_pl(dsvm).score_variants(X19[0], X19[1]).ravel()
             _compare(rows, f"{p} deltaSVM.pl vs paper", pl_scores, paper_dsvm, labels)
+            dump[f"{t}_neg{negset}_deltaSVM.pl_lite"] = pl_scores
+            dump[f"{t}_neg{negset}_deltaSVM.pl_lsgkm"] = paper_dsvm
             _accumulate(t, "deltaSVM.pl", pl_scores, paper_dsvm)
 
             if t == "t3":
@@ -195,6 +205,8 @@ def main():
                     model.cpu()
                     ref = _paper_scores(kind, tag, negset, names19)
                     _compare(rows, f"{p} {kind} vs paper", ours, ref, labels)
+                    dump[f"{t}_neg{negset}_{kind}_lite"] = ours
+                    dump[f"{t}_neg{negset}_{kind}_lsgkm"] = ref
                     _accumulate(t, kind, ours, ref)
             del model, dsvm
 
@@ -203,11 +215,18 @@ def main():
         for (t, kind), (ours, ref) in sums.items():
             _compare(rows, f"{t} sum {kind} vs paper", ours, ref, labels)
 
-    if args.output:
+    if args.output or args.dump:
         import pandas as pd
+        from _common import write_tsv
 
-        pd.DataFrame(rows).to_csv(args.output, sep="\t", index=False)
-        print(f"\nSaved checks to {args.output}")
+        meta = {"tags": ",".join(args.tags), "negsets": ",".join(map(str, args.negsets))}
+        if args.output:
+            write_tsv(args.output, pd.DataFrame(rows),
+                      "Agreement with lsgkm dsQTL outputs", args.device, **meta)
+        if args.dump:
+            write_tsv(args.dump, pd.DataFrame(dump),
+                      "Per-variant dsQTL scores, gkmsvm-lite and lsgkm", args.device,
+                      **meta)
 
 
 if __name__ == "__main__":

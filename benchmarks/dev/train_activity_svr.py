@@ -16,9 +16,9 @@ Data:
     synapse get -r syn60581041 --downloadLocation $DART_WORK_DIR/task_4_chromatin_activity
 
 Usage:
-  python benchmarks/train_activity_svr.py --device cuda
-  python benchmarks/train_activity_svr.py --device cuda --cell-lines GM12878 K562
-  python benchmarks/train_activity_svr.py --force-train
+  python benchmarks/dev/train_activity_svr.py --device cuda
+  python benchmarks/dev/train_activity_svr.py --device cuda --cell-lines GM12878 K562
+  python benchmarks/dev/train_activity_svr.py --force-train
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ from sklearn.metrics import average_precision_score, roc_auc_score
 
 CELL_LINES = ["GM12878", "H1ESC", "HEPG2", "IMR90", "K562"]
 DART_SEQ_LEN = 2114
-MODEL_DIR = Path(__file__).parent / "models"
+MODEL_DIR = Path(__file__).parents[1] / "models"
 
 
 def _model_path(cell_line: str, l: int, k: int, d: int,
@@ -247,7 +247,7 @@ def main():
     args = parser.parse_args()
 
     work_dir = (args.work_dir or os.environ.get("DART_WORK_DIR", "")
-                or str(Path(__file__).parent / "data" / "dart-eval"))
+                or str(Path(__file__).parents[1] / "data" / "dart-eval"))
 
     h5_path = os.path.join(work_dir, "task_4_chromatin_activity/data.h5")
     if not os.path.exists(h5_path):

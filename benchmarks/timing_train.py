@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Timing comparison: gkmsvm-lite vs LS-GKM C (gkmtrain / gkmpredict).
+"""Training and prediction time, gkmsvm-lite vs LS-GKM C (Fig. 1B).
 
 Measures wall-clock training and inference time across dataset sizes.
 Both implementations use the same kernel (-t 2 gkm_esttrunc, l=11 k=7 d=3).
@@ -8,18 +8,17 @@ Setup:
     conda create -n lsgkm -c bioconda -c conda-forge ls-gkm -y
 
 Usage:
-    python benchmarks/timing_vs_lsgkm.py                          # CPU only
-    python benchmarks/timing_vs_lsgkm.py --device cuda             # include GPU
-    python benchmarks/timing_vs_lsgkm.py --sizes 500,1000,5000
-    python benchmarks/timing_vs_lsgkm.py --setup                   # create env first
-    python benchmarks/timing_vs_lsgkm.py --plot                    # save figure
+    python benchmarks/timing_train.py                          # CPU only
+    python benchmarks/timing_train.py --device cuda             # include GPU
+    python benchmarks/timing_train.py --sizes 500,1000,5000
+    python benchmarks/timing_train.py --setup                   # create env first
+    python benchmarks/timing_train.py --plot                    # save figure
 """
 
 from __future__ import annotations
 
 import argparse
 import gc
-import os
 import resource
 import subprocess
 import sys
@@ -28,6 +27,14 @@ import time
 from pathlib import Path
 
 import numpy as np
+from _common import (
+    LSGKM_THREADS,
+    RESULTS,
+    lsgkm_default_threads,
+    lsgkm_has_option,
+    lsgkm_version,
+    write_header,
+)
 
 REPO = Path(__file__).resolve().parent.parent
 DATA = REPO / "examples" / "data" / "gm12878_sequence_sets"
@@ -140,8 +147,12 @@ def run_gkmtrain(
 
 def run_gkmpredict(
     binary: str, test_fa: Path, model_path: Path, output_path: Path,
+    threads: int | None = None,
 ) -> tuple[float | None, np.ndarray | None]:
-    cmd = [binary, str(test_fa), str(model_path), str(output_path)]
+    cmd = [binary]
+    if threads is not None:
+        cmd += ["-T", str(threads)]
+    cmd += [str(test_fa), str(model_path), str(output_path)]
     t0 = time.perf_counter()
     r = subprocess.run(cmd, capture_output=True, text=True)
     elapsed = time.perf_counter() - t0
@@ -323,9 +334,11 @@ def main():
     parser.add_argument("-l", type=int, default=11, help="L-mer length")
     parser.add_argument("-k", type=int, default=7, help="Informative positions")
     parser.add_argument("-d", type=int, default=3, help="Max mismatches")
-    parser.add_argument("--threads", type=int, default=os.cpu_count(),
-                        help="Threads for gkmtrain -T (default: all cores)")
-    parser.add_argument("--output", default="benchmarks/results/timing_vs_lsgkm.tsv",
+    parser.add_argument("--threads", type=int, default=lsgkm_default_threads(),
+                        choices=LSGKM_THREADS,
+                        help="LS-GKM -T for gkmtrain and gkmpredict; LS-GKM accepts "
+                        "only 1, 4 or 16 (default: largest the machine has cores for)")
+    parser.add_argument("--output", default=str(RESULTS / "timing_train.tsv"),
                         help="Output TSV path")
     parser.add_argument("--plot", action="store_true", help="Save timing plot")
     args = parser.parse_args()
@@ -346,7 +359,8 @@ def main():
     print(f"LS-GKM C:          {gkmtrain_bin}")
     print(f"gkmsvm-lite device: {args.device}")
     print(f"Kernel:             -t 2 -l {args.l} -k {args.k} -d {args.d}")
-    print(f"gkmtrain threads:   {args.threads}")
+    predict_threads = args.threads if lsgkm_has_option(gkmpredict_bin, "-T") else None
+    print(f"LS-GKM threads:     {args.threads} (gkmpredict: {predict_threads or 1})")
     print(f"Inference repeats:  {args.repeats}")
 
     if not DATA.exists():
@@ -470,6 +484,7 @@ def main():
                     out_c = tmpdir / f"pred_c_{N}_{rep}.txt"
                     t, sc = run_gkmpredict(
                         gkmpredict_bin, test_fa, model_c_path, out_c,
+                        threads=predict_threads,
                     )
                     if t is not None:
                         times_c.append(t)
@@ -584,12 +599,15 @@ def main():
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(out_path, "w") as f:
-        f.write(f"# gkmsvm-lite vs LS-GKM C timing comparison\n")
-        f.write(f"# Kernel: -t 2 -l {args.l} -k {args.k} -d {args.d}\n")
-        f.write(f"# Threads (gkmtrain -T): {args.threads}\n")
-        f.write(f"# Device (gkmsvm-lite): {args.device}\n")
-        f.write(f"# Test sequences: {args.n_test}\n")
-        f.write(f"# Inference repeats: {args.repeats}\n\n")
+        write_header(
+            f, "gkmsvm-lite vs LS-GKM C timing comparison", args.device,
+            kernel=f"-t 2 -l {args.l} -k {args.k} -d {args.d}",
+            lsgkm=lsgkm_version(args.conda_env),
+            lsgkm_threads=args.threads,
+            test_sequences=args.n_test,
+            inference_repeats=args.repeats,
+        )
+        f.write("\n")
 
         f.write("## Training\n")
         f.write("N\tseq_len\tgram_gb\tt_lsgkm_train\tt_lite_cpu_train\t"

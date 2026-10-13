@@ -17,12 +17,12 @@ Data:
   examples/data/gm12878_sequence_sets/ (Beer lab GM12878 dsQTL, 14 MB)
 
 Usage:
-  python benchmarks/bench_nystrom_sweep.py
-  python benchmarks/bench_nystrom_sweep.py --device cuda
-  python benchmarks/bench_nystrom_sweep.py --sizes 1000,2000,5000
-  python benchmarks/bench_nystrom_sweep.py --multipliers 2,5,10,15,20,30
-  python benchmarks/bench_nystrom_sweep.py --floor 500
-  python benchmarks/bench_nystrom_sweep.py --plot
+  python benchmarks/dev/bench_nystrom_sweep.py
+  python benchmarks/dev/bench_nystrom_sweep.py --device cuda
+  python benchmarks/dev/bench_nystrom_sweep.py --sizes 1000,2000,5000
+  python benchmarks/dev/bench_nystrom_sweep.py --multipliers 2,5,10,15,20,30
+  python benchmarks/dev/bench_nystrom_sweep.py --floor 500
+  python benchmarks/dev/bench_nystrom_sweep.py --plot
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ from pathlib import Path
 import numpy as np
 from scipy.stats import pearsonr, spearmanr
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = Path(__file__).resolve().parents[2]
 DATA = REPO / "examples" / "data" / "gm12878_sequence_sets"
 DATA_URL = "https://beerlab.org/deltasvm/downloads/gm12878_sequence_sets.tar.gz"
 

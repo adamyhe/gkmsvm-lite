@@ -1,4 +1,4 @@
-"""Throughput sweep: batch size × sequence length × device.
+"""Throughput sweep: batch size × sequence length × device (Fig. S2).
 
 Measures steady-state inference throughput for the ENCODE ENCFF579AOX model
 (72K SVs, esttrunc l=11 k=7 d=3). Separates model loading, warmup/JIT,
@@ -8,6 +8,8 @@ Usage:
     python benchmarks/throughput_sweep.py              # CPU only
     python benchmarks/throughput_sweep.py --device cuda # GPU
     python benchmarks/throughput_sweep.py --device both # side-by-side
+    python benchmarks/throughput_sweep.py --device both \
+        --output benchmarks/results/throughput.tsv
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+from _common import write_tsv
 
 FIXTURE_DIR = Path(__file__).parent.parent / "tests" / "fixtures"
 MODEL_PATH = FIXTURE_DIR / "encode_ENCFF579AOX.model.txt.gz"
@@ -159,6 +162,7 @@ def main():
     parser.add_argument(
         "--device", default="cpu", choices=["cpu", "cuda", "both"],
     )
+    parser.add_argument("--output", default=None, help="Save the sweep to TSV")
     args = parser.parse_args()
 
     all_results = {}
@@ -190,6 +194,14 @@ def main():
                     f" {r_cpu['seqs_per_sec']:>10.1f} {r_gpu['seqs_per_sec']:>10.1f}"
                     f" {speedup:>7.1f}x"
                 )
+
+
+    if args.output:
+        import pandas as pd
+
+        rows = [{"device": d, **r} for d, res in all_results.items() for r in res]
+        write_tsv(args.output, pd.DataFrame(rows), "Inference throughput sweep",
+                  args.device, model=MODEL_PATH.name)
 
 
 if __name__ == "__main__":
