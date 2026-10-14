@@ -912,6 +912,17 @@ class DirectGkmKernel(GkmKernel):
                 self._min_matches,
                 xp,
             )
+        plan = self._masked_plan()
+        n_rows = bx_packed.shape[0] if bx_packed is not None else bx.shape[0]
+        n_cols = by_packed_t.shape[1] if by_packed_t is not None else by.shape[0]
+        if plan is not None and min(n_rows, n_cols) >= _MASKED_MIN_ROWS:
+            from gkmsvm.kernels.masked import masked_pairwise_gpu
+
+            if bx_packed is None:
+                bx_packed = _pack_windows_uint32(xp.asarray(bx), xp)
+            by_packed = (xp.ascontiguousarray(by_packed_t.T) if by_packed_t is not None
+                         else _pack_windows_uint32(xp.asarray(by), xp))
+            return masked_pairwise_gpu(bx_packed, by_packed, plan)
         return _fused_pairwise_idx_gpu(
             bx,
             by,

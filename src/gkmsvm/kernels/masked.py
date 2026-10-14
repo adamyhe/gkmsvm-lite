@@ -137,3 +137,143 @@ def masked_pairwise(bx_packed, by_packed, plan, by_rc_packed=None):
             offsets, colseq = _build_column_index(by, seq_of_row, chunk, j)
             _join_rows(bx, chunk, j, offsets, colseq, coef, result)
     return result
+
+
+# ---------------------------------------------------------------------------
+# CUDA (CuPy)
+# ---------------------------------------------------------------------------
+
+_MASKED_CUDA = r"""
+__device__ __forceinline__ unsigned int masked_key(
+    unsigned int w, const int* __restrict__ pos, int j)
+{
+    unsigned int key = 0;
+    for (int q = 0; q < j; q++)
+        key |= ((w >> (2 * pos[q])) & 3u) << (2 * q);
+    return key;
+}
+
+// counts[m, key + 1] += 1 for every column window (m = mask in chunk)
+extern "C" __global__ void masked_hist(
+    const unsigned int* __restrict__ by, long long n_win,
+    const int* __restrict__ pos, int M, int j, long long K,
+    int* __restrict__ counts)
+{
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= (long long)M * n_win) return;
+    int m = (int)(idx / n_win);
+    long long w = idx % n_win;
+    unsigned int key = masked_key(by[w], pos + m * j, j);
+    atomicAdd(&counts[m * (K + 1) + key + 1], 1);
+}
+
+// colseq[m, slot] = column sequence of each window, slots from fill (offsets)
+extern "C" __global__ void masked_scatter(
+    const unsigned int* __restrict__ by, long long n_win, int Wy,
+    const int* __restrict__ seq_of_row,
+    const int* __restrict__ pos, int M, int j, long long K,
+    int* __restrict__ fill, int* __restrict__ colseq)
+{
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= (long long)M * n_win) return;
+    int m = (int)(idx / n_win);
+    long long w = idx % n_win;
+    unsigned int key = masked_key(by[w], pos + m * j, j);
+    int slot = atomicAdd(&fill[m * K + key], 1);
+    colseq[m * n_win + slot] = seq_of_row[w / Wy];
+}
+
+// One block per query sequence b. Counts matches per column sequence in
+// shared memory (exact int32), then result[b, :] += coef * counts. Only this
+// block writes row b, so the final update needs no atomics.
+extern "C" __global__ void masked_join(
+    const unsigned int* __restrict__ bx, int Wx,
+    const int* __restrict__ pos, int M, int j, long long K,
+    const int* __restrict__ offsets, const int* __restrict__ colseq,
+    long long n_win, int S, double coef, double* __restrict__ result)
+{
+    extern __shared__ int counts[];
+    int b = blockIdx.x;
+    for (int s = threadIdx.x; s < S; s += blockDim.x) counts[s] = 0;
+    __syncthreads();
+    int items = M * Wx;
+    for (int it = threadIdx.x; it < items; it += blockDim.x) {
+        int m = it / Wx;
+        int i = it - m * Wx;
+        unsigned int key = masked_key(bx[(long long)b * Wx + i], pos + m * j, j);
+        const int* off = offsets + m * (K + 1);
+        const int* cs = colseq + m * n_win;
+        int hi = off[key + 1];
+        for (int t = off[key]; t < hi; t++) atomicAdd(&counts[cs[t]], 1);
+    }
+    __syncthreads();
+    for (int s = threadIdx.x; s < S; s += blockDim.x) {
+        int c = counts[s];
+        if (c) result[(long long)b * S + s] += coef * c;
+    }
+}
+"""
+
+_cuda_module = None
+# Column sequences per join launch: the shared-memory counter row is S int32
+_GPU_COL_TILE = 8192
+# Masks per index build: bounds index memory (offsets + one id per window per mask)
+_GPU_MASK_CHUNK = 32
+
+
+def _cuda_kernels():
+    global _cuda_module
+    import cupy as cp
+
+    if _cuda_module is None:
+        _cuda_module = cp.RawModule(code=_MASKED_CUDA)
+    return (_cuda_module.get_function("masked_hist"),
+            _cuda_module.get_function("masked_scatter"),
+            _cuda_module.get_function("masked_join"))
+
+
+def masked_pairwise_gpu(bx_packed, by_packed, plan, by_rc_packed=None):
+    """CUDA version of masked_pairwise(); inputs and result are CuPy arrays.
+
+    bx_packed: [B, Wx] uint32; by_packed, by_rc_packed: [S, Wy] uint32.
+    Returns [B, S] float64.
+    """
+    import cupy as cp
+
+    hist, scatter, join = _cuda_kernels()
+    bx = cp.ascontiguousarray(bx_packed, dtype=cp.uint32)
+    B, Wx = bx.shape
+    S_total, Wy = by_packed.shape
+    result = cp.zeros((B, S_total), dtype=cp.float64)
+    block = 256
+
+    for c0 in range(0, S_total, _GPU_COL_TILE):
+        c1 = min(c0 + _GPU_COL_TILE, S_total)
+        S = c1 - c0
+        rows = [by_packed[c0:c1]] + ([by_rc_packed[c0:c1]] if by_rc_packed is not None else [])
+        by = cp.ascontiguousarray(cp.concatenate(rows), dtype=cp.uint32)
+        seq_of_row = cp.tile(cp.arange(S, dtype=cp.int32), len(rows))
+        n_win = by.shape[0] * Wy
+        res_tile = cp.zeros((B, S), dtype=cp.float64)
+        for j, coef, positions in plan:
+            K = 1 << (2 * j)
+            for m0 in range(0, len(positions), _GPU_MASK_CHUNK):
+                pos = cp.asarray(positions[m0 : m0 + _GPU_MASK_CHUNK], dtype=cp.int32)
+                M = pos.shape[0]
+                counts = cp.zeros((M, K + 1), dtype=cp.int32)
+                grid = (M * n_win + block - 1) // block
+                hist((grid,), (block,),
+                     (by, np.int64(n_win), pos, np.int32(M), np.int32(j), np.int64(K), counts))
+                offsets = cp.cumsum(counts, axis=1, dtype=cp.int32)
+                fill = cp.ascontiguousarray(offsets[:, :K])
+                colseq = cp.empty((M, n_win), dtype=cp.int32)
+                scatter((grid,), (block,),
+                        (by, np.int64(n_win), np.int32(Wy), seq_of_row, pos, np.int32(M),
+                         np.int32(j), np.int64(K), fill, colseq))
+                join((B,), (block,),
+                     (bx, np.int32(Wx), pos, np.int32(M), np.int32(j), np.int64(K),
+                      offsets, colseq, np.int64(n_win), np.int32(S), np.float64(coef),
+                      res_tile),
+                     shared_mem=S * 4)
+        result[:, c0:c1] = res_tile
+    return result

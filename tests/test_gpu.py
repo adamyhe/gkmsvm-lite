@@ -498,3 +498,52 @@ class TestGPUTraining:
 
         assert isinstance(model.support_sequences, np.ndarray)
         assert isinstance(model.coefficients, np.ndarray)
+
+
+class TestMaskedGPU:
+    """CUDA masked join must equal the CPU masked join and brute force."""
+
+    @pytest.mark.parametrize("which", ["t0", "t1", "t2_l9", "t2_l11"])
+    @pytest.mark.parametrize("col_tile", [8192, 7])
+    def test_matches_cpu(self, which, col_tile, monkeypatch):
+        import gkmsvm.kernels.masked as masked
+        from gkmsvm.codec import reverse_complement
+        from gkmsvm.kernels.direct import (
+            DirectGkmKernel,
+            _fused_pairwise_packed_numba,
+            _pack_windows_cpu,
+        )
+        from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
+
+        monkeypatch.setattr(masked, "_GPU_COL_TILE", col_tile)
+        kernel = {
+            "t0": lambda: DirectGkmKernel(8, 5),
+            "t1": lambda: EstTruncGkmKernel(9, 6, d=3, truncate=False),
+            "t2_l9": lambda: EstTruncGkmKernel(9, 6, d=3),
+            "t2_l11": lambda: EstTruncGkmKernel(11, 7, d=3),
+        }[which]()
+        X = np.stack([one_hot_encode(s) for s in _make_seqs(21, 80, seed=3)])
+        X[2, :, 5:45] = X[9, :, 30:70]  # shared subsequence
+        Y = np.stack([one_hot_encode(s) for s in _make_seqs(30, 60, seed=4)])
+
+        def pack(A):
+            return _pack_windows_cpu(np.ascontiguousarray(kernel.base_index_windows(A)))
+
+        bx, by, by_rc = pack(X), pack(Y), pack(reverse_complement(Y))
+        t, l, mm = kernel._mismatch_table, kernel.l, kernel._min_matches
+        plan = masked.mask_plan(tuple(t), l, mm)
+        ref = (_fused_pairwise_packed_numba(bx, by, t, l, mm)
+               + _fused_pairwise_packed_numba(bx, by_rc, t, l, mm))
+        got = masked.masked_pairwise_gpu(cp.asarray(bx), cp.asarray(by), plan,
+                                         cp.asarray(by_rc))
+        np.testing.assert_allclose(cp.asnumpy(got), ref, rtol=1e-12, atol=1e-12)
+
+    def test_model_scores_unchanged(self):
+        """GPU scoring through the masked path (>= 16 SVs and queries) matches CPU."""
+        model = _make_model(40, 100, "gkm_esttrunc",
+                            {"L": 11, "k": 7, "d": 3, "include_rc": True}, seed=6)
+        X = np.stack([one_hot_encode(s) for s in _make_seqs(40, 100, seed=5)])
+        cpu = np.asarray(model(X)).ravel()
+        model.cuda()
+        gpu = cp.asnumpy(model(X)).ravel()
+        np.testing.assert_allclose(gpu, cpu, atol=3e-3)
