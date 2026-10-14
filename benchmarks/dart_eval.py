@@ -40,7 +40,7 @@ Data:
     synapse get -r syn60581045 --downloadLocation $DART_WORK_DIR/task_5_variant_effect_prediction
 
   If data.h5 files are absent, the script falls back to BED + genome FASTA
-  extraction (requires pyfaidx, pyBigWig).
+  extraction (requires pyfaidx, figwig).
 
 Usage:
   python benchmarks/dart_eval.py -m ENCFF953DDE.txt.gz --task all \\
@@ -182,21 +182,13 @@ def _load_task4_bed(cell_line: str) -> dict | None:
         entry = {"seqs": np.stack(seqs)}
 
         if key == "peaks" and os.path.exists(bw_path):
-            import pyBigWig
-            bw = pyBigWig.open(bw_path)
-            counts = []
-            df2 = pd.read_csv(bed_path, sep="\t", header=None,
-                              usecols=[0, 1, 2], names=["chrom", "start", "end"])
-            df2 = df2[df2["chrom"].isin(CHROMS_TEST)].reset_index(drop=True)
-            for _, row in df2.iterrows():
-                mid = (row["start"] + row["end"]) // 2
-                s2 = mid - DART_SEQ_LEN // 2 + CROP
-                e2 = mid + DART_SEQ_LEN // 2 - CROP
-                vals = bw.values(row["chrom"], s2, e2)
-                vals = np.nan_to_num(vals, nan=0.0)
-                counts.append(np.log1p(np.sum(vals)))
-            bw.close()
-            entry["counts"] = np.array(counts)
+            import figwig
+            mid = (df["start"].to_numpy() + df["end"].to_numpy()) // 2
+            # figwig needs starts >= 0; bases past a chromosome end are NaN.
+            starts = np.maximum(mid - DART_SEQ_LEN // 2 + CROP, 0)
+            vals = figwig.read_bigwig(bw_path, df["chrom"].to_numpy(), starts,
+                                      DART_SEQ_LEN - 2 * CROP, n_jobs=-1)
+            entry["counts"] = np.log1p(np.nansum(vals, axis=1))
 
         result[key] = entry
 
