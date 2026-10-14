@@ -58,16 +58,44 @@ def mask_plan(table_key: tuple[float, ...], l: int, min_matches: int):
     return plan
 
 
+def mask_runs(positions: np.ndarray) -> np.ndarray:
+    """Masks as contiguous runs: [M, R, 3] uint32 (shift, bitmask, destination).
+
+    A mask's sorted positions split into maximal runs of consecutive
+    positions; each run moves as one shift-and-mask, so a key costs at most
+    l - j + 1 operations (4 for a size-8 mask of an 11-mer) instead of j
+    gathers. Unused runs have bitmask 0.
+    """
+    M = positions.shape[0]
+    runs = []
+    for m in range(M):
+        pos = sorted(int(p) for p in positions[m])
+        out, q, start = [], 0, 0
+        for i in range(1, len(pos) + 1):
+            if i == len(pos) or pos[i] != pos[i - 1] + 1:
+                n = i - start
+                out.append((2 * pos[start], (1 << (2 * n)) - 1, 2 * q))
+                q += n
+                start = i
+        runs.append(out)
+    R = max(len(r) for r in runs)
+    arr = np.zeros((M, R, 3), dtype=np.uint32)
+    for m, r in enumerate(runs):
+        arr[m, : len(r)] = r
+    return arr
+
+
 @njit(inline="always")
-def _masked_key(w, pos, j):
+def _masked_key(w, runs):
+    """Key of packed window w under one mask's runs ([R, 3])."""
     key = np.uint32(0)
-    for i in range(j):
-        key |= ((w >> np.uint32(2 * pos[i])) & np.uint32(3)) << np.uint32(2 * i)
+    for r in range(runs.shape[0]):
+        key |= ((w >> runs[r, 0]) & runs[r, 1]) << runs[r, 2]
     return key
 
 
 @njit(parallel=True, cache=True)
-def _build_column_index(by, seq_of_row, positions, j):
+def _build_column_index(by, seq_of_row, runs, j):
     """Counting sort of column windows by masked key, one index per mask.
 
     by: [R, W] packed windows; row r belongs to column sequence seq_of_row[r].
@@ -75,41 +103,41 @@ def _build_column_index(by, seq_of_row, positions, j):
     key order).
     """
     R, W = by.shape
-    M = positions.shape[0]
+    M = runs.shape[0]
     K = 1 << (2 * j)
     offsets = np.zeros((M, K + 1), dtype=np.int32)
     colseq = np.empty((M, R * W), dtype=np.int32)
     for m in prange(M):
-        pos = positions[m]
+        mr = runs[m]
         for r in range(R):
             for w in range(W):
-                offsets[m, _masked_key(by[r, w], pos, j) + 1] += 1
+                offsets[m, _masked_key(by[r, w], mr) + 1] += 1
         for key in range(K):
             offsets[m, key + 1] += offsets[m, key]
         fill = offsets[m, :K].copy()
         for r in range(R):
             s = seq_of_row[r]
             for w in range(W):
-                key = _masked_key(by[r, w], pos, j)
+                key = _masked_key(by[r, w], mr)
                 colseq[m, fill[key]] = s
                 fill[key] += 1
     return offsets, colseq
 
 
 @njit(parallel=True, cache=True, fastmath=True)
-def _join_rows(bx, positions, j, offsets, colseq, coef, result):
+def _join_rows(bx, runs, offsets, colseq, coef, result):
     """result[b, s] += coef for every (query window, column window, mask) match.
 
     Each query sequence's row is owned by one thread, so there are no races.
     """
     B, Wx = bx.shape
-    M = positions.shape[0]
+    M = runs.shape[0]
     for b in prange(B):
         row = result[b]
         for m in range(M):
-            pos = positions[m]
+            mr = runs[m]
             for i in range(Wx):
-                key = _masked_key(bx[b, i], pos, j)
+                key = _masked_key(bx[b, i], mr)
                 for t in range(offsets[m, key], offsets[m, key + 1]):
                     row[colseq[m, t]] += coef
 
@@ -135,8 +163,9 @@ def masked_pairwise(bx_packed, by_packed, plan, by_rc_packed=None):
     for j, coef, positions in plan:
         for start in range(0, len(positions), _MASK_CHUNK):
             chunk = positions[start : start + _MASK_CHUNK]
-            offsets, colseq = _build_column_index(by, seq_of_row, chunk, j)
-            _join_rows(bx, chunk, j, offsets, colseq, coef, result)
+            runs = mask_runs(chunk)
+            offsets, colseq = _build_column_index(by, seq_of_row, runs, j)
+            _join_rows(bx, runs, offsets, colseq, coef, result)
     return result
 
 
@@ -145,72 +174,84 @@ def masked_pairwise(bx_packed, by_packed, plan, by_rc_packed=None):
 # ---------------------------------------------------------------------------
 
 _MASKED_CUDA = r"""
+// Masks are given as contiguous runs: runs[(m * R + r) * 3 + {0,1,2}] =
+// (shift, bitmask, destination); unused runs have bitmask 0 (see mask_runs).
 __device__ __forceinline__ unsigned int masked_key(
-    unsigned int w, const int* __restrict__ pos, int j)
+    unsigned int w, const unsigned int* __restrict__ runs, int R)
 {
     unsigned int key = 0;
-    for (int q = 0; q < j; q++)
-        key |= ((w >> (2 * pos[q])) & 3u) << (2 * q);
+    for (int r = 0; r < R; r++)
+        key |= ((w >> runs[3 * r]) & runs[3 * r + 1]) << runs[3 * r + 2];
     return key;
 }
 
 // counts[m, key + 1] += 1 for every column window (m = mask in chunk)
 extern "C" __global__ void masked_hist(
     const unsigned int* __restrict__ by, long long n_win,
-    const int* __restrict__ pos, int M, int j, long long K,
+    const unsigned int* __restrict__ runs, int R, int M, long long K,
     int* __restrict__ counts)
 {
     long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= (long long)M * n_win) return;
     int m = (int)(idx / n_win);
     long long w = idx % n_win;
-    unsigned int key = masked_key(by[w], pos + m * j, j);
+    unsigned int key = masked_key(by[w], runs + m * R * 3, R);
     atomicAdd(&counts[m * (K + 1) + key + 1], 1);
 }
 
-// colseq[m, slot] = column sequence of each window, slots from fill (offsets)
+// colseq[m, slot] = column sequence of each window (uint16: column tiles are
+// at most 8192 sequences), slots from fill (bucket starts)
 extern "C" __global__ void masked_scatter(
     const unsigned int* __restrict__ by, long long n_win, int Wy,
     const int* __restrict__ seq_of_row,
-    const int* __restrict__ pos, int M, int j, long long K,
-    int* __restrict__ fill, int* __restrict__ colseq)
+    const unsigned int* __restrict__ runs, int R, int M, long long K,
+    int* __restrict__ fill, unsigned short* __restrict__ colseq)
 {
     long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= (long long)M * n_win) return;
     int m = (int)(idx / n_win);
     long long w = idx % n_win;
-    unsigned int key = masked_key(by[w], pos + m * j, j);
+    unsigned int key = masked_key(by[w], runs + m * R * 3, R);
     int slot = atomicAdd(&fill[m * K + key], 1);
-    colseq[m * n_win + slot] = seq_of_row[w / Wy];
+    colseq[m * n_win + slot] = (unsigned short)seq_of_row[w / Wy];
 }
 
 // One block per query sequence b. Counts matches per column sequence in
 // shared memory (exact int32), then result[b, :] += coef * counts. Only this
 // block writes row b, so the final update needs no atomics.
-// Each (mask, window) item's bucket is scanned by a group of `lanes` threads
-// (a power of two dividing 32), so reads are contiguous and loop lengths
-// within a warp are even.
+// Lane groups of `lanes` threads share each bucket scan (contiguous reads).
+// window_outer = 1: a group takes one query window, loads it once and loops
+// over the masks; 0: a group takes one (mask, window) item. The chunk's runs
+// sit in shared memory after the counters.
 extern "C" __global__ void masked_join(
     const unsigned int* __restrict__ bx, int Wx,
-    const int* __restrict__ pos, int M, int j, long long K,
-    const int* __restrict__ offsets, const int* __restrict__ colseq,
-    long long n_win, int S, double coef, double* __restrict__ result, int lanes)
+    const unsigned int* __restrict__ runs, int R, int M, long long K,
+    const int* __restrict__ offsets, const unsigned short* __restrict__ colseq,
+    long long n_win, int S, double coef, double* __restrict__ result, int lanes,
+    int window_outer)
 {
-    extern __shared__ int counts[];
+    extern __shared__ int smem[];
+    int* counts = smem;
+    unsigned int* s_runs = (unsigned int*)(smem + S);
     int b = blockIdx.x;
     for (int s = threadIdx.x; s < S; s += blockDim.x) counts[s] = 0;
+    for (int t = threadIdx.x; t < M * R * 3; t += blockDim.x) s_runs[t] = runs[t];
     __syncthreads();
-    int items = M * Wx;
     int group = threadIdx.x / lanes, lane = threadIdx.x % lanes;
     int n_groups = blockDim.x / lanes;
+    int items = window_outer ? Wx : M * Wx;
     for (int it = group; it < items; it += n_groups) {
-        int m = it / Wx;
-        int i = it - m * Wx;
-        unsigned int key = masked_key(bx[(long long)b * Wx + i], pos + m * j, j);
-        const int* off = offsets + m * (K + 1);
-        const int* cs = colseq + m * n_win;
-        int hi = off[key + 1];
-        for (int t = off[key] + lane; t < hi; t += lanes) atomicAdd(&counts[cs[t]], 1);
+        int i = window_outer ? it : it % Wx;
+        int m0 = window_outer ? 0 : it / Wx;
+        int m1 = window_outer ? M : m0 + 1;
+        unsigned int w = bx[(long long)b * Wx + i];
+        for (int m = m0; m < m1; m++) {
+            unsigned int key = masked_key(w, s_runs + m * R * 3, R);
+            const int* off = offsets + m * (K + 1);
+            const unsigned short* cs = colseq + m * n_win;
+            int hi = off[key + 1];
+            for (int t = off[key] + lane; t < hi; t += lanes) atomicAdd(&counts[cs[t]], 1);
+        }
     }
     __syncthreads();
     for (int s = threadIdx.x; s < S; s += blockDim.x) {
@@ -229,6 +270,9 @@ _GPU_MASK_CHUNK = 32
 GPU_PROFILE: dict | None = None
 # Threads that share one bucket scan in the join (power of two <= 32)
 GPU_JOIN_LANES = 16  # best on a Titan Xp (sweep 1-32: 16 > 8 > 4 > 32 > 1)
+# 1: each lane group loads a query window once and loops over the masks;
+# 0: one (mask, window) item per group
+GPU_JOIN_WINDOW_OUTER = 1
 
 
 def _stage(name, t0):
@@ -281,26 +325,27 @@ def masked_pairwise_gpu(bx_packed, by_packed, plan, by_rc_packed=None):
             K = 1 << (2 * j)
             for m0 in range(0, len(positions), _GPU_MASK_CHUNK):
                 t0 = time.perf_counter()
-                pos = cp.asarray(positions[m0 : m0 + _GPU_MASK_CHUNK], dtype=cp.int32)
-                M = pos.shape[0]
+                runs_np = mask_runs(positions[m0 : m0 + _GPU_MASK_CHUNK])
+                M, R = runs_np.shape[0], runs_np.shape[1]
+                runs = cp.asarray(runs_np.ravel())
                 counts = cp.zeros((M, K + 1), dtype=cp.int32)
                 grid = (M * n_win + block - 1) // block
                 hist((grid,), (block,),
-                     (by, np.int64(n_win), pos, np.int32(M), np.int32(j), np.int64(K), counts))
+                     (by, np.int64(n_win), runs, np.int32(R), np.int32(M), np.int64(K), counts))
                 offsets = cp.cumsum(counts, axis=1, dtype=cp.int32)
                 # A copy: with one mask the slice is already contiguous, and the
                 # scatter's atomics would otherwise overwrite offsets
                 fill = offsets[:, :K].copy()
-                colseq = cp.empty((M, n_win), dtype=cp.int32)
+                colseq = cp.empty((M, n_win), dtype=cp.uint16)
                 scatter((grid,), (block,),
-                        (by, np.int64(n_win), np.int32(Wy), seq_of_row, pos, np.int32(M),
-                         np.int32(j), np.int64(K), fill, colseq))
+                        (by, np.int64(n_win), np.int32(Wy), seq_of_row, runs, np.int32(R),
+                         np.int32(M), np.int64(K), fill, colseq))
                 t0 = _stage(f"index j={j}", t0)
                 join((B,), (block,),
-                     (bx, np.int32(Wx), pos, np.int32(M), np.int32(j), np.int64(K),
+                     (bx, np.int32(Wx), runs, np.int32(R), np.int32(M), np.int64(K),
                       offsets, colseq, np.int64(n_win), np.int32(S), np.float64(coef),
-                      res_tile, np.int32(GPU_JOIN_LANES)),
-                     shared_mem=S * 4)
+                      res_tile, np.int32(GPU_JOIN_LANES), np.int32(GPU_JOIN_WINDOW_OUTER)),
+                     shared_mem=(S + M * R * 3) * 4)
                 _stage(f"join j={j}", t0)
         result[:, c0:c1] = res_tile
     return result
@@ -329,24 +374,24 @@ def weighted_mask_plan(l: int, k: int, pos_weights: np.ndarray):
 
 
 @njit(parallel=True, cache=True)
-def _self_join_counts(bx, brc, positions, j, coef, out):
+def _self_join_counts(bx, brc, runs, coef, out):
     """out[b] += coef * #(window pairs of b, and of b vs rc(b), agreeing on a mask).
 
     brc has zero columns when there is no RC term.
     """
     B, W = bx.shape
     Wr = brc.shape[1]
-    M = positions.shape[0]
+    M = runs.shape[0]
     for b in prange(B):
         keys = np.empty(W, dtype=np.uint32)
         rkeys = np.empty(Wr, dtype=np.uint32)
         acc = 0
         for m in range(M):
-            pos = positions[m]
+            mr = runs[m]
             for i in range(W):
-                keys[i] = _masked_key(bx[b, i], pos, j)
+                keys[i] = _masked_key(bx[b, i], mr)
             for i in range(Wr):
-                rkeys[i] = _masked_key(brc[b, i], pos, j)
+                rkeys[i] = _masked_key(brc[b, i], mr)
             keys.sort()
             rkeys.sort()
             # sum over keys of n_fwd * (n_fwd + n_rc), by merging sorted runs
@@ -375,7 +420,7 @@ def masked_self_kernel(bx_packed, plan, bx_rc_packed=None):
            else np.zeros((bx.shape[0], 0), dtype=np.uint32))
     out = np.zeros(bx.shape[0], dtype=np.float64)
     for j, coef, positions in plan:
-        _self_join_counts(bx, brc, positions, j, coef, out)
+        _self_join_counts(bx, brc, mask_runs(positions), coef, out)
     return out
 
 
@@ -390,26 +435,34 @@ _METAL_MASKED_JOIN = """
     uint b = threadgroup_position_in_grid.x;
     uint tid = thread_position_in_threadgroup.x;
     uint tg = threads_per_threadgroup.x;
-    int Wx = params[0], M = params[1], j = params[2], S = params[3], lanes = params[4];
+    int Wx = params[0], M = params[1], R = params[2], S = params[3], lanes = params[4];
     uint K1 = (uint)params[5];
     uint n_win = (uint)params[6];
     threadgroup atomic_int counts[TILE];
     for (int s = tid; s < S; s += tg)
         atomic_store_explicit(&counts[s], 0, memory_order_relaxed);
     threadgroup_barrier(mem_flags::mem_threadgroup);
+    // Each lane group takes one (mask, window) item and scans its bucket
+    // (runs: shift, bitmask, destination per run). Measured on an M4 this
+    // beats loading each window once and looping masks inside (0.60 s vs
+    // 0.65 s at 2000x2000).
     int group = tid / lanes, lane = tid % lanes, n_groups = tg / lanes;
     for (int it = group; it < M * Wx; it += n_groups) {
         int m = it / Wx;
         int i = it - m * Wx;
         uint w = bx[b * Wx + i];
-        uint key = 0;
-        for (int q = 0; q < j; q++)
-            key |= ((w >> (2 * pos[m * j + q])) & 3u) << (2 * q);
-        uint base = (uint)m * K1;
-        int hi = offsets[base + key + 1];
-        uint cbase = (uint)m * n_win;
-        for (int t = offsets[base + key] + lane; t < hi; t += lanes)
-            atomic_fetch_add_explicit(&counts[colseq[cbase + t]], 1, memory_order_relaxed);
+        {
+            uint key = 0;
+            for (int r = 0; r < R; r++) {
+                uint o = (uint)(m * R + r) * 3;
+                key |= ((w >> runs[o]) & runs[o + 1]) << runs[o + 2];
+            }
+            uint base = (uint)m * K1;
+            int hi = offsets[base + key + 1];
+            uint cbase = (uint)m * n_win;
+            for (int t = offsets[base + key] + lane; t < hi; t += lanes)
+                atomic_fetch_add_explicit(&counts[colseq[cbase + t]], 1, memory_order_relaxed);
+        }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (int s = tid; s < S; s += tg)
@@ -418,12 +471,14 @@ _METAL_MASKED_JOIN = """
 
 _METAL_HIST = """
     uint idx = thread_position_in_grid.x;
-    uint M = (uint)params[0], j = (uint)params[1], K1 = (uint)params[2], n_win = (uint)params[3];
+    uint M = (uint)params[0], R = (uint)params[1], K1 = (uint)params[2], n_win = (uint)params[3];
     if (idx >= M * n_win) return;
     uint m = idx / n_win, w = idx - m * n_win;
     uint v = by[w], key = 0;
-    for (uint q = 0; q < j; q++)
-        key |= ((v >> (2 * pos[m * j + q])) & 3u) << (2 * q);
+    for (uint r = 0; r < R; r++) {
+        uint o = (m * R + r) * 3;
+        key |= ((v >> runs[o]) & runs[o + 1]) << runs[o + 2];
+    }
     atomic_fetch_add_explicit(&counts[m * K1 + key + 1], 1, memory_order_relaxed);
 """
 
@@ -431,13 +486,15 @@ _METAL_HIST = """
 # every output of an atomic kernel atomic
 _METAL_SCATTER = """
     uint idx = thread_position_in_grid.x;
-    uint M = (uint)params[0], j = (uint)params[1], K1 = (uint)params[2], n_win = (uint)params[3];
+    uint M = (uint)params[0], R = (uint)params[1], K1 = (uint)params[2], n_win = (uint)params[3];
     uint Wy = (uint)params[4];
     if (idx >= M * n_win) return;
     uint m = idx / n_win, w = idx - m * n_win;
     uint v = by[w], key = 0;
-    for (uint q = 0; q < j; q++)
-        key |= ((v >> (2 * pos[m * j + q])) & 3u) << (2 * q);
+    for (uint r = 0; r < R; r++) {
+        uint o = (m * R + r) * 3;
+        key |= ((v >> runs[o]) & runs[o + 1]) << runs[o + 2];
+    }
     int slot = offsets[m * K1 + key]
              + atomic_fetch_add_explicit(&fill[m * (K1 - 1) + key], 1, memory_order_relaxed);
     atomic_store_explicit(&colseq[m * n_win + slot], seq_of_row[w / Wy], memory_order_relaxed);
@@ -456,17 +513,18 @@ def _metal_index(by_mx, seq_of_row_mx, chunk, j, Wy):
     global _metal_hist, _metal_scatter
     if _metal_hist is None:
         _metal_hist = mx.fast.metal_kernel(
-            name="gkm_masked_hist", input_names=["by", "pos", "params"],
+            name="gkm_masked_hist", input_names=["by", "runs", "params"],
             output_names=["counts"], source=_METAL_HIST, atomic_outputs=True)
         _metal_scatter = mx.fast.metal_kernel(
             name="gkm_masked_scatter",
-            input_names=["by", "seq_of_row", "pos", "offsets", "params"],
+            input_names=["by", "seq_of_row", "runs", "offsets", "params"],
             output_names=["fill", "colseq"], source=_METAL_SCATTER, atomic_outputs=True)
-    M = len(chunk)
+    runs_np = mask_runs(chunk)
+    M, R = runs_np.shape[0], runs_np.shape[1]
     K = 1 << (2 * j)
     n_win = by_mx.shape[0]
-    pos = mx.array(chunk.astype(np.int32).ravel())
-    params = mx.array([M, j, K + 1, n_win, Wy], dtype=mx.int32)
+    pos = mx.array(runs_np.ravel())
+    params = mx.array([M, R, K + 1, n_win, Wy], dtype=mx.int32)
     threads = 256
     grid = ((M * n_win + threads - 1) // threads) * threads
     counts = _metal_hist(
@@ -496,7 +554,7 @@ def _get_metal_join():
 
         _metal_join = mx.fast.metal_kernel(
             name="gkm_masked_join",
-            input_names=["bx", "pos", "offsets", "colseq", "params"],
+            input_names=["bx", "runs", "offsets", "colseq", "params"],
             output_names=["out"],
             source=_METAL_MASKED_JOIN,
         )
@@ -538,13 +596,13 @@ def masked_pairwise_mlx(bx_packed, by_packed, plan, by_rc_packed=None) -> np.nda
                 if METAL_INDEX:
                     offsets, colseq = _metal_index(by_mx, seq_mx, chunk, j, Wy)
                 else:
-                    offsets, colseq = _build_column_index(by, seq_of_row, chunk, j)
+                    offsets, colseq = _build_column_index(by, seq_of_row, mask_runs(chunk), j)
                     offsets, colseq = mx.array(offsets.ravel()), mx.array(colseq.ravel())
-                params = mx.array([Wx, len(chunk), j, S, _METAL_LANES, K1, n_win],
-                                  dtype=mx.int32)
+                runs_np = mask_runs(chunk)
+                params = mx.array([Wx, runs_np.shape[0], runs_np.shape[1], S, _METAL_LANES,
+                                   K1, n_win], dtype=mx.int32)
                 counts = join(
-                    inputs=[bx_mx, mx.array(chunk.astype(np.int32).ravel()),
-                            offsets, colseq, params],
+                    inputs=[bx_mx, mx.array(runs_np.ravel()), offsets, colseq, params],
                     template=[("TILE", _METAL_COL_TILE)],
                     grid=(B * _METAL_THREADS, 1, 1),
                     threadgroup=(_METAL_THREADS, 1, 1),

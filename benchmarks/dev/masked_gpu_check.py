@@ -33,6 +33,8 @@ def main():
     parser.add_argument("-d", type=int, default=3)
     parser.add_argument("--lanes", default=None,
                         help="Comma-separated join lane-group sizes to compare (1-32)")
+    parser.add_argument("--loop", default=None,
+                        help="Comma-separated join loop orders to compare: window,item")
     parser.add_argument("--profile", action="store_true",
                         help="Time index build and join per mask size (adds syncs)")
     args = parser.parse_args()
@@ -47,6 +49,9 @@ def main():
     sizes = [int(s) for s in args.sizes.split(",")]
     lane_options = ([int(x) for x in args.lanes.split(",")] if args.lanes
                     else [masked.GPU_JOIN_LANES])
+    loop_options = ({"window": 1, "item": 0}[x] for x in args.loop.split(",")) if args.loop \
+        else [masked.GPU_JOIN_WINDOW_OUTER]
+    loop_options = list(loop_options)
     half = max(sizes) // 2
     pos = [s for _, s in read_fasta(str(SEQ_DIR / "gm12878_shared.fa"))][:half]
     neg = [s for _, s in read_fasta(str(SEQ_DIR / "nullseqs_gm12878_shared.1.1.fa"))][:half]
@@ -72,14 +77,16 @@ def main():
         X = cp.asarray(np.stack([one_hot_encode(s) for s in seqs]))
         G_b, t_b = gram(X, False)
         print(f"N={N:>6}: brute {t_b:8.2f}s")
-        for lanes in lane_options:
+        for lanes, loop in [(a, b) for a in lane_options for b in loop_options]:
             masked.GPU_JOIN_LANES = lanes
+            masked.GPU_JOIN_WINDOW_OUTER = loop
             if args.profile:
                 masked.GPU_PROFILE = {}
             G_m, t_m = gram(X, True)
             prof, masked.GPU_PROFILE = masked.GPU_PROFILE, None
             rel = np.abs(G_m - G_b).max() / np.abs(G_b).max()
-            print(f"    masked, {lanes:>2} lanes: {t_m:8.2f}s  speedup {t_b / t_m:5.1f}x  "
+            print(f"    masked, {lanes:>2} lanes, {'window' if loop else 'item':6s}: "
+                  f"{t_m:8.2f}s  speedup {t_b / t_m:5.1f}x  "
                   f"max |diff|/max|K| {rel:.1e}")
             if prof:
                 print("      " + ", ".join(f"{k} {v:.2f}s" for k, v in sorted(prof.items())))

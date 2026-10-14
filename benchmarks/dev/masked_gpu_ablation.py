@@ -97,7 +97,7 @@ def main():
     from gkmsvm.codec import reverse_complement
     from gkmsvm.kernels.direct import _pack_windows_cpu
     from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
-    from gkmsvm.kernels.masked import _build_column_index, mask_plan
+    from gkmsvm.kernels.masked import _build_column_index, mask_plan, mask_runs
 
     n = max(args.rows, args.cols)
     seqs = [s for _, s in read_fasta(str(SEQ_DIR / "gm12878_shared.fa"))][:n]
@@ -114,7 +114,7 @@ def main():
     plan = mask_plan(tuple(kern._mismatch_table), kern.l, kern._min_matches)
     j, _, positions = plan[0]  # size-8 masks
     chunk = positions[: args.masks]
-    offsets, colseq = _build_column_index(by, seq_of_row, chunk, j)
+    offsets, colseq = _build_column_index(by, seq_of_row, mask_runs(chunk), j)
 
     mod = cp.RawModule(code=_VARIANTS)
     fn = mod.get_function("join_variant")
