@@ -187,25 +187,30 @@ extern "C" __global__ void masked_scatter(
 // One block per query sequence b. Counts matches per column sequence in
 // shared memory (exact int32), then result[b, :] += coef * counts. Only this
 // block writes row b, so the final update needs no atomics.
+// Each (mask, window) item's bucket is scanned by a group of `lanes` threads
+// (a power of two dividing 32), so reads are contiguous and loop lengths
+// within a warp are even.
 extern "C" __global__ void masked_join(
     const unsigned int* __restrict__ bx, int Wx,
     const int* __restrict__ pos, int M, int j, long long K,
     const int* __restrict__ offsets, const int* __restrict__ colseq,
-    long long n_win, int S, double coef, double* __restrict__ result)
+    long long n_win, int S, double coef, double* __restrict__ result, int lanes)
 {
     extern __shared__ int counts[];
     int b = blockIdx.x;
     for (int s = threadIdx.x; s < S; s += blockDim.x) counts[s] = 0;
     __syncthreads();
     int items = M * Wx;
-    for (int it = threadIdx.x; it < items; it += blockDim.x) {
+    int group = threadIdx.x / lanes, lane = threadIdx.x % lanes;
+    int n_groups = blockDim.x / lanes;
+    for (int it = group; it < items; it += n_groups) {
         int m = it / Wx;
         int i = it - m * Wx;
         unsigned int key = masked_key(bx[(long long)b * Wx + i], pos + m * j, j);
         const int* off = offsets + m * (K + 1);
         const int* cs = colseq + m * n_win;
         int hi = off[key + 1];
-        for (int t = off[key]; t < hi; t++) atomicAdd(&counts[cs[t]], 1);
+        for (int t = off[key] + lane; t < hi; t += lanes) atomicAdd(&counts[cs[t]], 1);
     }
     __syncthreads();
     for (int s = threadIdx.x; s < S; s += blockDim.x) {
@@ -222,6 +227,8 @@ _GPU_COL_TILE = 8192
 _GPU_MASK_CHUNK = 32
 # Set to a dict to accumulate per-stage seconds (synchronizes between stages)
 GPU_PROFILE: dict | None = None
+# Threads that share one bucket scan in the join (power of two <= 32)
+GPU_JOIN_LANES = 8
 
 
 def _stage(name, t0):
@@ -292,7 +299,7 @@ def masked_pairwise_gpu(bx_packed, by_packed, plan, by_rc_packed=None):
                 join((B,), (block,),
                      (bx, np.int32(Wx), pos, np.int32(M), np.int32(j), np.int64(K),
                       offsets, colseq, np.int64(n_win), np.int32(S), np.float64(coef),
-                      res_tile),
+                      res_tile, np.int32(GPU_JOIN_LANES)),
                      shared_mem=S * 4)
                 _stage(f"join j={j}", t0)
         result[:, c0:c1] = res_tile

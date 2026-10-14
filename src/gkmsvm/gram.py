@@ -25,9 +25,10 @@ def compute_gram(
     only upper-triangle tiles are evaluated, then mirrored.
 
     Uses the packed uint32 path when available (DirectGkmKernel,
-    EstTruncGkmKernel, and RbfGkmKernel via its base kernel) for ~3x faster
-    computation on CPU. On CPU, diagonal tiles of a self-Gram compute only
-    their upper triangle.
+    EstTruncGkmKernel, and RbfGkmKernel via its base kernel). When the
+    kernel uses the masked join, whole column panels are computed per call so
+    each column tile's index is built once; otherwise square tiles are used,
+    and on CPU diagonal tiles compute only their upper triangle.
 
     Args:
         kernel: A GkmKernel instance.
@@ -62,7 +63,15 @@ def compute_gram(
     row_ranges = list(range(0, N, chunk_size))
     col_ranges = list(range(0, M, chunk_size))
 
-    if symmetric:
+    # The masked-join kernel builds an index of the column sequences on every
+    # call, so compute whole column panels (all rows, or all rows up to the
+    # diagonal) to build each column tile's index once
+    plan_fn = getattr(fast, "_masked_plan", None) if use_fast else None
+    panels = plan_fn is not None and plan_fn() is not None
+
+    if panels:
+        tiles = [(0, c) for c in col_ranges]
+    elif symmetric:
         tiles = [
             (r, c)
             for r in row_ranges
@@ -84,13 +93,16 @@ def compute_gram(
             diag_y = fast._raw_diagonal(Y)
 
     for r_start, c_start in tiles:
-        r_end = min(r_start + chunk_size, N)
         c_end = min(c_start + chunk_size, M)
+        if panels:
+            r_end = c_end if symmetric else N
+        else:
+            r_end = min(r_start + chunk_size, N)
 
         if use_fast:
             tile = _fast_pairwise_tile(
                 fast, X[r_start:r_end], Y[c_start:c_end],
-                symmetric=symmetric and r_start == c_start,
+                symmetric=symmetric and not panels and r_start == c_start,
             )
             if fast.normalize:
                 norm = xp.sqrt(
@@ -105,7 +117,14 @@ def compute_gram(
         tile_np = to_cpu(tile)
         gram[r_start:r_end, c_start:c_end] = tile_np
 
-        if symmetric and r_start != c_start:
+        if symmetric and panels:
+            # Rows above the diagonal block mirror into the lower triangle;
+            # the diagonal block takes its upper triangle so K stays exactly
+            # symmetric (the two triangles differ in summation order)
+            gram[c_start:c_end, :c_start] = tile_np[:c_start].T
+            blk = tile_np[c_start:c_end]
+            gram[c_start:c_end, c_start:c_end] = np.triu(blk) + np.triu(blk, 1).T
+        elif symmetric and r_start != c_start:
             gram[c_start:c_end, r_start:r_end] = tile_np.T
 
     return gram
