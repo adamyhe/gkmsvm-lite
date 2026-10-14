@@ -270,9 +270,9 @@ _GPU_MASK_CHUNK = 32
 GPU_PROFILE: dict | None = None
 # Threads that share one bucket scan in the join (power of two <= 32)
 GPU_JOIN_LANES = 16  # best on a Titan Xp (sweep 1-32: 16 > 8 > 4 > 32 > 1)
-# 1: each lane group loads a query window once and loops over the masks;
-# 0: one (mask, window) item per group
-GPU_JOIN_WINDOW_OUTER = 1
+# 0: one (mask, window) item per lane group; 1: each group loads a query
+# window once and loops over the masks (slower on a Titan Xp and an M4)
+GPU_JOIN_WINDOW_OUTER = 0  # Titan Xp N=5000 Gram: item 1.60 s, window 1.85 s
 
 
 def _stage(name, t0):
