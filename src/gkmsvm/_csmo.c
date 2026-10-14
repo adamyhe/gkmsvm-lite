@@ -22,8 +22,17 @@
 #include <float.h>
 #include <time.h>
 
-/* Callback: fill out[0..N-1] with normalized K(idx, :). */
-typedef void (*column_callback_t)(int idx, int N, double *out, void *userdata);
+#ifdef _WIN32
+  #define EXPORT __declspec(dllexport)
+#else
+  #define EXPORT __attribute__((visibility("default")))
+#endif
+
+/* Callback: fill out[0..N-1] with normalized K(idx, :). `cache` is the
+ * solver's column cache, so the callback may add extra (prefetched) columns
+ * with csmo_cache_insert(). */
+typedef void (*column_callback_t)(int idx, int N, double *out, void *userdata,
+                                  void *cache);
 
 /* ------------------------------------------------------------------ */
 /* LRU kernel column cache                                            */
@@ -40,10 +49,14 @@ typedef struct {
     void *userdata;
     long hits;
     long misses;
+    int *slot_of;         /* slot holding each training index (-1 = not cached) */
+    int *prefetched;      /* per slot: 1 if inserted by prefetch and not yet requested */
+    double *in_cache;     /* optional caller-visible [N] flags: 1.0 if cached */
 } ColumnCache;
 
 static ColumnCache *cache_create(int capacity, int N,
-                                  column_callback_t cb, void *ud) {
+                                  column_callback_t cb, void *ud,
+                                  double *in_cache) {
     ColumnCache *c = (ColumnCache *)malloc(sizeof(ColumnCache));
     c->capacity = capacity;
     c->N = N;
@@ -55,6 +68,13 @@ static ColumnCache *cache_create(int capacity, int N,
     c->userdata = ud;
     c->hits = 0;
     c->misses = 0;
+    c->in_cache = in_cache;
+    c->prefetched = (int *)calloc(capacity, sizeof(int));
+    c->slot_of = (int *)malloc(N * sizeof(int));
+    for (int i = 0; i < N; i++) {
+        c->slot_of[i] = -1;
+        if (in_cache) in_cache[i] = 0.0;
+    }
     for (int i = 0; i < capacity; i++) {
         c->col_index[i] = -1;
         c->data[i] = (double *)malloc(N * sizeof(double));
@@ -68,18 +88,19 @@ static void cache_destroy(ColumnCache *c) {
     free(c->data);
     free(c->col_index);
     free(c->last_used);
+    free(c->slot_of);
+    free(c->prefetched);
     free(c);
 }
 
 static double *cache_get(ColumnCache *c, int idx) {
     c->timer++;
-    /* Search for cached column */
-    for (int s = 0; s < c->capacity; s++) {
-        if (c->col_index[s] == idx) {
-            c->last_used[s] = c->timer;
-            c->hits++;
-            return c->data[s];
-        }
+    int s = c->slot_of[idx];
+    if (s >= 0) {
+        c->last_used[s] = c->timer;
+        c->prefetched[s] = 0;
+        c->hits++;
+        return c->data[s];
     }
     /* Cache miss — find LRU slot */
     c->misses++;
@@ -92,10 +113,61 @@ static double *cache_get(ColumnCache *c, int idx) {
         }
     }
     /* Fill slot via callback */
+    int old = c->col_index[lru_slot];
+    if (old >= 0) {
+        c->slot_of[old] = -1;
+        if (c->in_cache) c->in_cache[old] = 0.0;
+    }
+    c->slot_of[idx] = lru_slot;
+    if (c->in_cache) c->in_cache[idx] = 1.0;
     c->col_index[lru_slot] = idx;
     c->last_used[lru_slot] = c->timer;
-    c->callback(idx, c->N, c->data[lru_slot], c->userdata);
+    c->prefetched[lru_slot] = 0;
+    c->callback(idx, c->N, c->data[lru_slot], c->userdata, c);
     return c->data[lru_slot];
+}
+
+/* A slot a prefetched column may use: a free one, else the least recently
+ * used slot whose column was prefetched and never requested. Never a column
+ * the solver asked for. -1 if none. */
+static int insert_slot(ColumnCache *c) {
+    int best = -1;
+    for (int s = 0; s < c->capacity; s++) {
+        if (c->col_index[s] < 0) return s;
+        if (c->prefetched[s] && (best < 0 || c->last_used[s] < c->last_used[best]))
+            best = s;
+    }
+    return best;
+}
+
+/* Number of columns csmo_cache_insert() can currently place. */
+EXPORT int csmo_cache_room(void *cache) {
+    ColumnCache *c = (ColumnCache *)cache;
+    int room = 0;
+    for (int s = 0; s < c->capacity; s++)
+        if (c->col_index[s] < 0 || c->prefetched[s]) room++;
+    return room;
+}
+
+/* Add a prefetched column K(idx, :). Returns 1 if stored, 0 if idx is
+ * already cached or there is no slot (see insert_slot). */
+EXPORT int csmo_cache_insert(void *cache, int idx, const double *col) {
+    ColumnCache *c = (ColumnCache *)cache;
+    if (idx < 0 || idx >= c->N || c->slot_of[idx] >= 0) return 0;
+    int s = insert_slot(c);
+    if (s < 0) return 0;
+    int old = c->col_index[s];
+    if (old >= 0) {
+        c->slot_of[old] = -1;
+        if (c->in_cache) c->in_cache[old] = 0.0;
+    }
+    memcpy(c->data[s], col, c->N * sizeof(double));
+    c->col_index[s] = idx;
+    c->slot_of[idx] = s;
+    if (c->in_cache) c->in_cache[idx] = 1.0;
+    c->last_used[s] = c->timer;
+    c->prefetched[s] = 1;
+    return 1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -108,11 +180,6 @@ static double *cache_get(ColumnCache *c, int idx) {
  *   *rho_out = bias  (score = K*coef + bias)
  */
 
-#ifdef _WIN32
-  #define EXPORT __declspec(dllexport)
-#else
-  #define EXPORT __attribute__((visibility("default")))
-#endif
 
 EXPORT int csmo_solve(
     int N,
@@ -128,9 +195,10 @@ EXPORT int csmo_solve(
     int verbose,
     double *state
 ) {
-    /* state, if given, is caller-owned [2N]: the solver keeps alpha in
-     * state[0:N] and the gradient G in state[N:2N], so the column callback
-     * can see them (e.g. to prefetch columns the solver will likely need). */
+    /* state, if given, is caller-owned [3N]: the solver keeps alpha in
+     * state[0:N] and the gradient G in state[N:2N], and flags cached
+     * columns in state[2N:3N], so the column callback can see them (e.g. to
+     * prefetch columns the solver will likely need). */
     double *alpha = state ? state : (double *)calloc(N, sizeof(double));
     double *G     = state ? state + N : (double *)malloc(N * sizeof(double));
     if (state)
@@ -143,7 +211,8 @@ EXPORT int csmo_solve(
         active[i] = 1;
     }
 
-    ColumnCache *cache = cache_create(cache_columns, N, get_column, userdata);
+    ColumnCache *cache = cache_create(cache_columns, N, get_column, userdata,
+                                      state ? state + 2 * N : NULL);
 
     int shrink_interval = N > 1000 ? N : 1000;
     int unshrink_needed = 0;

@@ -416,6 +416,72 @@ _METAL_MASKED_JOIN = """
         out[b * S + s] = atomic_load_explicit(&counts[s], memory_order_relaxed);
 """
 
+_METAL_HIST = """
+    uint idx = thread_position_in_grid.x;
+    uint M = (uint)params[0], j = (uint)params[1], K1 = (uint)params[2], n_win = (uint)params[3];
+    if (idx >= M * n_win) return;
+    uint m = idx / n_win, w = idx - m * n_win;
+    uint v = by[w], key = 0;
+    for (uint q = 0; q < j; q++)
+        key |= ((v >> (2 * pos[m * j + q])) & 3u) << (2 * q);
+    atomic_fetch_add_explicit(&counts[m * K1 + key + 1], 1, memory_order_relaxed);
+"""
+
+# slot = bucket start + atomic counter; colseq is atomic only because MLX makes
+# every output of an atomic kernel atomic
+_METAL_SCATTER = """
+    uint idx = thread_position_in_grid.x;
+    uint M = (uint)params[0], j = (uint)params[1], K1 = (uint)params[2], n_win = (uint)params[3];
+    uint Wy = (uint)params[4];
+    if (idx >= M * n_win) return;
+    uint m = idx / n_win, w = idx - m * n_win;
+    uint v = by[w], key = 0;
+    for (uint q = 0; q < j; q++)
+        key |= ((v >> (2 * pos[m * j + q])) & 3u) << (2 * q);
+    int slot = offsets[m * K1 + key]
+             + atomic_fetch_add_explicit(&fill[m * (K1 - 1) + key], 1, memory_order_relaxed);
+    atomic_store_explicit(&colseq[m * n_win + slot], seq_of_row[w / Wy], memory_order_relaxed);
+"""
+
+_metal_hist = None
+_metal_scatter = None
+# Build the column index on the GPU (True) or with Numba on the CPU (False)
+METAL_INDEX = True
+
+
+def _metal_index(by_mx, seq_of_row_mx, chunk, j, Wy):
+    """Column index (offsets [M*(K+1)], colseq [M*n_win]) built in Metal."""
+    import mlx.core as mx
+
+    global _metal_hist, _metal_scatter
+    if _metal_hist is None:
+        _metal_hist = mx.fast.metal_kernel(
+            name="gkm_masked_hist", input_names=["by", "pos", "params"],
+            output_names=["counts"], source=_METAL_HIST, atomic_outputs=True)
+        _metal_scatter = mx.fast.metal_kernel(
+            name="gkm_masked_scatter",
+            input_names=["by", "seq_of_row", "pos", "offsets", "params"],
+            output_names=["fill", "colseq"], source=_METAL_SCATTER, atomic_outputs=True)
+    M = len(chunk)
+    K = 1 << (2 * j)
+    n_win = by_mx.shape[0]
+    pos = mx.array(chunk.astype(np.int32).ravel())
+    params = mx.array([M, j, K + 1, n_win, Wy], dtype=mx.int32)
+    threads = 256
+    grid = ((M * n_win + threads - 1) // threads) * threads
+    counts = _metal_hist(
+        inputs=[by_mx, pos, params], template=[], grid=(grid, 1, 1),
+        threadgroup=(threads, 1, 1), output_shapes=[(M * (K + 1),)],
+        output_dtypes=[mx.int32], init_value=0)[0]
+    offsets = mx.cumsum(counts.reshape(M, K + 1), axis=1).reshape(-1)
+    _, colseq = _metal_scatter(
+        inputs=[by_mx, seq_of_row_mx, pos, offsets, params], template=[],
+        grid=(grid, 1, 1), threadgroup=(threads, 1, 1),
+        output_shapes=[(M * K,), (M * n_win,)], output_dtypes=[mx.int32, mx.int32],
+        init_value=0)
+    return offsets, colseq
+
+
 _metal_join = None
 # Columns per launch: the threadgroup counter row (32 KB limit) is TILE int32
 _METAL_COL_TILE = 4096
@@ -438,7 +504,8 @@ def _get_metal_join():
 
 
 def masked_pairwise_mlx(bx_packed, by_packed, plan, by_rc_packed=None) -> np.ndarray:
-    """Metal version of masked_pairwise(): join on the GPU, index on the CPU.
+    """Metal version of masked_pairwise(); the index is built in Metal too
+    unless METAL_INDEX is False (then with Numba on the CPU).
 
     Inputs may be NumPy or MLX uint32 arrays. Returns [B, S] float64 NumPy,
     combined exactly from per-level integer counts.
@@ -461,17 +528,23 @@ def masked_pairwise_mlx(bx_packed, by_packed, plan, by_rc_packed=None) -> np.nda
         by = np.ascontiguousarray(np.concatenate(rows))
         seq_of_row = np.tile(np.arange(S, dtype=np.int32), len(rows))
         n_win = by.shape[0] * Wy
+        if METAL_INDEX:
+            by_mx, seq_mx = mx.array(by.ravel()), mx.array(seq_of_row)
         for j, coef, positions in plan:
             K1 = (1 << (2 * j)) + 1
             level = None
             for m0 in range(0, len(positions), _MASK_CHUNK):
                 chunk = positions[m0 : m0 + _MASK_CHUNK]
-                offsets, colseq = _build_column_index(by, seq_of_row, chunk, j)
+                if METAL_INDEX:
+                    offsets, colseq = _metal_index(by_mx, seq_mx, chunk, j, Wy)
+                else:
+                    offsets, colseq = _build_column_index(by, seq_of_row, chunk, j)
+                    offsets, colseq = mx.array(offsets.ravel()), mx.array(colseq.ravel())
                 params = mx.array([Wx, len(chunk), j, S, _METAL_LANES, K1, n_win],
                                   dtype=mx.int32)
                 counts = join(
                     inputs=[bx_mx, mx.array(chunk.astype(np.int32).ravel()),
-                            mx.array(offsets.ravel()), mx.array(colseq.ravel()), params],
+                            offsets, colseq, params],
                     template=[("TILE", _METAL_COL_TILE)],
                     grid=(B * _METAL_THREADS, 1, 1),
                     threadgroup=(_METAL_THREADS, 1, 1),

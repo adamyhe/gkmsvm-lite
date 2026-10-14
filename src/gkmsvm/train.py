@@ -29,7 +29,7 @@ def train_gkmsvm(
     include_rc: bool = True,
     solver: str = "auto",
     n_components: int | None = None,
-    cache_size: int = 2048,
+    cache_size: int | None = None,
     tol: float = 1e-3,
     max_iter: int = 10_000_000,
     max_gram_gb: float | None = None,
@@ -60,7 +60,8 @@ def train_gkmsvm(
             Gram + sklearn solver).
         n_components: Number of landmark points for Nyström approximation.
             Defaults to ``min(N, max(1000, int(sqrt(N) * 10)))``.
-        cache_size: Number of kernel columns to cache (SMO only).
+        cache_size: Number of kernel columns to cache (SMO only); None sizes
+            it from available RAM.
         tol: KKT violation tolerance (SMO only).
         max_iter: Maximum SMO iterations.
         max_gram_gb: Hard cap on Gram matrix size in GB. On shared compute,
