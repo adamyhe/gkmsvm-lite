@@ -62,3 +62,23 @@ def test_rbf_uses_kernel_path():
     model.use_lmer_table = True
     model(_onehot(4, 50, rng))
     assert model._lmer_table is None  # RBF never builds a table
+
+
+@pytest.mark.parametrize("case", CASES)
+@pytest.mark.parametrize("include_rc", [True, False])
+@pytest.mark.parametrize("query_norm", [False, True])
+def test_to_deltasvm_matches_brute(case, include_rc, query_norm):
+    rng = np.random.default_rng(3)
+    model = _model(case, include_rc, rng)
+    X = _onehot(8, 50, rng)
+    before = np.asarray(model(X))
+
+    fast = model.to_deltasvm(query_norm=query_norm)
+    brute_model = _model(case, include_rc, np.random.default_rng(3))
+    brute_model._lmer_table = False  # forces the scoring loop over all l-mers
+    brute = brute_model.to_deltasvm(query_norm=query_norm)
+
+    np.testing.assert_allclose(np.asarray(fast.weights), np.asarray(brute.weights),
+                               rtol=1e-6, atol=1e-7)
+    # to_deltasvm must not disturb the model's own scoring
+    np.testing.assert_array_equal(np.asarray(model(X)), before)
