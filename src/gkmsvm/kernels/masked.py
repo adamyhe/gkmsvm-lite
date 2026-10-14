@@ -18,6 +18,7 @@ summation order.
 
 from __future__ import annotations
 
+import time
 from functools import cache
 from itertools import combinations
 from math import comb
@@ -219,6 +220,20 @@ _cuda_module = None
 _GPU_COL_TILE = 8192
 # Masks per index build: bounds index memory (offsets + one id per window per mask)
 _GPU_MASK_CHUNK = 32
+# Set to a dict to accumulate per-stage seconds (synchronizes between stages)
+GPU_PROFILE: dict | None = None
+
+
+def _stage(name, t0):
+    """Add the time since t0 to GPU_PROFILE[name]; returns the new start time."""
+    import cupy as cp
+
+    if GPU_PROFILE is None:
+        return t0
+    cp.cuda.get_current_stream().synchronize()
+    now = time.perf_counter()
+    GPU_PROFILE[name] = GPU_PROFILE.get(name, 0.0) + now - t0
+    return now
 
 
 def _cuda_kernels():
@@ -258,6 +273,7 @@ def masked_pairwise_gpu(bx_packed, by_packed, plan, by_rc_packed=None):
         for j, coef, positions in plan:
             K = 1 << (2 * j)
             for m0 in range(0, len(positions), _GPU_MASK_CHUNK):
+                t0 = time.perf_counter()
                 pos = cp.asarray(positions[m0 : m0 + _GPU_MASK_CHUNK], dtype=cp.int32)
                 M = pos.shape[0]
                 counts = cp.zeros((M, K + 1), dtype=cp.int32)
@@ -265,15 +281,19 @@ def masked_pairwise_gpu(bx_packed, by_packed, plan, by_rc_packed=None):
                 hist((grid,), (block,),
                      (by, np.int64(n_win), pos, np.int32(M), np.int32(j), np.int64(K), counts))
                 offsets = cp.cumsum(counts, axis=1, dtype=cp.int32)
-                fill = cp.ascontiguousarray(offsets[:, :K])
+                # A copy: with one mask the slice is already contiguous, and the
+                # scatter's atomics would otherwise overwrite offsets
+                fill = offsets[:, :K].copy()
                 colseq = cp.empty((M, n_win), dtype=cp.int32)
                 scatter((grid,), (block,),
                         (by, np.int64(n_win), np.int32(Wy), seq_of_row, pos, np.int32(M),
                          np.int32(j), np.int64(K), fill, colseq))
+                t0 = _stage(f"index j={j}", t0)
                 join((B,), (block,),
                      (bx, np.int32(Wx), pos, np.int32(M), np.int32(j), np.int64(K),
                       offsets, colseq, np.int64(n_win), np.int32(S), np.float64(coef),
                       res_tile),
                      shared_mem=S * 4)
+                _stage(f"join j={j}", t0)
         result[:, c0:c1] = res_tile
     return result

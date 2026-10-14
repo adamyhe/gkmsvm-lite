@@ -20,7 +20,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from _common import SEQ_DIR, gpu_sync  # noqa: E402
+from _common import SEQ_DIR, gpu_sync
 
 
 def main():
@@ -31,12 +31,15 @@ def main():
     parser.add_argument("-l", type=int, default=11)
     parser.add_argument("-k", type=int, default=7)
     parser.add_argument("-d", type=int, default=3)
+    parser.add_argument("--profile", action="store_true",
+                        help="Time index build and join per mask size (adds syncs)")
     args = parser.parse_args()
 
     import cupy as cp
 
     from gkmsvm import one_hot_encode, read_fasta
     from gkmsvm.gram import compute_gram
+    from gkmsvm.kernels import masked
     from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
 
     sizes = [int(s) for s in args.sizes.split(",")]
@@ -63,11 +66,16 @@ def main():
     for N in sizes:
         seqs = pos[: N // 2] + neg[: N // 2]
         X = cp.asarray(np.stack([one_hot_encode(s) for s in seqs]))
+        if args.profile:
+            masked.GPU_PROFILE = {}
         G_m, t_m = gram(X, True)
+        prof, masked.GPU_PROFILE = masked.GPU_PROFILE, None
         G_b, t_b = gram(X, False)
         rel = np.abs(G_m - G_b).max() / np.abs(G_b).max()
         print(f"N={N:>6}: brute {t_b:8.2f}s  masked {t_m:8.2f}s  speedup {t_b / t_m:5.1f}x  "
               f"max |diff|/max|K| {rel:.1e}")
+        if prof:
+            print("    " + ", ".join(f"{k} {v:.2f}s" for k, v in sorted(prof.items())))
 
 
 if __name__ == "__main__":
