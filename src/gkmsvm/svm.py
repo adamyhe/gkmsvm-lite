@@ -373,12 +373,19 @@ class GkmSVM:
         elif chunk is not None and chunk < S and hasattr(kernel, "pairwise_from_indices"):
             self._get_sv_index_windows()
             bx = kernel.base_index_windows(x)
-            on_gpu = is_gpu(bx)
+            # MLX packs SVs as [S, W] like the CPU path; CUDA as [W, S].
+            on_mlx = is_mlx(bx)
+            on_gpu = is_gpu(bx) and not on_mlx
             if on_gpu:
                 import cupy as cp
                 from gkmsvm.kernels.direct import _pack_windows_uint32
                 bx_p = cp.ascontiguousarray(
                     _pack_windows_uint32(cp.asarray(bx), cp)
+                )
+            elif on_mlx:
+                from gkmsvm.kernels.direct import _pack_windows_cpu
+                bx_p = xp.asarray(
+                    _pack_windows_cpu(np.ascontiguousarray(to_cpu(bx)))
                 )
             else:
                 bx_p = None
