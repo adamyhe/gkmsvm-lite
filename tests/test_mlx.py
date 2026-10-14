@@ -461,9 +461,8 @@ class TestMLXTraining:
 
         np.testing.assert_allclose(mlx_scores, cpu_scores, atol=1e-5)
 
-    def test_model_returns_on_device(self):
+    def test_train_returns_numpy_model(self):
         from gkmsvm import train_gkmsvm
-        from gkmsvm.backend import is_mlx
 
         rng = np.random.default_rng(42)
         pos = _random_seqs_str(15, 20, rng)
@@ -474,11 +473,11 @@ class TestMLXTraining:
             device="mlx",
         )
 
-        assert model._on_mlx
-        assert is_mlx(model.support_sequences)
-        assert is_mlx(model.coefficients)
+        assert not model._on_mlx
+        assert isinstance(model.support_sequences, np.ndarray)
+        assert isinstance(model.coefficients, np.ndarray)
 
-    def test_device_auto_selects(self):
+    def test_device_auto_selects(self, capsys):
         from gkmsvm import train_gkmsvm
 
         rng = np.random.default_rng(42)
@@ -487,7 +486,7 @@ class TestMLXTraining:
 
         model = train_gkmsvm(
             pos, neg, kernel_type="direct", l=7, k=5, C=1.0,
-            device="auto",
+            device="auto", verbose=True,
         )
         assert model.num_support_vectors > 0
-        assert model._on_mlx
+        assert "Moving training data to MLX" in capsys.readouterr().out
