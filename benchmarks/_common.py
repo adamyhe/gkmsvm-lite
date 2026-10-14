@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -50,6 +51,34 @@ def _git_commit() -> str:
     commit = _run(["git", "rev-parse", "--short", "HEAD"], cwd=REPO) or "unknown"
     dirty = _run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=REPO)
     return commit + ("-dirty" if dirty else "")
+
+
+def usable_cores() -> int:
+    """CPUs this process may run on: its affinity mask, capped by a cgroup quota.
+
+    os.cpu_count() counts every core on the machine, which overstates what a
+    job gets under taskset, a batch scheduler or a container CPU limit.
+    """
+    try:
+        n = len(os.sched_getaffinity(0))
+    except AttributeError:  # macOS
+        n = os.cpu_count() or 1
+    quota = None
+    try:  # cgroup v2
+        q, period = Path("/sys/fs/cgroup/cpu.max").read_text().split()
+        if q != "max":
+            quota = int(q) / int(period)
+    except (OSError, ValueError):
+        try:  # cgroup v1
+            q = int(Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us").read_text())
+            period = int(Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us").read_text())
+            if q > 0:
+                quota = q / period
+        except (OSError, ValueError):
+            pass
+    if quota is not None:
+        n = min(n, max(1, int(quota)))
+    return n
 
 
 def _cpu_model() -> str:
@@ -115,6 +144,14 @@ def set_cpu_threads(n: int) -> int:
     """
     import numba
 
+    usable = usable_cores()
+    if n > usable:
+        warnings.warn(
+            f"{n} threads requested but this process can use {usable} CPU(s) "
+            "(affinity or cgroup limit); CPU timings will not reflect that thread "
+            "count. Request more cores from the scheduler.",
+            RuntimeWarning, stacklevel=2,
+        )
     n = max(1, min(n, numba.config.NUMBA_NUM_THREADS))
     numba.set_num_threads(n)
     for var in ("NUMBA_NUM_THREADS", "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
@@ -124,8 +161,8 @@ def set_cpu_threads(n: int) -> int:
 
 
 def lsgkm_default_threads() -> int:
-    """Largest LS-GKM -T value the machine has cores for."""
-    return max(t for t in LSGKM_THREADS if t <= (os.cpu_count() or 1))
+    """Largest LS-GKM -T value this process has usable cores for."""
+    return max(t for t in LSGKM_THREADS if t <= usable_cores())
 
 
 def lsgkm_binary(name: str, conda_env: str = "lsgkm", bin_dir: str | None = None) -> str | None:
@@ -161,7 +198,7 @@ def provenance(device: str | None = None, **extra) -> dict[str, str]:
         "date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         "host": socket.gethostname(),
         "command": " ".join([Path(sys.argv[0]).name] + sys.argv[1:]),
-        "cpu": f"{_cpu_model()}, {os.cpu_count()} logical cores",
+        "cpu": f"{_cpu_model()}, {os.cpu_count()} logical cores, {usable_cores()} usable",
         "versions": _versions(),
     }
     if device is not None:
