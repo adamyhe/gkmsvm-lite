@@ -68,7 +68,9 @@ def train_gkmsvm(
             automatic memory detection.
         sv_chunk_size: Chunk size for inference on the returned model.
         gram_chunk_size: Tile size for Gram matrix computation (libsvm only).
-        device: ``"auto"`` (MLX if available), ``"mlx"``, or ``"cpu"``.
+        device: Where to train: ``"auto"`` (CUDA, else MLX, if available),
+            ``"cuda"``, ``"mlx"``, or ``"cpu"``. The returned model is on
+            CPU; move it with ``model.cuda()`` or ``model.mlx()``.
         verbose: Show progress.
 
     Returns:
@@ -211,7 +213,9 @@ def train_gkmsvr(
         n_components: Number of landmark points for Nyström approximation.
         sv_chunk_size: Chunk size for inference on the returned model.
         gram_chunk_size: Tile size for Gram matrix computation.
-        device: ``"auto"`` (MLX if available), ``"mlx"``, or ``"cpu"``.
+        device: Where to train: ``"auto"`` (CUDA, else MLX, if available),
+            ``"cuda"``, ``"mlx"``, or ``"cpu"``. The returned model is on
+            CPU; move it with ``model.cuda()`` or ``model.mlx()``.
         verbose: Show progress.
 
     Returns:
