@@ -7,6 +7,7 @@ import numpy as np
 from gkmsvm.backend import get_array_module, to_cpu
 from gkmsvm.codec import reverse_complement
 from gkmsvm.kernels.base import GkmKernel
+from gkmsvm.kernels.rbf import RbfGkmKernel
 
 
 def compute_gram(
@@ -24,7 +25,9 @@ def compute_gram(
     only upper-triangle tiles are evaluated, then mirrored.
 
     Uses the packed uint32 path when available (DirectGkmKernel,
-    EstTruncGkmKernel) for ~3x faster computation on CPU.
+    EstTruncGkmKernel, and RbfGkmKernel via its base kernel) for ~3x faster
+    computation on CPU. On CPU, diagonal tiles of a self-Gram compute only
+    their upper triangle.
 
     Args:
         kernel: A GkmKernel instance.
@@ -44,7 +47,15 @@ def compute_gram(
     N = X.shape[0]
     M = Y.shape[0]
 
-    use_fast = hasattr(kernel, "pairwise_from_indices")
+    # Kernel whose packed path computes the tiles: the kernel itself, or the
+    # base kernel of -t 3 gkmrbf (exp is applied after normalizing)
+    if hasattr(kernel, "pairwise_from_indices"):
+        fast = kernel
+    elif isinstance(kernel, RbfGkmKernel):
+        fast = kernel._base
+    else:
+        fast = None
+    use_fast = fast is not None
 
     gram = np.zeros((N, M), dtype=np.float64) if out is None else out
 
@@ -66,11 +77,11 @@ def compute_gram(
         tiles = tqdm(tiles, desc="Gram matrix")
 
     if use_fast:
-        diag_x = kernel._raw_diagonal(X)
+        diag_x = fast._raw_diagonal(X)
         if symmetric:
             diag_y = diag_x
         else:
-            diag_y = kernel._raw_diagonal(Y)
+            diag_y = fast._raw_diagonal(Y)
 
     for r_start, c_start in tiles:
         r_end = min(r_start + chunk_size, N)
@@ -78,13 +89,16 @@ def compute_gram(
 
         if use_fast:
             tile = _fast_pairwise_tile(
-                kernel, X[r_start:r_end], Y[c_start:c_end]
+                fast, X[r_start:r_end], Y[c_start:c_end],
+                symmetric=symmetric and r_start == c_start,
             )
-            if kernel.normalize:
+            if fast.normalize:
                 norm = xp.sqrt(
                     diag_x[r_start:r_end, None] * diag_y[c_start:c_end][None, :]
                 )
                 tile = tile / xp.clip(norm, 1e-10, None)
+            if fast is not kernel:
+                tile = xp.exp(kernel.gamma * (tile - 1))
         else:
             tile = kernel.pairwise(X[r_start:r_end], Y[c_start:c_end])
 
@@ -97,14 +111,17 @@ def compute_gram(
     return gram
 
 
-def _fast_pairwise_tile(kernel, x, y):
-    """Compute raw pairwise kernel using the packed uint32 path."""
+def _fast_pairwise_tile(kernel, x, y, *, symmetric=False):
+    """Compute raw pairwise kernel using the packed uint32 path.
+
+    symmetric: x and y are the same sequences (a diagonal Gram tile).
+    """
     bx = kernel.base_index_windows(x)
-    by = kernel.base_index_windows(y)
-    result = kernel.pairwise_from_indices(bx, by)
+    by = bx if symmetric else kernel.base_index_windows(y)
+    result = kernel.pairwise_from_indices(bx, by, symmetric=symmetric)
 
     if kernel.include_rc:
         by_rc = kernel.base_index_windows(reverse_complement(y))
-        result = result + kernel.pairwise_from_indices(bx, by_rc)
+        result = result + kernel.pairwise_from_indices(bx, by_rc, symmetric=symmetric)
 
     return result.astype(x.dtype)

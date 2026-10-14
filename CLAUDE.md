@@ -79,6 +79,7 @@ src/gkmsvm/
 - CPU inner loop: Numba `@njit(parallel=True, fastmath=True)`. NVIDIA GPU inner loop: CuPy RawKernel with shared-memory caching. Apple GPU inner loop: Metal kernel with per-thread accumulation and `popcount()`.
 - MLX compatibility: `get_strides()` for arrays without `.strides`, `xp.ascontiguousarray()` for `.copy()`, `to_cpu(X)[indices]` for fancy indexing. DeltaSVM auto-chunks intermediates >256 MB.
 - SV diagonal is cached after first computation.
+- `compute_gram` self-Gram: skips tiles below the diagonal; on CPU, diagonal tiles compute one triangle (`_fused_pairwise_packed_sym_numba`, also valid for the RC block). `-t 3` tiles use the base esttrunc packed path, then `exp`.
 - Training: `solver="auto"` estimates Gram matrix size — uses precomputed Gram + sklearn when it fits in device memory (< 75%); on GPU, falls back to GPU-computed Gram + CPU-side sklearn when it fits in system RAM (< 75%); else column-cached SMO. SMO uses WSS3 working set selection (C extension `_csmo` with Python kernel column callback), shrinking, and LRU-cached kernel columns — memory is O(cache_size × N) not O(N²). `solver="nystrom"` uses low-rank kernel approximation for fast approximate training. `max_gram_gb` caps Gram allocation on shared compute.
 - `KernelColumnCache` pre-packs all training windows once, computes single columns via `pairwise_from_indices(bx[1,W,l], by_all)` on cache miss.
 - SVR (`train_gkmsvr`) uses sklearn epsilon-SVR with precomputed Gram. SMO SVR is not yet implemented.

@@ -90,3 +90,30 @@ class TestComputeGram:
         expected = kernel.pairwise(X, X)
 
         np.testing.assert_allclose(gram, expected, atol=1e-10)
+
+
+class TestSymmetricDiagonalTiles:
+    """Diagonal tiles compute one triangle on CPU; results must equal pairwise."""
+
+    @pytest.mark.parametrize("kind", ["t0", "t2", "t3"])
+    @pytest.mark.parametrize("include_rc", [True, False])
+    @pytest.mark.parametrize("normalize", [True, False])
+    @pytest.mark.parametrize("chunk_size", [1000, 7, 1])
+    def test_matches_pairwise(self, kind, include_rc, normalize, chunk_size):
+        from gkmsvm.kernels.rbf import RbfGkmKernel
+
+        rng = np.random.default_rng(0)
+        X = _random_seqs(23, 40, rng)  # odd N exercises the folded middle row
+        kernel = {
+            "t0": lambda: DirectGkmKernel(6, 4, normalize=normalize, include_rc=include_rc),
+            "t2": lambda: EstTruncGkmKernel(
+                7, 5, d=3, normalize=normalize, include_rc=include_rc),
+            "t3": lambda: RbfGkmKernel(
+                7, 5, d=3, gamma=2.0, normalize=normalize, include_rc=include_rc),
+        }[kind]()
+
+        gram = compute_gram(kernel, X, chunk_size=chunk_size)
+        expected = kernel.pairwise(X, X)
+
+        np.testing.assert_allclose(gram, expected, rtol=1e-12, atol=0)
+        np.testing.assert_array_equal(gram, gram.T)

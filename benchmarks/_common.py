@@ -115,6 +115,8 @@ def _versions() -> str:
     import numba
     import numpy as np
 
+    import gkmsvm  # noqa: F401  pins Numba's threading layer before first use
+
     try:
         lite = version("gkmsvm-lite")
     except PackageNotFoundError:
@@ -123,7 +125,8 @@ def _versions() -> str:
         f"gkmsvm-lite {lite}",
         f"python {platform.python_version()}",
         f"numpy {np.__version__}",
-        f"numba {numba.__version__} ({numba.get_num_threads()} threads)",
+        (f"numba {numba.__version__} ({numba.get_num_threads()} threads, "
+         f"{numba.threading_layer()} layer)"),
     ]
     try:
         import cupy as cp
@@ -143,6 +146,8 @@ def set_cpu_threads(n: int) -> int:
     (capped at the cores Numba sees).
     """
     import numba
+
+    import gkmsvm  # noqa: F401  pins Numba's threading layer before first use
 
     usable = usable_cores()
     if n > usable:

@@ -89,7 +89,17 @@ def _parse_gnu_time_rss(stderr: str) -> float | None:
     return None
 
 
-_HAS_GNU_TIME = Path("/usr/bin/time").exists()
+def _has_gnu_time() -> bool:
+    """GNU time (Linux) supports -v for peak RSS; BSD time (macOS) does not."""
+    try:
+        r = subprocess.run(["/usr/bin/time", "--version"], capture_output=True,
+                           text=True, check=False)
+    except OSError:
+        return False
+    return "GNU" in r.stdout + r.stderr
+
+
+_HAS_GNU_TIME = _has_gnu_time()
 
 
 # ── Data helpers ───────────────────────────────────────────────────
@@ -245,6 +255,12 @@ def plot_results(train_results, infer_results, args, out_path):
     ax.plot(Ns, t_cpu, "s-", color="steelblue", label="gkmsvm-lite CPU",
             linewidth=2, markersize=6)
 
+    valid = [(n, r["t_lite_cpu_smo"]) for n, r in zip(Ns, train_results)
+             if r["t_lite_cpu_smo"] is not None]
+    if valid:
+        ax.plot(*zip(*valid), "s--", color="steelblue", label="gkmsvm-lite CPU (SMO)",
+                linewidth=2, markersize=5)
+
     t_gpu = [r["t_lite_gpu"] for r in train_results]
     valid = [(n, t) for n, t in zip(Ns, t_gpu) if t is not None]
     if valid:
@@ -335,6 +351,8 @@ def main():
                         "only 1, 4 or 16 (default: largest the machine has cores for)")
     parser.add_argument("--output", default=str(RESULTS / "timing_train.tsv"),
                         help="Output TSV path")
+    parser.add_argument("--no-cpu-smo", action="store_true",
+                        help="Skip gkmsvm-lite CPU SMO (LS-GKM's algorithm; slow at large N)")
     parser.add_argument("--plot", action="store_true", help="Save timing plot")
     args = parser.parse_args()
     lite_threads = set_cpu_threads(args.threads)
@@ -389,6 +407,13 @@ def main():
         test_fa = tmpdir / "test.fa"
         write_fasta(test_seqs, test_fa, prefix="test")
 
+        # Compile Numba/CUDA kernels before the first timed fit
+        warm = (all_pos[:10], all_neg[:10])
+        for dev, solver in [("cpu", "auto"), ("cpu", "smo")] + (
+            [(args.device, "auto"), (args.device, "smo")] if args.device != "cpu" else []
+        ):
+            train_lite(*warm, args.l, args.k, args.d, dev, solver=solver)
+
         for N in sizes:
             n_half = N // 2
             if n_half > len(all_pos) or n_half > len(all_neg):
@@ -432,6 +457,18 @@ def main():
             mem_str = f", {mem_cpu:.0f} MB" if mem_cpu else ""
             print(f"    {t_train_cpu:.1f}s  ({n_sv_lite} SVs{mem_str})")
 
+            # Same algorithm as LS-GKM: SMO computing kernel columns on demand
+            t_train_cpu_smo = None
+            mem_cpu_smo = None
+            if not args.no_cpu_smo:
+                print("  Training gkmsvm-lite (CPU, SMO)...")
+                model_smo, t_train_cpu_smo, mem_cpu_smo = train_lite(
+                    pos_sub, neg_sub, args.l, args.k, args.d, "cpu", solver="smo",
+                )
+                print(f"    {t_train_cpu_smo:.1f}s  "
+                      f"({model_smo.num_support_vectors} SVs)")
+                del model_smo
+
             t_train_gpu = None
             mem_gpu = None
             model_lite_gpu = None
@@ -460,9 +497,11 @@ def main():
             train_results.append({
                 "N": N, "seq_len": seq_len, "gram_gb": gram_gb,
                 "t_lsgkm": t_train_c, "t_lite_cpu": t_train_cpu,
+                "t_lite_cpu_smo": t_train_cpu_smo,
                 "t_lite_gpu": t_train_gpu,
                 "t_lite_gpu_smo": t_train_gpu_smo,
                 "mem_lsgkm": mem_c, "mem_lite_cpu": mem_cpu,
+                "mem_lite_cpu_smo": mem_cpu_smo,
                 "mem_lite_gpu": mem_gpu,
                 "mem_lite_gpu_smo": mem_gpu_smo,
                 "n_sv_lsgkm": n_sv_c, "n_sv_lite": n_sv_lite,
@@ -535,7 +574,7 @@ def main():
     print(f"{'=' * 110}")
     print("TRAINING TIME + MEMORY")
     print(f"{'=' * 110}")
-    hdr = f"{'N':>7}  {'Gram':>6}  {'LS-GKM C':>10}  {'lite CPU':>10}"
+    hdr = f"{'N':>7}  {'Gram':>6}  {'LS-GKM C':>10}  {'lite CPU':>10}  {'CPU SMO':>10}"
     if gpu:
         hdr += f"  {'GPU Gram':>10}  {'GPU SMO':>10}  {'C/GPU':>6}"
     hdr += f"  {'mem C':>7}  {'mem lite':>8}"
@@ -546,6 +585,8 @@ def main():
         line = f"{r['N']:>7d}  {r['gram_gb']:>5.2f}G"
         line += f"  {r['t_lsgkm']:>9.1f}s" if r["t_lsgkm"] else f"  {'N/A':>10}"
         line += f"  {r['t_lite_cpu']:>9.1f}s"
+        line += (f"  {r['t_lite_cpu_smo']:>9.1f}s" if r["t_lite_cpu_smo"] is not None
+                 else f"  {'N/A':>10}")
         if gpu:
             if r["t_lite_gpu"] is not None:
                 line += f"  {r['t_lite_gpu']:>9.1f}s"
@@ -611,8 +652,9 @@ def main():
 
         f.write("## Training\n")
         f.write("N\tseq_len\tgram_gb\tt_lsgkm_train\tt_lite_cpu_train\t"
+                "t_lite_cpu_smo_train\t"
                 "t_lite_gpu_train\tt_lite_gpu_smo_train\t"
-                "mem_lsgkm_mb\tmem_lite_cpu_mb\t"
+                "mem_lsgkm_mb\tmem_lite_cpu_mb\tmem_lite_cpu_smo_mb\t"
                 "mem_lite_gpu_mb\tmem_lite_gpu_smo_mb\t"
                 "n_sv_lsgkm\tn_sv_lite\n")
         for r in train_results:
@@ -620,10 +662,12 @@ def main():
                 str(r["N"]), str(r["seq_len"]), f"{r['gram_gb']:.3f}",
                 f"{r['t_lsgkm']:.2f}" if r["t_lsgkm"] else "NA",
                 f"{r['t_lite_cpu']:.2f}",
+                f"{r['t_lite_cpu_smo']:.2f}" if r["t_lite_cpu_smo"] else "NA",
                 f"{r['t_lite_gpu']:.2f}" if r["t_lite_gpu"] else "NA",
                 f"{r['t_lite_gpu_smo']:.2f}" if r["t_lite_gpu_smo"] else "NA",
                 f"{r['mem_lsgkm']:.0f}" if r["mem_lsgkm"] else "NA",
                 f"{r['mem_lite_cpu']:.0f}" if r["mem_lite_cpu"] else "NA",
+                f"{r['mem_lite_cpu_smo']:.0f}" if r["mem_lite_cpu_smo"] else "NA",
                 f"{r['mem_lite_gpu']:.0f}" if r["mem_lite_gpu"] else "NA",
                 f"{r['mem_lite_gpu_smo']:.0f}" if r["mem_lite_gpu_smo"] else "NA",
                 str(r["n_sv_lsgkm"]), str(r["n_sv_lite"]),
