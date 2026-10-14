@@ -14,6 +14,9 @@ PY            ?= python
 DEVICE        ?= cuda
 LSGKM_ENV     ?= lsgkm
 LSGKM_BIN     ?=
+# CPU threads for LS-GKM -T and gkmsvm-lite (1, 4 or 16); empty = largest
+# the host's usable cores allow (16 on a 16+ core server)
+THREADS       ?=
 DART_WORK_DIR ?= data/dart-eval
 DART_MODELS   ?= data/models
 DART_ENCODE   ?= ENCFF953DDE ENCFF701NCI
@@ -51,6 +54,7 @@ SWEEP_DEVICE  := both
 endif
 
 COMMON := _common.py
+THR    := $(if $(THREADS),--threads $(THREADS))
 # gkmexplain may be missing from conda's ls-gkm; point LSGKM_BIN at a source build
 LSGKM  := --conda-env $(LSGKM_ENV) $(if $(LSGKM_BIN),--lsgkm-bin $(LSGKM_BIN))
 DSQTL  := dsqtl_auprc.py $(COMMON)
@@ -67,7 +71,7 @@ $(OUT)/agreement_dsqtl.tsv: agreement_lsgkm.py $(DSQTL)
 	    --output $(OUT)/agreement_checks.tsv --dump $@
 
 $(OUT)/timing_train.tsv: timing_train.py $(COMMON)
-	$(PY) timing_train.py $(LSGKM) --device $(DEVICE) \
+	$(PY) timing_train.py $(LSGKM) --device $(DEVICE) $(THR) \
 	    --sizes $(TIMING_SIZES) --output $@
 
 $(OUT)/timing_train_T1.tsv: timing_train.py $(COMMON)
@@ -75,7 +79,8 @@ $(OUT)/timing_train_T1.tsv: timing_train.py $(COMMON)
 	    --sizes $(TIMING_SIZES) --threads 1 --output $@
 
 $(OUT)/timing_variants.tsv: timing_variants.py $(DSQTL)
-	$(PY) timing_variants.py --device $(DEVICE) $(LSGKM) $(VARIANT_ARGS) --output $@
+	$(PY) timing_variants.py --device $(DEVICE) $(LSGKM) $(THR) $(VARIANT_ARGS) \
+	    --output $@
 
 $(OUT)/dsqtl_per_model.tsv: $(DSQTL)
 	$(PY) dsqtl_auprc.py --device $(DEVICE) --params paper_t2,paper_t3 $(DSQTL_QUICK) \
@@ -103,7 +108,8 @@ $(OUT)/throughput.tsv: throughput_sweep.py $(COMMON)
 	$(PY) throughput_sweep.py --device $(SWEEP_DEVICE) --output $@
 
 $(OUT)/training_memory.tsv: training_memory.py $(DSQTL)
-	$(PY) training_memory.py --device $(DEVICE) $(LSGKM) $(SOLVER_ARGS) --output $@
+	$(PY) training_memory.py --device $(DEVICE) $(LSGKM) $(THR) $(SOLVER_ARGS) \
+	    --output $@
 
 $(OUT)/completeness.tsv: completeness.py $(COMMON)
 	$(PY) completeness.py --device $(DEVICE) $(COMPL_ARGS) --output $@
@@ -143,7 +149,7 @@ help:
 	@echo "Figure 1:   fig1a fig1b fig1c fig1d"
 	@echo "Supplement: s1 s2 s3 s4 s5"
 	@echo "All:        paper (results), figures (PDFs), quick (small run)"
-	@echo "Options:    DEVICE=$(DEVICE) QUICK=1 PY=$(PY) LSGKM_ENV=$(LSGKM_ENV) LSGKM_BIN=<dir>"
+	@echo "Options:    DEVICE=$(DEVICE) QUICK=1 PY=$(PY) THREADS=1|4|16 LSGKM_ENV=$(LSGKM_ENV) LSGKM_BIN=<dir>"
 	@echo "            DART_WORK_DIR=$(DART_WORK_DIR) DART_MODELS=$(DART_MODELS)"
 
 .DEFAULT_GOAL := help
