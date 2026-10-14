@@ -30,14 +30,15 @@ import numpy as np
 from _common import (
     LSGKM_THREADS,
     RESULTS,
+    SEQ_DIR,
+    lsgkm_binary,
     lsgkm_default_threads,
     lsgkm_has_option,
     lsgkm_version,
     write_header,
 )
 
-REPO = Path(__file__).resolve().parent.parent
-DATA = REPO / "examples" / "data" / "gm12878_sequence_sets"
+DATA = SEQ_DIR
 
 DEFAULT_SIZES = [500, 1000, 2000, 5000, 10000]
 N_TEST = 1000
@@ -55,16 +56,6 @@ def setup_conda_env(name: str) -> None:
         check=True,
     )
     print(f"Done. Env '{name}' ready.")
-
-
-def find_binary(env_name: str, name: str) -> str | None:
-    result = subprocess.run(
-        ["conda", "run", "-n", env_name, "which", name],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        return None
-    return result.stdout.strip()
 
 
 # ── Memory helpers ─────────────────────────────────────────────────
@@ -321,6 +312,8 @@ def main():
     )
     parser.add_argument("--conda-env", default="lsgkm",
                         help="Conda env containing ls-gkm (default: lsgkm)")
+    parser.add_argument("--lsgkm-bin", default=None,
+                        help="Directory with LS-GKM binaries (overrides --conda-env)")
     parser.add_argument("--setup", action="store_true",
                         help="Create the conda env before benchmarking")
     parser.add_argument("--device", default="cpu", choices=["cpu", "cuda", "mlx"],
@@ -346,14 +339,15 @@ def main():
     if args.setup:
         setup_conda_env(args.conda_env)
 
-    gkmtrain_bin = find_binary(args.conda_env, "gkmtrain")
-    gkmpredict_bin = find_binary(args.conda_env, "gkmpredict")
+    gkmtrain_bin = lsgkm_binary("gkmtrain", args.conda_env, args.lsgkm_bin)
+    gkmpredict_bin = lsgkm_binary("gkmpredict", args.conda_env, args.lsgkm_bin)
 
     if not gkmtrain_bin or not gkmpredict_bin:
-        print(f"Error: gkmtrain/gkmpredict not found in conda env '{args.conda_env}'.")
-        print(f"Create it with:  conda create -n {args.conda_env} "
+        where = args.lsgkm_bin or f"conda env '{args.conda_env}'"
+        print(f"Error: gkmtrain/gkmpredict not found in {where}.")
+        print(f"Create the env with:  conda create -n {args.conda_env} "
               f"-c bioconda -c conda-forge ls-gkm -y")
-        print(f"Or run:  python {__file__} --setup")
+        print(f"Or run:  python {__file__} --setup, or pass --lsgkm-bin")
         sys.exit(1)
 
     print(f"LS-GKM C:          {gkmtrain_bin}")
@@ -364,9 +358,9 @@ def main():
     print(f"Inference repeats:  {args.repeats}")
 
     if not DATA.exists():
-        print(f"\nError: training data not found at {DATA}")
-        print("Download with:  python examples/run_dsqtl_cli.py (runs download step)")
-        sys.exit(1)
+        import dsqtl_auprc
+
+        dsqtl_auprc.download_sequence_sets()
 
     sizes = [int(s) for s in args.sizes.split(",")]
 
@@ -602,7 +596,8 @@ def main():
         write_header(
             f, "gkmsvm-lite vs LS-GKM C timing comparison", args.device,
             kernel=f"-t 2 -l {args.l} -k {args.k} -d {args.d}",
-            lsgkm=lsgkm_version(args.conda_env),
+            lsgkm=(lsgkm_version(args.conda_env) if not args.lsgkm_bin
+                   else f"built from source ({args.lsgkm_bin})"),
             lsgkm_threads=args.threads,
             test_sequences=args.n_test,
             inference_repeats=args.repeats,

@@ -28,7 +28,7 @@ RETRAINED     := l10k6
 COMPL_ARGS    := --n-random 20
 VARIANT_ARGS  := --n-variants 500
 SOLVER_ARGS   := --sizes 500,1000,2000 --n-test 200
-DART_ARGS     := --max-variants 2000
+DART_ARGS     := --max-variants 200
 DART4_ARGS    := --max-seqs 2000
 else
 OUT           := results
@@ -67,11 +67,11 @@ $(OUT)/agreement_dsqtl.tsv: agreement_lsgkm.py $(DSQTL)
 	    --output $(OUT)/agreement_checks.tsv --dump $@
 
 $(OUT)/timing_train.tsv: timing_train.py $(COMMON)
-	$(PY) timing_train.py --conda-env $(LSGKM_ENV) --device $(DEVICE) \
+	$(PY) timing_train.py $(LSGKM) --device $(DEVICE) \
 	    --sizes $(TIMING_SIZES) --output $@
 
 $(OUT)/timing_train_T1.tsv: timing_train.py $(COMMON)
-	$(PY) timing_train.py --conda-env $(LSGKM_ENV) --device $(DEVICE) \
+	$(PY) timing_train.py $(LSGKM) --device $(DEVICE) \
 	    --sizes $(TIMING_SIZES) --threads 1 --output $@
 
 $(OUT)/timing_variants.tsv: timing_variants.py $(DSQTL)
