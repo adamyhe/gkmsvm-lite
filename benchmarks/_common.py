@@ -137,13 +137,19 @@ def _versions() -> str:
     return ", ".join(parts)
 
 
+# Thread variables for processes started by run_measured(); see set_cpu_threads
+_CHILD_THREAD_ENV: dict[str, str] = {}
+
+
 def set_cpu_threads(n: int) -> int:
     """Run gkmsvm-lite's CPU code on ``n`` threads, here and in child processes.
 
     Matches gkmsvm-lite to LS-GKM's -T so CPU timings compare like for like.
-    Sets Numba's thread count in this process and the thread environment
-    variables that worker processes read at import. Returns the count used
-    (capped at the cores Numba sees).
+    Sets Numba's thread count in this process, and the thread variables that
+    run_measured() passes to worker processes. This process's environment is
+    left alone: Numba rereads NUMBA_NUM_THREADS whenever it compiles and
+    raises if it differs from the pool it already started. Returns the count
+    used (capped at the cores Numba sees).
     """
     import numba
 
@@ -161,7 +167,7 @@ def set_cpu_threads(n: int) -> int:
     numba.set_num_threads(n)
     for var in ("NUMBA_NUM_THREADS", "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
                 "MKL_NUM_THREADS"):
-        os.environ[var] = str(n)
+        _CHILD_THREAD_ENV[var] = str(n)
     return n
 
 
@@ -268,7 +274,8 @@ def run_measured(cmd: list[str], timeout: float | None = None) -> Measured:
     """
     with tempfile.TemporaryFile("w+") as out, tempfile.TemporaryFile("w+") as err:
         t0 = time.perf_counter()
-        proc = subprocess.Popen(cmd, stdout=out, stderr=err, text=True)
+        proc = subprocess.Popen(cmd, stdout=out, stderr=err, text=True,
+                                env={**os.environ, **_CHILD_THREAD_ENV})
         status = "ok"
         while True:
             pid, code, usage = os.wait4(proc.pid, os.WNOHANG)
