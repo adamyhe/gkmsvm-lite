@@ -99,6 +99,44 @@ class KernelColumnCache:
             self._cache.popitem(last=False)
         return col
 
+    def get_columns(self, indices) -> None:
+        """Compute and cache the columns for `indices` in one kernel call.
+
+        Uses symmetry, K(i, :) = K(:, i): all training sequences against the
+        batch (and its reverse complements), so a masked-join kernel indexes
+        only the small batch side.
+        """
+        indices = [int(i) for i in indices if int(i) not in self._cache]
+        if not indices:
+            return
+        if not self._use_fast or len(indices) == 1:
+            for i in indices:
+                self.get_column(i)
+            return
+        xp = self._xp
+        kernel = self._kernel
+        sel = xp.asarray(np.asarray(indices)) if not self._mlx else np.asarray(indices)
+        by = self._idx_windows[sel]
+        bx_packed = self._packed_t if (xp is np and self._packed_t is not None) else None
+        raw = kernel.pairwise_from_indices(self._idx_windows, by, bx_packed=bx_packed)
+        if kernel.include_rc and self._rc_idx_windows is not None:
+            raw = raw + kernel.pairwise_from_indices(
+                self._idx_windows, self._rc_idx_windows[sel], bx_packed=bx_packed,
+            )
+        if self._mlx:
+            raw = to_cpu(raw)
+            xp = np
+        raw = raw.astype(np.float64)  # [N, B]
+        if kernel.normalize:
+            d = xp.asarray(self._diag) if xp is not np else self._diag
+            norm = xp.sqrt(d[:, None] * d[xp.asarray(np.asarray(indices))][None, :])
+            raw = raw / xp.clip(norm, 1e-10, None)
+        for b, i in enumerate(indices):
+            self._cache[i] = xp.ascontiguousarray(raw[:, b])
+            self.misses += 1
+            if len(self._cache) > self._max:
+                self._cache.popitem(last=False)
+
     def _compute_column(self, i: int):
         """Compute normalized K(i, :) using the fastest available path.
 
@@ -372,6 +410,41 @@ _COLUMN_CB = _ct.CFUNCTYPE(
 )
 
 
+# Columns computed per kernel-cache miss in the C solver: the requested one
+# plus the likeliest next working-set members, capped at a quarter of the
+# cache. Batches let the masked-join kernel amortize its index (N=2000, M4:
+# 1 column 97 s, 64: 26 s, 256: 9.8 s, 512: 6.2 s); 0 or 1 disables it.
+_SMO_PREFETCH = 256
+
+
+def _prefetch_candidates(state, y, C, k, exclude, cached):
+    """Up to k uncached indices WSS3 is likely to select next.
+
+    Working-set pairs come from the ends of -y*G: the largest values in
+    I_up and the smallest in I_low. Take half from each, skipping columns
+    already cached (the likeliest ones usually are).
+    """
+    N = y.shape[0]
+    alpha, G = state[:N], state[N:]
+    score = -y * G
+    fresh = np.ones(N, dtype=bool)
+    fresh[list(cached)] = False
+    fresh[exclude] = False
+    up = fresh & (((y > 0) & (alpha < C)) | ((y < 0) & (alpha > 0)))
+    low = fresh & (((y > 0) & (alpha > 0)) | ((y < 0) & (alpha < C)))
+    half = max(1, k // 2)
+    out = []
+    for mask, sign in ((up, -1.0), (low, 1.0)):
+        cand = np.flatnonzero(mask)
+        if cand.size == 0:
+            continue
+        vals = sign * score[cand]
+        take = min(half, cand.size)
+        top = cand[np.argpartition(vals, take - 1)[:take]]
+        out.extend(int(t) for t in top)
+    return list(dict.fromkeys(out))[:k]
+
+
 def _smo_csolver(kernel, X, y, C, tol, max_iter, cache_size, verbose):
     """WSS3 SMO using the C solver with kernel column callback.
 
@@ -393,7 +466,15 @@ def _smo_csolver(kernel, X, y, C, tol, max_iter, cache_size, verbose):
         to_cpu(y) if xp is not np else y, dtype=np.float64
     )
 
+    # alpha in state[:N], gradient in state[N:], written by the C solver
+    state = np.zeros(2 * N, dtype=np.float64)
+    batch = min(_SMO_PREFETCH, max(1, min(cache_size, N) // 4)) if cache._use_fast else 0
+
     def _column_callback(idx, n, out_ptr, _userdata):
+        if batch > 1 and idx not in cache._cache:
+            cache.get_columns(
+                [idx, *_prefetch_candidates(state, y_np, C, batch - 1, idx, cache._cache)]
+            )
         col = cache.get_column(idx)
         if xp is not np or mlx_input:
             col = to_cpu(col)
@@ -418,6 +499,7 @@ def _smo_csolver(kernel, X, y, C, tol, max_iter, cache_size, verbose):
         _ct.POINTER(_ct.c_double),
         _ct.POINTER(_ct.c_double),
         _ct.c_int,
+        _ct.c_void_p,
     ]
 
     n_iter = lib.csmo_solve(
@@ -432,6 +514,7 @@ def _smo_csolver(kernel, X, y, C, tol, max_iter, cache_size, verbose):
         alpha_out.ctypes.data_as(_ct.POINTER(_ct.c_double)),
         rho_out.ctypes.data_as(_ct.POINTER(_ct.c_double)),
         int(verbose),
+        state.ctypes.data_as(_ct.c_void_p),
     )
 
     if verbose:

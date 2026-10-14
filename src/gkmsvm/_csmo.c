@@ -125,10 +125,16 @@ EXPORT int csmo_solve(
     void *userdata,
     double *alpha_out,
     double *rho_out,
-    int verbose
+    int verbose,
+    double *state
 ) {
-    double *alpha = (double *)calloc(N, sizeof(double));
-    double *G     = (double *)malloc(N * sizeof(double));
+    /* state, if given, is caller-owned [2N]: the solver keeps alpha in
+     * state[0:N] and the gradient G in state[N:2N], so the column callback
+     * can see them (e.g. to prefetch columns the solver will likely need). */
+    double *alpha = state ? state : (double *)calloc(N, sizeof(double));
+    double *G     = state ? state + N : (double *)malloc(N * sizeof(double));
+    if (state)
+        for (int i = 0; i < N; i++) alpha[i] = 0.0;
     int    *active = (int *)malloc(N * sizeof(int));
     int n_active = N;
 
@@ -345,8 +351,10 @@ EXPORT int csmo_solve(
     *rho_out = -rho;
 
     cache_destroy(cache);
-    free(alpha);
-    free(G);
+    if (!state) {
+        free(alpha);
+        free(G);
+    }
     free(active);
 
     return iteration;

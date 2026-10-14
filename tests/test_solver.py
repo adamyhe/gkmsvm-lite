@@ -384,3 +384,34 @@ class TestTrainGkmsvr:
             C=1.0, epsilon=0.1,
         )
         assert model.num_support_vectors > 0
+
+
+class TestSmoPrefetch:
+    def test_get_columns_matches_get_column(self):
+        rng = np.random.default_rng(7)
+        X = _random_seqs(40, 30, rng)
+        kernel = EstTruncGkmKernel(l=7, k=5, d=3, normalize=True, include_rc=True)
+        batch = KernelColumnCache(kernel, X, max_columns=64)
+        single = KernelColumnCache(kernel, X, max_columns=64)
+        idx = list(range(3, 40, 2))  # >= 16 columns: masked-join path
+        batch.get_columns(idx)
+        for i in idx:
+            np.testing.assert_allclose(batch.get_column(i), single.get_column(i),
+                                       rtol=1e-12, atol=1e-14)
+
+    def test_prefetch_does_not_change_solution(self, monkeypatch):
+        import gkmsvm.solver as solver
+
+        rng = np.random.default_rng(8)
+        pos = _biased_seqs(60, 30, rng, bias_base=0)
+        neg = _biased_seqs(60, 30, rng, bias_base=3)
+        X = np.concatenate([pos, neg])
+        y = np.array([1.0] * 60 + [-1.0] * 60)
+        kernel = EstTruncGkmKernel(l=7, k=5, d=3, normalize=True, include_rc=True)
+
+        monkeypatch.setattr(solver, "_SMO_PREFETCH", 0)
+        coef0, bias0 = smo_solve(kernel, X, y, C=1.0, tol=1e-4)
+        monkeypatch.setattr(solver, "_SMO_PREFETCH", 32)
+        coef1, bias1 = smo_solve(kernel, X, y, C=1.0, tol=1e-4)
+        np.testing.assert_allclose(coef1, coef0, atol=1e-8)
+        assert abs(bias1 - bias0) < 1e-8
