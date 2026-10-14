@@ -18,7 +18,7 @@ summation order.
 
 from __future__ import annotations
 
-from functools import lru_cache
+from functools import cache
 from itertools import combinations
 from math import comb
 
@@ -31,7 +31,7 @@ _MAX_MASKS = 1000
 _MASK_CHUNK = 16
 
 
-@lru_cache(maxsize=None)
+@cache
 def mask_plan(table_key: tuple[float, ...], l: int, min_matches: int):
     """Mask levels for a weight table, or None if the masked join doesn't apply.
 
