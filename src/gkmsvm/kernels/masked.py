@@ -142,7 +142,61 @@ def _join_rows(bx, runs, offsets, colseq, coef, result):
                     row[colseq[m, t]] += coef
 
 
-def masked_pairwise(bx_packed, by_packed, plan, by_rc_packed=None):
+@njit(parallel=True, cache=True, fastmath=True)
+def _join_rows_upper(bx, runs, offsets, colseq, coef, result, row_min):
+    """_join_rows, skipping columns below row_min[b] for row b.
+
+    Needs each bucket's column ids in ascending order, which the counting
+    sort gives when the indexed rows are one block of column sequences in
+    order. Scans each bucket backwards and stops below row_min[b].
+    """
+    B, Wx = bx.shape
+    M = runs.shape[0]
+    for idx in prange(B):
+        # Alternate rows from both ends: rows late in a diagonal block skip
+        # most columns, and prange hands each thread a contiguous range
+        b = idx // 2 if idx % 2 == 0 else B - 1 - idx // 2
+        row = result[b]
+        cmin = row_min[b]
+        for m in range(M):
+            mr = runs[m]
+            for i in range(Wx):
+                key = _masked_key(bx[b, i], mr)
+                # Ids ascend within a bucket: scan from the end and stop at
+                # the first column below cmin (cheaper than a binary search)
+                lo = offsets[m, key]
+                t = offsets[m, key + 1] - 1
+                while t >= lo:
+                    c = colseq[m, t]
+                    if c < cmin:
+                        break
+                    row[c] += coef
+                    t -= 1
+
+
+def _masked_pairwise_upper(bx, by_blocks, plan, diag_offset):
+    """Rows 0..B-1 against columns diag_offset.. of the same sequences.
+
+    Only entries with column >= row are computed (the rest stay 0).
+    by_blocks: column window arrays (forward, and RC if any). Their rows are
+    interleaved per sequence, so one index serves both and each bucket's
+    column ids come out ascending.
+    """
+    B = bx.shape[0]
+    S, W = by_blocks[0].shape
+    by = np.ascontiguousarray(np.stack(by_blocks, axis=1).reshape(-1, W))
+    seq_of_row = np.repeat(np.arange(S, dtype=np.int32), len(by_blocks))
+    row_min = np.maximum(0, np.arange(B) - diag_offset).astype(np.int64)
+    result = np.zeros((B, S), dtype=np.float64)
+    for j, coef, positions in plan:
+        for start in range(0, len(positions), _MASK_CHUNK):
+            runs = mask_runs(positions[start : start + _MASK_CHUNK])
+            offsets, colseq = _build_column_index(by, seq_of_row, runs, j)
+            _join_rows_upper(bx, runs, offsets, colseq, coef, result, row_min)
+    return result
+
+
+def masked_pairwise(bx_packed, by_packed, plan, by_rc_packed=None, diag_offset=None):
     """Raw kernel [B, S] from packed windows via masked joins.
 
     bx_packed: [B, Wx] uint32 query windows.
@@ -150,8 +204,14 @@ def masked_pairwise(bx_packed, by_packed, plan, by_rc_packed=None):
     by_rc_packed: [S, Wy] uint32 windows of the column sequences' reverse
         complements; included in the same sum (the RC block of K_raw).
     plan: from mask_plan().
+    diag_offset: the rows are sequences 0..B-1 and the columns sequences
+        diag_offset..diag_offset+S-1 of one set (a self-Gram column panel);
+        entries below the diagonal are skipped and left 0.
     """
     bx = np.ascontiguousarray(bx_packed)
+    if diag_offset is not None:
+        blocks = [by_packed] + ([by_rc_packed] if by_rc_packed is not None else [])
+        return _masked_pairwise_upper(bx, blocks, plan, diag_offset)
     S = by_packed.shape[0]
     if by_rc_packed is not None:
         by = np.ascontiguousarray(np.concatenate([by_packed, by_rc_packed]))

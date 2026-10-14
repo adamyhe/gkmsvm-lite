@@ -103,6 +103,7 @@ def compute_gram(
             tile = _fast_pairwise_tile(
                 fast, X[r_start:r_end], Y[c_start:c_end],
                 symmetric=symmetric and not panels and r_start == c_start,
+                diag_offset=c_start if symmetric and panels else None,
             )
             if fast.normalize:
                 norm = xp.sqrt(
@@ -130,13 +131,29 @@ def compute_gram(
     return gram
 
 
-def _fast_pairwise_tile(kernel, x, y, *, symmetric=False):
+def _fast_pairwise_tile(kernel, x, y, *, symmetric=False, diag_offset=None):
     """Compute raw pairwise kernel using the packed uint32 path.
 
     symmetric: x and y are the same sequences (a diagonal Gram tile).
+    diag_offset: x is sequences 0..B-1 and y sequences diag_offset.. of one
+        set; entries below the diagonal may be left 0 (a column panel).
     """
     bx = kernel.base_index_windows(x)
     by = bx if symmetric else kernel.base_index_windows(y)
+    if diag_offset is not None and get_array_module(bx) is np:
+        plan = kernel._masked_plan() if hasattr(kernel, "_masked_plan") else None
+        if plan is not None:
+            # One masked call for the forward and RC blocks (one shared index)
+            from gkmsvm.kernels.direct import _pack_windows_cpu
+            from gkmsvm.kernels.masked import masked_pairwise
+
+            def pack(a):
+                return _pack_windows_cpu(np.ascontiguousarray(a))
+
+            by_rc = (pack(kernel.base_index_windows(reverse_complement(y)))
+                     if kernel.include_rc else None)
+            return masked_pairwise(pack(bx), pack(by), plan, by_rc,
+                                   diag_offset=diag_offset).astype(x.dtype)
     result = kernel.pairwise_from_indices(bx, by, symmetric=symmetric)
 
     if kernel.include_rc:
