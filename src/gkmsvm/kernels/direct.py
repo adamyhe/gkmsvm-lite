@@ -758,13 +758,19 @@ class DirectGkmKernel(GkmKernel):
     # Set False to force the brute-force loop (e.g. as a test oracle).
     use_masked = True
 
-    def _masked_plan(self):
-        """Masked-join plan for this kernel's table, or None to use brute force."""
-        if not self.use_masked:
-            return None
+    def _join_plan(self):
+        """Mask plan for this kernel's table, or None without a mismatch cutoff."""
         from gkmsvm.kernels.masked import mask_plan
 
         return mask_plan(tuple(self._mismatch_table), self.l, self._min_matches)
+
+    def _masked_plan(self):
+        """_join_plan() for the pairwise kernel, unless use_masked is off."""
+        return self._join_plan() if self.use_masked else None
+
+    def _packed_exact(self, x) -> bool:
+        """The packed path defines this kernel, so it always applies."""
+        return True
 
     def _get_min_matches(self) -> int:
         """Minimum match count that yields a non-zero table entry."""

@@ -390,7 +390,7 @@ class GkmSVM:
             from gkmsvm.lmer_table import build_lmer_table
 
             kernel = self.kernel
-            if not isinstance(kernel, DirectGkmKernel):
+            if not hasattr(kernel, "_join_plan"):
                 self._lmer_table = False
                 return None
             sv = to_cpu(self.support_sequences).astype(np.float64)
@@ -410,7 +410,7 @@ class GkmSVM:
     def _lmer_table_for(self, xp):
         """The l-mer table on xp's device, or None when it doesn't apply."""
         use = self.use_lmer_table
-        if use is False or not isinstance(self.kernel, DirectGkmKernel):
+        if use is False or not hasattr(self.kernel, "_join_plan"):
             return None
         if use == "auto" and self.num_support_vectors < self._LMER_TABLE_MIN_SVS:
             return None
@@ -453,7 +453,7 @@ class GkmSVM:
         do_norm = kernel.normalize
 
         table = self._lmer_table_for(xp)
-        if table is not None:
+        if table is not None and kernel._packed_exact(x):
             return self._score_lmer_table(x, table)
 
         if do_norm:
@@ -605,16 +605,40 @@ class GkmSVM:
         # position 0 most significant, so reverse the digit order
         w = table.reshape((4,) * l).transpose(tuple(range(l - 1, -1, -1))).ravel()
         if query_norm and kernel.normalize:
-            h = np.asarray(kernel._mismatch_table, dtype=np.float64)
-            self_k = np.full(w.shape, h[0])
-            if kernel.include_rc:
-                # digits[:, p] = base at position p, in DeltaSVM index order
-                idx = np.arange(4 ** l)
-                digits = (idx[:, None] // 4 ** np.arange(l - 1, -1, -1)) % 4
-                mism = (digits != 3 - digits[:, ::-1]).sum(axis=1)
-                self_k = self_k + h[mism]
-            w = w / np.sqrt(np.clip(self_k, 1e-10, None))
+            w = w / np.sqrt(np.clip(self._lmer_self_kernels(), 1e-10, None))
         return w.astype(np.float32)
+
+    def _lmer_self_kernels(self) -> np.ndarray:
+        """K_raw(u, u) for every l-mer u, in DeltaSVM index order.
+
+        The identical pair plus, with RC, the pair (u, rc u), which agrees at
+        positions p where u_p is the complement of u_{l-1-p}.
+        """
+        from gkmsvm.kernels.weighted import CenterWeightedGkmKernel, _elementary_symmetric_k
+
+        kernel = self.kernel
+        l = kernel.l
+        idx = np.arange(4 ** l)
+        digits = (idx[:, None] // 4 ** np.arange(l - 1, -1, -1)) % 4  # [:, p] = base at p
+        agree = digits == 3 - digits[:, ::-1]
+        if isinstance(kernel, CenterWeightedGkmKernel):
+            w = kernel._pos_weights
+            self_k = np.full(len(idx), _elementary_symmetric_k(w, kernel.k))
+            if kernel.include_rc:
+                # e_k of the weights at agreeing positions, per l-mer
+                dp = np.zeros((len(idx), kernel.k + 1))
+                dp[:, 0] = 1.0
+                for p in range(l):
+                    v = agree[:, p] * w[p]
+                    for j in range(min(p + 1, kernel.k), 0, -1):
+                        dp[:, j] += v * dp[:, j - 1]
+                self_k = self_k + dp[:, kernel.k]
+            return self_k
+        h = np.asarray(kernel._mismatch_table, dtype=np.float64)
+        self_k = np.full(len(idx), h[0])
+        if kernel.include_rc:
+            self_k = self_k + h[(~agree).sum(axis=1)]
+        return self_k
 
     def to_deltasvm(
         self, *, device: str = "cpu", query_norm: bool = False,

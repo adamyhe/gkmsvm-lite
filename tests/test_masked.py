@@ -76,3 +76,39 @@ def test_pairwise_dispatch_matches_brute(kind):
 def test_plan_none_without_cutoff():
     # min_matches = 0 means every pair contributes: no masked plan
     assert mask_plan((1.0, 1.0, 1.0), 2, 0) is None
+
+
+class TestWeighted:
+    """-t 4 / -t 5 masked path vs the per-position DP path."""
+
+    @staticmethod
+    def _pair(rc, rbf=False):
+        from gkmsvm.kernels.weighted import CenterWeightedGkmKernel, CenterWeightedRbfGkmKernel
+
+        if rbf:
+            a = CenterWeightedRbfGkmKernel(8, 5, M=3, H=2.0, gamma=2.0, include_rc=rc)
+            b = CenterWeightedRbfGkmKernel(8, 5, M=3, H=2.0, gamma=2.0, include_rc=rc)
+            b._base.use_masked = False
+        else:
+            a = CenterWeightedGkmKernel(8, 5, M=3, H=2.0, include_rc=rc)
+            b = CenterWeightedGkmKernel(8, 5, M=3, H=2.0, include_rc=rc)
+            b.use_masked = False
+        return a, b
+
+    @pytest.mark.parametrize("rc", [True, False])
+    @pytest.mark.parametrize("rbf", [False, True])
+    def test_pairwise_and_diagonal(self, rc, rbf):
+        rng = np.random.default_rng(4)
+        X, Y = _onehot(20, 50, rng), _onehot(18, 40, rng)
+        X[2, :, 5:35] = Y[4, :, 5:35]
+        fast, ref = self._pair(rc, rbf)
+        np.testing.assert_allclose(fast.pairwise(X, Y), ref.pairwise(X, Y), rtol=1e-12)
+        if not rbf:
+            np.testing.assert_allclose(fast._raw_diagonal(X), ref._raw_diagonal(X), rtol=1e-12)
+
+    def test_n_positions_fall_back(self):
+        rng = np.random.default_rng(5)
+        X, Y = _onehot(20, 50, rng), _onehot(18, 40, rng)
+        X[0, :, 7] = 0  # an N
+        fast, ref = self._pair(True)
+        np.testing.assert_allclose(fast.pairwise(X, Y), ref.pairwise(X, Y), rtol=1e-12)

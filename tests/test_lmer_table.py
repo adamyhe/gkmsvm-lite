@@ -18,6 +18,7 @@ CASES = {
     "t1": ("gkm_estfull", {"L": 8, "k": 5, "d": 3}),
     "t2": ("gkm_esttrunc", {"L": 8, "k": 5, "d": 3}),
     "t2_d2": ("gkm_esttrunc", {"L": 9, "k": 6, "d": 2}),
+    "t4": ("wgkm", {"L": 8, "k": 5, "M": 3, "H": 2.0}),
 }
 
 

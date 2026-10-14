@@ -1,6 +1,6 @@
 """Exact l-mer weight table for prediction with non-RBF gkm kernels.
 
-For -t 0, -t 1 and -t 2 the decision value is linear in the query's windows
+For -t 0, -t 1, -t 2 and -t 4 the decision value is linear in the query's windows
 apart from the query's own normalization:
 
     f(x) = sum_i w(x_i) / sqrt(K_raw(x, x)) + b
@@ -12,9 +12,10 @@ W table lookups plus the query self-kernel, independent of the SV count.
 
 The table is built without touching window pairs. Let V[v] = sum of c_sv over
 every occurrence of l-mer v in an SV (and its RC). With the masked-join
-identity h(m) = sum_t a_t C(l - m, j_t) (kernels/masked.py),
+identity (kernels/masked.py) writing the pair weight as sum over masks S of
+c_S [u|S == v|S],
 
-    w(u) = sum_v V[v] h(m(u, v)) = sum_t a_t sum_{|S| = j_t} M_S(u|S)
+    w(u) = sum_v V[v] g(u, v) = sum_S c_S M_S(u|S)
 
 where M_S is V summed over the positions outside S, a marginal of V viewed as
 a 4 x ... x 4 tensor. The cost is O(#masks * 4^l), independent of the SVs.
@@ -35,12 +36,10 @@ def build_lmer_table(kernel, sv_packed, sv_rc_packed, sv_weights) -> np.ndarray 
         sv_rc_packed is None when the kernel has no RC term).
     sv_weights: [S] c_sv as above.
     """
-    from gkmsvm.kernels.masked import mask_plan
-
     l = kernel.l
-    if l > MAX_TABLE_L:
+    if l > MAX_TABLE_L or not hasattr(kernel, "_join_plan"):
         return None
-    plan = mask_plan(tuple(kernel._mismatch_table), l, kernel._min_matches)
+    plan = kernel._join_plan()
     if plan is None:
         return None
 
