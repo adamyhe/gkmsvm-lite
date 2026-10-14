@@ -85,17 +85,44 @@ Diagonal tiles keep the symmetry trick: process only query < column, plus the di
 - Join: for each key, the hits are the outer product of its query-side and column-side seq lists. Assign key groups to warps; accumulate with float64 `atomicAdd` into a tile in global memory, or into shared memory for small tiles. Float64 atomics need CC ≥ 6.0, already required.
 - Heavy groups (poly-A and other low-complexity keys) make the outer products very uneven. Detect groups above a threshold and handle them separately, e.g. as a small dense GEMM of indicator matrices, so that one warp doesn't serialize the kernel.
 
+## Prediction: exact l-mer table for non-RBF kernels
+
+Prediction has the same problem as training: lite's cost is B × S × W², linear in the number of support vectors, while LS-GKM's stays roughly flat. Same server, 1,000 test sequences, 16 threads:
+
+| SVs | LS-GKM | lite CPU | lite GPU |
+|---|---|---|---|
+| 500 | 61.8 s | 19.1 s | 0.34 s |
+| 997 | 61.9 s | 27.9 s | 0.66 s |
+| 1,968 | 62.2 s | 54.8 s | 1.09 s |
+| 4,597 | 62.9 s | 127.9 s | 5.35 s |
+
+For `-t 0`, `-t 1` and `-t 2` the score is linear in the query's windows except for the query's own normalization:
+
+    f(x) = Σ_i w(x_i) / √K_raw(x, x) + b,   w(u) = Σ_sv (α_sv / √K_raw(sv, sv)) · K_raw(u, sv)
+
+where u ranges over l-mers and K_raw(u, sv) already includes the SV's reverse complement. This is the deltaSVM table without its per-l-mer norm, plus the exact query norm. Checked on the 10-SV ENCODE fixture (`-t 2` l11 k7, 40 sequences): `to_deltasvm(query_norm=False)` minus its bias, divided by √K(x,x), plus b, matches `model(x)` to 1.7e-8, which is consistent with the float32 table. Store the table in float64 (32 MB at l = 11) to make it exact to rounding.
+
+Per query this costs W lookups plus the self-kernel (one SV's worth of work), independent of S: ~4,600× less work than now at 4,597 SVs, ~70,000× for a 70k-SV ENCODE model.
+
+Building the table is the cost. `to_deltasvm` scores all 4^l l-mers against every SV (4.3 s for 10 SVs, so hours for thousands). Instead, scatter from the SVs: for each SV window v (and its RC), add α_sv/√K_sv · h(m) to w(u) for every u within dmax mismatches of v. That's S × W × 2 × 4,984 updates at l11 d3 (1.3e10 for 4,597 SVs), and each SV's neighborhood can be enumerated directly, with no search. Parallelize over SVs with per-thread tables, or partition the table by key.
+
+`-t 3` applies exp(γ(K_norm − 1)) per SV, so it doesn't decompose into a table and needs the masked join. Weighted kernels are out of scope as above.
+
+This is the simplest, largest win in this doc. Do it before the masked join's phase 2.
+
 ## Where it plugs in
 
 | Entry point | File | Phase |
 |---|---|---|
 | Gram tiles (`_fast_pairwise_tile`, `_fit_libsvm`, `_fit_libsvm_gpu_gram`, Nyström) | `gram.py`, `train.py` | 1 |
-| Prediction against SVs (`GkmSVM.__call__`) | `svm.py` (`pairwise_from_indices` calls) | 2 |
+| Prediction, `-t 0`/`-t 1`/`-t 2` (`GkmSVM.__call__`) | `svm.py`, `deltasvm.py` (l-mer table) | 1b |
+| Prediction, `-t 3` | `svm.py` (`pairwise_from_indices` calls) | 2 |
 | SMO kernel columns (`KernelColumnCache._compute_column`) | `solver.py` | 3 |
 | ISM, GkmExplain, deltaSVM tables | `ism.py`, `explain.py`, `deltasvm.py` | Out of scope |
 
 - **Phase 1:** a new method beside `pairwise_from_indices`, e.g. `pairwise_masked(bx, by, by_rc)`, used by `compute_gram` when the kernel has a finite `dmax` and the mask count is reasonable. Keep the brute-force path as the fallback and the test oracle.
-- **Phase 2:** the column side is the SVs and doesn't change between calls, so its per-mask CSR can be built once and cached on the model, like the packed SV windows now. Memory at 70k SVs × 290 windows × 232 masks × 4 bytes ≈ 19 GB is too much, so cache only the size-(l−dmax) level, or build per SV chunk.
+- **Phase 1b:** exact l-mer table prediction (previous section), with a scatter-based table build. Also gives exact, faster `to_deltasvm`.
+- **Phase 2 (`-t 3` prediction):** the column side is the SVs and doesn't change between calls, so its per-mask CSR can be built once and cached on the model, like the packed SV windows now. Memory at 70k SVs × 290 windows × 232 masks × 4 bytes ≈ 19 GB is too much, so cache only the size-(l−dmax) level, or build per SV chunk.
 - **Phase 3:** SMO columns are one query sequence against all N. The per-call sort cost dominates unless the column-side index persists, which is the same memory problem. Revisit after phases 1 and 2.
 - ISM and GkmExplain rely on per-window kernel structure (window-delta ISM, per-position attribution); a masked version is a separate design.
 
