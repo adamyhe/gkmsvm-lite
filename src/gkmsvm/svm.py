@@ -159,6 +159,12 @@ class GkmSVM:
         self._sv_rc_idx_windows: np.ndarray | None = None
         self._sv_packed_t: np.ndarray | None = None
         self._sv_rc_packed_t: np.ndarray | None = None
+        # Exact l-mer weight table for non-RBF kernels (lmer_table.py):
+        # "auto" uses it when it applies and there are enough SVs to pay for
+        # building it; True/False force it on or off
+        self.use_lmer_table: bool | str = "auto"
+        self._lmer_table: np.ndarray | bool | None = None
+        self._lmer_table_dev = None
         self._on_gpu = False
         self._on_mlx = False
 
@@ -198,6 +204,7 @@ class GkmSVM:
         self._sv_rc_idx_windows = None
         self._sv_packed_t = None
         self._sv_rc_packed_t = None
+        self._lmer_table_dev = None
         if had_mlx:
             try:
                 import mlx.core as mx
@@ -369,6 +376,60 @@ class GkmSVM:
         x = self._match_device(x)
         return self._score_unbatched(x, verbose=verbose)
 
+    # "auto" builds the l-mer table only for models at least this large
+    _LMER_TABLE_MIN_SVS = 500
+
+    def _lmer_table_for(self, xp):
+        """The l-mer table on xp's device, or None when it doesn't apply."""
+        use = self.use_lmer_table
+        if use is False or not isinstance(self.kernel, DirectGkmKernel):
+            return None
+        if use == "auto" and self.num_support_vectors < self._LMER_TABLE_MIN_SVS:
+            return None
+        if self._lmer_table is None:
+            from gkmsvm.kernels.direct import _pack_windows_cpu
+            from gkmsvm.lmer_table import build_lmer_table
+
+            kernel = self.kernel
+            sv = to_cpu(self.support_sequences).astype(np.float64)
+
+            def pack(a):
+                return _pack_windows_cpu(np.ascontiguousarray(kernel.base_index_windows(a)))
+
+            coef = to_cpu(self.coefficients).astype(np.float64)
+            if kernel.normalize:
+                diag = to_cpu(kernel._raw_diagonal(sv, chunk_size=1000)).astype(np.float64)
+                coef = coef / np.sqrt(np.clip(diag, 1e-10, None))
+            rc = pack(reverse_complement(sv)) if kernel.include_rc else None
+            table = build_lmer_table(kernel, pack(sv), rc, coef)
+            self._lmer_table = False if table is None else table
+        if self._lmer_table is False:
+            return None
+        if xp is np:
+            return self._lmer_table
+        if self._lmer_table_dev is None or get_array_module(self._lmer_table_dev) is not xp:
+            self._lmer_table_dev = xp.asarray(self._lmer_table)
+        return self._lmer_table_dev
+
+    def _score_lmer_table(self, x, table):
+        """f(x) = sum of table weights over x's windows / sqrt(K(x, x)) + b."""
+        from gkmsvm.kernels.direct import _pack_windows_cpu, _pack_windows_uint32
+
+        xp = get_array_module(x)
+        kernel = self.kernel
+        bx = kernel.base_index_windows(x)
+        if xp is np:
+            packed = _pack_windows_cpu(np.ascontiguousarray(bx))
+        elif is_mlx(bx):
+            packed = xp.asarray(_pack_windows_cpu(np.ascontiguousarray(to_cpu(bx))))
+        else:
+            packed = _pack_windows_uint32(bx, xp)
+        raw = table[packed].sum(axis=1)
+        if kernel.normalize:
+            diag_x = kernel._raw_diagonal(x).astype(raw.dtype)
+            raw = raw / xp.sqrt(xp.clip(diag_x, 1e-10, None))
+        return raw.astype(x.dtype)[:, None] + self.bias
+
     def _score_unbatched(
         self, x: np.ndarray, *, verbose: bool = False,
     ) -> np.ndarray:
@@ -378,6 +439,10 @@ class GkmSVM:
         chunk = self.sv_chunk_size
         kernel = self.kernel
         do_norm = kernel.normalize
+
+        table = self._lmer_table_for(xp)
+        if table is not None:
+            return self._score_lmer_table(x, table)
 
         if do_norm:
             diag_x = kernel._raw_diagonal(x)

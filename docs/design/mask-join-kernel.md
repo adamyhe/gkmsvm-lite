@@ -1,6 +1,6 @@
 # Masked-join gkm kernel: handoff
 
-Status: design, not started. Branch: `mask-join-kernel` (off `main` at `67da231`, which includes the benchmark pipeline).
+Status: phase 1 (CPU and CUDA Gram) and phase 1b (l-mer table prediction) implemented; SMO columns (phase 3), MLX and further GPU tuning open. Branch: `mask-join-kernel` (off `main` at `67da231`, which includes the benchmark pipeline).
 
 ## Goal
 

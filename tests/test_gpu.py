@@ -547,3 +547,17 @@ class TestMaskedGPU:
         model.cuda()
         gpu = cp.asnumpy(model(X)).ravel()
         np.testing.assert_allclose(gpu, cpu, atol=3e-3)
+
+
+class TestLmerTableGPU:
+    def test_table_matches_kernel_path(self):
+        model = _make_model(40, 100, "gkm_esttrunc",
+                            {"L": 11, "k": 7, "d": 3, "include_rc": True}, seed=7)
+        X = np.stack([one_hot_encode(s) for s in _make_seqs(30, 120, seed=8)])
+        model.use_lmer_table = False
+        ref = np.asarray(model(X)).ravel()
+        model.use_lmer_table = True
+        model.cuda()
+        got = cp.asnumpy(model(X)).ravel()
+        assert model._lmer_table is not False
+        np.testing.assert_allclose(got, ref, atol=3e-3)
