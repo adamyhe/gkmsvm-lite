@@ -204,9 +204,21 @@ def _load_task4_bed(cell_line: str) -> dict | None:
     return result
 
 
+def _subsample(seqs, n: int | None, *others, seed: int = 0):
+    """Random n rows of seqs (and matching rows of others); all if n is None."""
+    if n is None or n >= len(seqs):
+        return (seqs, *others)
+    idx = np.sort(np.random.default_rng(seed).choice(len(seqs), n, replace=False))
+    return (seqs[idx], *(o[idx] for o in others))
+
+
 def run_task4_cell_line(model, cell_line: str, device: str,
-                        batch_size: int, verbose: bool) -> dict:
-    """Run Task 4 for a single cell line on test chromosomes."""
+                        batch_size: int, verbose: bool,
+                        max_seqs: int | None = None) -> dict:
+    """Run Task 4 for a single cell line on test chromosomes.
+
+    max_seqs subsamples each sequence class (for quick validation runs).
+    """
     sv_len = _get_sv_len(model)
     print(f"\n--- Task 4: {cell_line} ---")
 
@@ -220,8 +232,10 @@ def run_task4_cell_line(model, cell_line: str, device: str,
             print(f"  SKIP {cell_line}: missing data files", file=sys.stderr)
             return {}
 
-    idr_seqs = _center_crop(data["idr_peaks"]["seqs"], sv_len)
-    nonpeak_seqs = _center_crop(data["nonpeaks"]["seqs"], sv_len)
+    (idr_seqs,) = _subsample(data["idr_peaks"]["seqs"], max_seqs)
+    (nonpeak_seqs,) = _subsample(data["nonpeaks"]["seqs"], max_seqs)
+    idr_seqs = _center_crop(idr_seqs, sv_len)
+    nonpeak_seqs = _center_crop(nonpeak_seqs, sv_len)
     print(f"  IDR peaks: {len(idr_seqs)}, nonpeaks: {len(nonpeak_seqs)}")
     print(f"  Center-cropped {DART_SEQ_LEN} bp → {sv_len} bp")
 
@@ -252,8 +266,9 @@ def run_task4_cell_line(model, cell_line: str, device: str,
     }
 
     if "peaks" in data and "counts" in data["peaks"]:
-        peak_seqs = _center_crop(data["peaks"]["seqs"], sv_len)
-        counts = data["peaks"]["counts"]
+        peak_seqs, counts = _subsample(
+            data["peaks"]["seqs"], max_seqs, np.asarray(data["peaks"]["counts"]))
+        peak_seqs = _center_crop(peak_seqs, sv_len)
         print(f"  Scoring all peaks ({len(peak_seqs)}) for quantitative eval...")
         peak_scores = _score_sequences(model, peak_seqs, batch_size, device, verbose)
         r_pearson, _ = pearsonr(peak_scores, counts)
@@ -629,6 +644,9 @@ def main():
                         help="Which VEP datasets to run (default: all).")
     parser.add_argument("--max-variants", type=int, default=None,
                         help="Max variants to score (for quick validation runs).")
+    parser.add_argument("--max-seqs", type=int, default=None,
+                        help="Task 4: random subsample of each sequence class "
+                        "(for quick validation runs).")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Show progress bars.")
     args = parser.parse_args()
@@ -671,7 +689,8 @@ def main():
     if args.task in ("all", "activity"):
         for cell_line in args.cell_lines:
             r = run_task4_cell_line(
-                model, cell_line, args.device, args.batch_size, args.verbose)
+                model, cell_line, args.device, args.batch_size, args.verbose,
+                max_seqs=args.max_seqs)
             if r:
                 results.append(r)
 

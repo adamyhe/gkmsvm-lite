@@ -29,6 +29,7 @@ COMPL_ARGS    := --n-random 20
 VARIANT_ARGS  := --n-variants 500
 SOLVER_ARGS   := --sizes 500,1000,2000 --n-test 200
 DART_ARGS     := --max-variants 2000
+DART4_ARGS    := --max-seqs 2000
 else
 OUT           := results
 FIG_OUT       := figures
@@ -40,6 +41,7 @@ COMPL_ARGS    :=
 VARIANT_ARGS  :=
 SOLVER_ARGS   :=
 DART_ARGS     :=
+DART4_ARGS    :=
 endif
 
 ifeq ($(DEVICE),cpu)
@@ -109,7 +111,7 @@ $(OUT)/completeness.tsv: completeness.py $(COMMON)
 $(OUT)/dart_task4_%.tsv: dart_eval.py $(COMMON) $(DART_MODELS)/%.model.txt.gz
 	$(PY) dart_eval.py -m $(DART_MODELS)/$*.model.txt.gz --task activity \
 	    --cell-lines GM12878 --device $(DEVICE) --work-dir $(DART_WORK_DIR) \
-	    --output $@ -v
+	    $(DART4_ARGS) --output $@ -v
 
 $(OUT)/dart_task5_dsqtl_%.tsv: dart_eval.py $(COMMON) $(DART_MODELS)/%.model.txt.gz
 	$(PY) dart_eval.py -m $(DART_MODELS)/$*.model.txt.gz --task vep \
