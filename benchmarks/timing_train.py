@@ -133,12 +133,12 @@ def subsample(seqs: list[str], n: int, rng) -> list[str]:
 
 def run_gkmtrain(
     binary: str, pos_fa: Path, neg_fa: Path, prefix: Path,
-    l: int, k: int, d: int, threads: int,
+    l: int, k: int, d: int, threads: int, cache_mb: float | None = None,
 ) -> tuple[float | None, float | None]:
-    cmd = [
-        binary, "-t", "2", "-l", str(l), "-k", str(k), "-d", str(d),
-        "-T", str(threads), str(pos_fa), str(neg_fa), str(prefix),
-    ]
+    cmd = [binary, "-t", "2", "-l", str(l), "-k", str(k), "-d", str(d), "-T", str(threads)]
+    if cache_mb is not None:
+        cmd += ["-m", f"{cache_mb:.0f}"]
+    cmd += [str(pos_fa), str(neg_fa), str(prefix)]
     if _HAS_GNU_TIME:
         cmd = ["/usr/bin/time", "-v"] + cmd
     t0 = time.perf_counter()
@@ -189,6 +189,33 @@ def count_svs_in_model(path: Path) -> int:
 # ── gkmsvm-lite wrappers ──────────────────────────────────────────
 
 
+_GRAM_SECONDS = [0.0]
+
+
+def _install_gram_timer() -> None:
+    """Time gkmsvm.gram.compute_gram calls, to split training into Gram and solve.
+
+    The training paths import compute_gram at call time, so patching the
+    module attribute catches them. Tiles are copied to host memory, so the
+    timing includes GPU work.
+    """
+    import gkmsvm.gram as gram
+
+    if getattr(gram.compute_gram, "_timed", False):
+        return
+    inner = gram.compute_gram
+
+    def timed(*args, **kwargs):
+        t0 = time.perf_counter()
+        try:
+            return inner(*args, **kwargs)
+        finally:
+            _GRAM_SECONDS[0] += time.perf_counter() - t0
+
+    timed._timed = True
+    gram.compute_gram = timed
+
+
 def train_lite(
     pos_seqs: list[str], neg_seqs: list[str],
     l: int, k: int, d: int, device: str,
@@ -198,6 +225,8 @@ def train_lite(
 
     gc.collect()
     rss_before = _read_rss_mb()
+    _install_gram_timer()
+    _GRAM_SECONDS[0] = 0.0
 
     t0 = time.perf_counter()
     model = train_gkmsvm(
@@ -211,6 +240,7 @@ def train_lite(
     mem_mb = None
     if rss_before is not None and rss_after is not None:
         mem_mb = max(0.0, rss_after - rss_before)
+    model.gram_seconds = _GRAM_SECONDS[0]  # time in compute_gram; the rest is the solver
     return model, elapsed, mem_mb
 
 
@@ -355,6 +385,9 @@ def main():
                         "only 1, 4 or 16 (default: largest the machine has cores for)")
     parser.add_argument("--output", default=str(RESULTS / "timing_train.tsv"),
                         help="Output TSV path")
+    parser.add_argument("--lsgkm-cache", default=None, metavar="MB|gram",
+                        help="LS-GKM kernel cache (gkmtrain -m) in MB, or 'gram' for the "
+                        "size of gkmsvm-lite's Gram at each N (default: LS-GKM's 100 MB)")
     parser.add_argument("--smo", action="store_true",
                         help="Also time gkmsvm-lite solver='smo' on CPU and --device "
                         "(LS-GKM's algorithm; slower than the Gram while it fits)")
@@ -445,9 +478,12 @@ def main():
 
             print(f"  Training LS-GKM C ({args.threads} threads)...")
             prefix_c = tmpdir / f"lsgkm_{N}"
+            cache_mb = (None if args.lsgkm_cache is None
+                        else gram_gb * 1024 * 1.1 + 64 if args.lsgkm_cache == "gram"
+                        else float(args.lsgkm_cache))
             t_train_c, mem_c = run_gkmtrain(
                 gkmtrain_bin, pos_fa, neg_fa, prefix_c,
-                args.l, args.k, args.d, args.threads,
+                args.l, args.k, args.d, args.threads, cache_mb,
             )
             model_c_path = Path(f"{prefix_c}.model.txt")
             n_sv_c = count_svs_in_model(model_c_path) if t_train_c else 0
@@ -461,7 +497,9 @@ def main():
             )
             n_sv_lite = model_lite_cpu.num_support_vectors
             mem_str = f", {mem_cpu:.0f} MB" if mem_cpu else ""
-            print(f"    {t_train_cpu:.1f}s  ({n_sv_lite} SVs{mem_str})")
+            print(f"    {t_train_cpu:.1f}s  ({n_sv_lite} SVs{mem_str}; "
+                  f"Gram {model_lite_cpu.gram_seconds:.1f}s, "
+                  f"solver {t_train_cpu - model_lite_cpu.gram_seconds:.1f}s)")
 
             # Same algorithm as LS-GKM: SMO computing kernel columns on demand
             t_train_cpu_smo = None
@@ -485,7 +523,9 @@ def main():
                 )
                 mem_str = f", {mem_gpu:.0f} MB" if mem_gpu else ""
                 print(f"    {t_train_gpu:.1f}s  "
-                      f"({model_lite_gpu.num_support_vectors} SVs{mem_str})")
+                      f"({model_lite_gpu.num_support_vectors} SVs{mem_str}; "
+                      f"Gram {model_lite_gpu.gram_seconds:.1f}s, "
+                      f"solver {t_train_gpu - model_lite_gpu.gram_seconds:.1f}s)")
 
             t_train_gpu_smo = None
             mem_gpu_smo = None
@@ -506,6 +546,9 @@ def main():
                 "t_lite_cpu_smo": t_train_cpu_smo,
                 "t_lite_gpu": t_train_gpu,
                 "t_lite_gpu_smo": t_train_gpu_smo,
+                "t_lite_cpu_gram": model_lite_cpu.gram_seconds,
+                "t_lite_gpu_gram": model_lite_gpu.gram_seconds if model_lite_gpu else None,
+                "lsgkm_cache_mb": cache_mb,
                 "mem_lsgkm": mem_c, "mem_lite_cpu": mem_cpu,
                 "mem_lite_cpu_smo": mem_cpu_smo,
                 "mem_lite_gpu": mem_gpu,
@@ -650,6 +693,7 @@ def main():
             lsgkm=(lsgkm_version(args.conda_env) if not args.lsgkm_bin
                    else f"built from source ({args.lsgkm_bin})"),
             lsgkm_threads=args.threads,
+            lsgkm_cache_mb=args.lsgkm_cache or "100 (default)",
             lite_cpu_threads=lite_threads,
             test_sequences=args.n_test,
             inference_repeats=args.repeats,
@@ -662,7 +706,8 @@ def main():
                 "t_lite_gpu_train\tt_lite_gpu_smo_train\t"
                 "mem_lsgkm_mb\tmem_lite_cpu_mb\tmem_lite_cpu_smo_mb\t"
                 "mem_lite_gpu_mb\tmem_lite_gpu_smo_mb\t"
-                "n_sv_lsgkm\tn_sv_lite\n")
+                "n_sv_lsgkm\tn_sv_lite\t"
+                "t_lite_cpu_gram\tt_lite_gpu_gram\tlsgkm_cache_mb\n")
         for r in train_results:
             vals = [
                 str(r["N"]), str(r["seq_len"]), f"{r['gram_gb']:.3f}",
@@ -677,6 +722,9 @@ def main():
                 f"{r['mem_lite_gpu']:.0f}" if r["mem_lite_gpu"] else "NA",
                 f"{r['mem_lite_gpu_smo']:.0f}" if r["mem_lite_gpu_smo"] else "NA",
                 str(r["n_sv_lsgkm"]), str(r["n_sv_lite"]),
+                f"{r['t_lite_cpu_gram']:.2f}",
+                f"{r['t_lite_gpu_gram']:.2f}" if r["t_lite_gpu_gram"] is not None else "NA",
+                f"{r['lsgkm_cache_mb']:.0f}" if r["lsgkm_cache_mb"] is not None else "NA",
             ]
             f.write("\t".join(vals) + "\n")
 
