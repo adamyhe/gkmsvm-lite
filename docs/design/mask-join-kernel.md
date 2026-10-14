@@ -1,6 +1,6 @@
 # Masked-join gkm kernel: handoff
 
-Status: phase 1 (CPU and CUDA Gram) and phase 1b (l-mer table prediction) implemented; SMO columns (phase 3), MLX and further GPU tuning open. Branch: `mask-join-kernel` (off `main` at `67da231`, which includes the benchmark pipeline).
+Status: phase 1 (CPU and CUDA Gram, `-t 0` to `-t 5`) and phase 1b (l-mer table prediction and `to_deltasvm`, `-t 0/1/2/4`) implemented; SMO columns (phase 3), MLX (planned below) and further GPU tuning open. Branch: `mask-join-kernel` (off `main` at `67da231`, which includes the benchmark pipeline).
 
 ## Goal
 
@@ -127,6 +127,32 @@ This is the simplest, largest win in this doc. Do it before the masked join's ph
 - ISM and GkmExplain rely on per-window kernel structure (window-delta ISM, per-position attribution); a masked version is a separate design.
 
 Out of scope: `-t 4`/`-t 5` weighted kernels (per-position DP, no packed path), and any table without a finite `dmax`.
+
+## MLX (Apple GPU) plan
+
+Today MLX models use Metal brute-force kernels for the forward pass and ISM (`direct.py`, `mx.fast.metal_kernel`), and GkmExplain falls back to CPU. None of the masked-join or l-mer-table work runs on MLX yet. Both weighted-kernel paths explicitly skip MLX inputs, and the l-mer table path is written generically but has never been run on MLX.
+
+Constraints that shape the design:
+
+- **No float64 in Metal.** Every kernel value must come from exact integer counts, combined in float64 on the CPU. Unified memory makes moving data between CPU and GPU free, so the CPU can also do cheap stages like index building and the final combine.
+- **`mx.fast.metal_kernel`** takes a kernel body with named inputs and outputs. `atomic_outputs=True` makes outputs `device atomic<...>`, for histograms and scatters. Threadgroup arrays need a size fixed at compile time, which is a `template` parameter. Threadgroup memory is 32 KB, so a counter row holds at most 8,192 int32; use 4,096-column tiles.
+- **Dispatch:** `get_array_module` returns `mlx.core` for MLX arrays, and `is_mlx()` selects the branch, as in `pairwise_from_indices`.
+
+Steps, cheapest first:
+
+1. **l-mer table prediction on MLX.** `_score_lmer_table` already uses plain indexing and `sum`. The table is float64, which Metal can't use, so keep it as NumPy and gather on the CPU through unified memory, or pass a float32 copy to `mx.take`. Prediction already returns float32 on MLX, so float32 table values are acceptable there. Add an MLX case to `tests/test_lmer_table.py` (skipped without MLX) comparing with the CPU table.
+2. **Masked join, Metal join with CPU-built index.** Build the column index with the existing Numba `_build_column_index`. It's cheap, and unified memory means `mx.array(offsets)` costs little. Then run a Metal join kernel with the same structure as the CUDA one:
+   - one threadgroup per query sequence, with `threadgroup atomic_int counts[TILE]`;
+   - lane groups of 16 scanning each bucket;
+   - output **int32 counts** `[B, S]` per plan level, not float.
+
+   The CPU combines `Σ coef_level × counts_level` in float64. That keeps results exact and identical to the CPU and CUDA paths. With 4 levels for `-t 2` (14 for `-t 4`), a 1,000×1,000 tile needs 16–56 MB of int32 counts.
+3. **Move the index build to Metal**, if profiling shows it matters. Histogram and scatter use atomic outputs with `atomic_fetch_add_explicit`, and the prefix sum uses `mx.cumsum`.
+4. **Self-kernel diagonals.** Keep them on CPU (`masked_self_kernel` for `-t 4`, the packed diagonal for `-t 0`–`-t 2`); they're O(B·W log W) per call.
+
+Validation: `tests/test_mlx.py` patterns plus exactness against the CPU masked join (integer counts make bitwise equality achievable). Benchmark: `masked_gpu_check.py` adapted for MLX on an M-series Mac, against the CPU masked path on the same machine. The CPU path is already fast there (1,000-sequence Gram in 1.3 s on an M4), so ship the Metal join only if it is clearly faster.
+
+Testing needs `mlx` installed (`uv pip install -e ".[mlx]"`); it isn't in the current dev environment.
 
 ## Optimizations to evaluate after the baseline
 
