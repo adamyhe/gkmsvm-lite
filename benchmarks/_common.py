@@ -94,7 +94,7 @@ def _versions() -> str:
         f"gkmsvm-lite {lite}",
         f"python {platform.python_version()}",
         f"numpy {np.__version__}",
-        f"numba {numba.__version__} ({numba.config.NUMBA_NUM_THREADS} threads)",
+        f"numba {numba.__version__} ({numba.get_num_threads()} threads)",
     ]
     try:
         import cupy as cp
@@ -103,6 +103,24 @@ def _versions() -> str:
     except ImportError:
         pass
     return ", ".join(parts)
+
+
+def set_cpu_threads(n: int) -> int:
+    """Run gkmsvm-lite's CPU code on ``n`` threads, here and in child processes.
+
+    Matches gkmsvm-lite to LS-GKM's -T so CPU timings compare like for like.
+    Sets Numba's thread count in this process and the thread environment
+    variables that worker processes read at import. Returns the count used
+    (capped at the cores Numba sees).
+    """
+    import numba
+
+    n = max(1, min(n, numba.config.NUMBA_NUM_THREADS))
+    numba.set_num_threads(n)
+    for var in ("NUMBA_NUM_THREADS", "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+                "MKL_NUM_THREADS"):
+        os.environ[var] = str(n)
+    return n
 
 
 def lsgkm_default_threads() -> int:

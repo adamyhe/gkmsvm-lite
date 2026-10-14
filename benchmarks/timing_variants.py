@@ -51,6 +51,7 @@ from _common import (
     lsgkm_has_option,
     lsgkm_version,
     run_measured,
+    set_cpu_threads,
     worker_result,
     write_tsv,
 )
@@ -219,7 +220,8 @@ def main():
     parser.add_argument("--lsgkm-bin", default=None,
                         help="Directory with LS-GKM binaries (overrides --conda-env)")
     parser.add_argument("--threads", type=int, default=lsgkm_default_threads(),
-                        choices=LSGKM_THREADS, help="LS-GKM -T where supported")
+                        choices=LSGKM_THREADS,
+                        help="LS-GKM -T where supported, and gkmsvm-lite CPU threads")
     parser.add_argument("--no-lsgkm", action="store_true", help="Skip LS-GKM runs")
     parser.add_argument("--timeout", type=float, default=6 * 3600,
                         help="Per-run timeout in seconds (default: 6 h)")
@@ -232,6 +234,8 @@ def main():
     if args.worker:
         _worker(json.loads(args.worker))
         return
+    # Workers inherit this through the environment
+    lite_threads = set_cpu_threads(args.threads)
 
     args.methods = args.methods.split(",")
     bad = [m for m in args.methods if m not in METHODS]
@@ -304,7 +308,8 @@ def main():
                 print(f"  gkmsvm-lite {device} {m.status}: {m.stderr[-300:]}")
             rows.append({
                 "method": method, "implementation": "gkmsvm-lite", "device": device,
-                "threads": None, "n_items": n_items[method], "status": m.status,
+                "threads": lite_threads if device == "cpu" else None,
+                "n_items": n_items[method], "status": m.status,
                 "wall_s": m.wall_s, "compute_s": res.get("compute_s"),
                 "peak_rss_mb": m.peak_rss_mb, "gpu_pool_mb": res.get("gpu_pool_mb"),
                 "max_abs_diff": diff,
@@ -322,7 +327,7 @@ def main():
     df = pd.DataFrame(rows).astype({"threads": "Int64"})
     write_tsv(args.output, df, "dsQTL variant scoring time", args.device,
               model=Path(info["model"]).name, n_variants=info["n_variants"],
-              batch_size=args.batch_size,
+              batch_size=args.batch_size, lite_cpu_threads=lite_threads,
               lsgkm=None if args.no_lsgkm else (
                   lsgkm_version(args.conda_env) if not args.lsgkm_bin
                   else f"built from source ({args.lsgkm_bin})"))

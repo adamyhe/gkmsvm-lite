@@ -14,7 +14,7 @@ Make skips a target whose result file is newer than its scripts. Use `make -B <t
 
 Panel 1C needs LS-GKM's `gkmexplain`, which some `ls-gkm` conda builds lack. The other targets use the `lsgkm` conda env (`LSGKM_ENV`). See [Building LS-GKM with gkmexplain](#building-ls-gkm-with-gkmexplain).
 
-Timed runs each execute in their own process, so the reported peak memory is that run's alone. LS-GKM's `-T` accepts only 1, 4 or 16; scripts default to the largest the machine has cores for and record it.
+Timed runs each execute in their own process, so the reported peak memory is that run's alone. LS-GKM's `-T` accepts only 1, 4 or 16; scripts default to the largest the machine has cores for, run gkmsvm-lite's CPU code on the same number of threads, and record both.
 
 ## Panels
 

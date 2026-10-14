@@ -45,6 +45,7 @@ from _common import (
     lsgkm_has_option,
     lsgkm_version,
     run_measured,
+    set_cpu_threads,
     worker_result,
     write_tsv,
 )
@@ -120,7 +121,8 @@ def main():
     parser.add_argument("--lsgkm-bin", default=None,
                         help="Directory with LS-GKM binaries (overrides --conda-env)")
     parser.add_argument("--threads", type=int, default=lsgkm_default_threads(),
-                        choices=LSGKM_THREADS, help="LS-GKM -T")
+                        choices=LSGKM_THREADS,
+                        help="LS-GKM -T and gkmsvm-lite CPU threads")
     parser.add_argument("--no-lsgkm", action="store_true")
     parser.add_argument("--timeout", type=float, default=6 * 3600,
                         help="Per-run timeout in seconds (default: 6 h)")
@@ -131,6 +133,8 @@ def main():
     if args.worker:
         _worker(json.loads(args.worker))
         return
+    # Workers inherit this through the environment
+    lite_threads = set_cpu_threads(args.threads)
 
     solvers = [s for s in args.solvers.split(",") if not (args.no_lsgkm and s == "lsgkm")]
     bad = [s for s in solvers if s not in SOLVERS]
@@ -180,7 +184,8 @@ def main():
         for solver in solvers:
             row = {"N": N, "solver": solver, "gram_gb": gram_gb,
                    "device": "cpu" if solver == "lsgkm" else args.device,
-                   "train_s": None, "gpu_pool_mb": None, "n_sv": None}
+                   "train_s": None, "gpu_pool_mb": None, "n_sv": None,
+                   "threads": lite_threads if args.device == "cpu" else None}
             if solver == "libsvm" and not _gram_fits_on_cpu(N):
                 rows.append({**row, "status": "skipped", "wall_s": None, "peak_rss_mb": None})
                 print(f"  {solver}: skipped, Gram exceeds 75% of RAM")
@@ -245,6 +250,7 @@ def main():
     write_tsv(args.output, df, "Training time and memory by solver", args.device,
               kernel=f"-t 2 -l {args.l} -k {args.k} -d {args.d} -c {args.C}",
               smo_cache_columns=args.cache_size, held_out=2 * args.n_test,
+              lite_cpu_threads=lite_threads,
               lsgkm=None if "lsgkm" not in solvers else (
                   lsgkm_version(args.conda_env) if not args.lsgkm_bin
                   else f"built from source ({args.lsgkm_bin})"))

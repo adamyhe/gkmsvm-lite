@@ -35,6 +35,7 @@ from _common import (
     lsgkm_default_threads,
     lsgkm_has_option,
     lsgkm_version,
+    set_cpu_threads,
     write_header,
 )
 
@@ -329,12 +330,14 @@ def main():
     parser.add_argument("-d", type=int, default=3, help="Max mismatches")
     parser.add_argument("--threads", type=int, default=lsgkm_default_threads(),
                         choices=LSGKM_THREADS,
-                        help="LS-GKM -T for gkmtrain and gkmpredict; LS-GKM accepts "
+                        help="LS-GKM -T for gkmtrain and gkmpredict, and gkmsvm-lite CPU "
+                        "threads; LS-GKM accepts "
                         "only 1, 4 or 16 (default: largest the machine has cores for)")
     parser.add_argument("--output", default=str(RESULTS / "timing_train.tsv"),
                         help="Output TSV path")
     parser.add_argument("--plot", action="store_true", help="Save timing plot")
     args = parser.parse_args()
+    lite_threads = set_cpu_threads(args.threads)
 
     if args.setup:
         setup_conda_env(args.conda_env)
@@ -355,6 +358,7 @@ def main():
     print(f"Kernel:             -t 2 -l {args.l} -k {args.k} -d {args.d}")
     predict_threads = args.threads if lsgkm_has_option(gkmpredict_bin, "-T") else None
     print(f"LS-GKM threads:     {args.threads} (gkmpredict: {predict_threads or 1})")
+    print(f"gkmsvm-lite CPU threads: {lite_threads}")
     print(f"Inference repeats:  {args.repeats}")
 
     if not DATA.exists():
@@ -599,6 +603,7 @@ def main():
             lsgkm=(lsgkm_version(args.conda_env) if not args.lsgkm_bin
                    else f"built from source ({args.lsgkm_bin})"),
             lsgkm_threads=args.threads,
+            lite_cpu_threads=lite_threads,
             test_sequences=args.n_test,
             inference_repeats=args.repeats,
         )
