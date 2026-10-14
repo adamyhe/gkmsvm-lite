@@ -10,8 +10,8 @@ NeurIPS):
   Task 5 — Variant effect prediction
     Three VEP scoring methods:
       kernel:     score(alt) - score(ref)  (full kernel, two evals per variant)
-      gkmexplain: hyp[alt_base] - hyp[ref_base] at variant position (one
-                  gkmexplain call per variant; Shrikumar et al. 2019 §5.2)
+      gkmexplain: mutation impact score, lsgkm gkmexplain -m 5
+                  (Shrikumar et al. 2019; score_variants(method="gkmexplain"))
       deltasvm:   Σ Δw_kmer  (linear k-mer weight approximation)
     dsQTLs: Yoruban LCL (hg19), caQTLs: African (hg38).
 
@@ -40,7 +40,7 @@ Data:
     synapse get -r syn60581045 --downloadLocation $DART_WORK_DIR/task_5_variant_effect_prediction
 
   If data.h5 files are absent, the script falls back to BED + genome FASTA
-  extraction (requires pyfaidx, pyBigWig).
+  extraction (requires pyfaidx, figwig).
 
 Usage:
   python benchmarks/dart_eval.py -m ENCFF953DDE.txt.gz --task all \\
@@ -102,23 +102,7 @@ def _center_crop(seqs: np.ndarray, target_len: int) -> np.ndarray:
 def _score_sequences(model, seqs_ohe: np.ndarray, batch_size: int,
                      device: str, verbose: bool = True) -> np.ndarray:
     """Score [N, 4, L] one-hot sequences, return [N] scores."""
-    from gkmsvm.backend import to_cpu
-    N = seqs_ohe.shape[0]
-    scores = np.zeros(N, dtype=np.float64)
-
-    chunks = range(0, N, batch_size)
-    if verbose:
-        from tqdm import tqdm
-        chunks = tqdm(chunks, desc="scoring",
-                      total=(N + batch_size - 1) // batch_size)
-
-    for start in chunks:
-        end = min(start + batch_size, N)
-        xb = model._match_device(seqs_ohe[start:end])
-        sb = model(xb, verbose=False).flatten()
-        scores[start:end] = to_cpu(sb)
-
-    return scores
+    return model(seqs_ohe, batch_size=batch_size, verbose=verbose).flatten()
 
 
 def _h5_to_channels_first(seqs_h5: np.ndarray) -> np.ndarray:
@@ -193,26 +177,18 @@ def _load_task4_bed(cell_line: str) -> dict | None:
             seq_str = str(fa[row["chrom"]][max(0, s):e]).upper()
             if len(seq_str) < DART_SEQ_LEN:
                 seq_str = seq_str + "N" * (DART_SEQ_LEN - len(seq_str))
-            seqs.append(one_hot_encode(seq_str))
+            seqs.append(one_hot_encode(seq_str, allow_n=True))
 
         entry = {"seqs": np.stack(seqs)}
 
         if key == "peaks" and os.path.exists(bw_path):
-            import pyBigWig
-            bw = pyBigWig.open(bw_path)
-            counts = []
-            df2 = pd.read_csv(bed_path, sep="\t", header=None,
-                              usecols=[0, 1, 2], names=["chrom", "start", "end"])
-            df2 = df2[df2["chrom"].isin(CHROMS_TEST)].reset_index(drop=True)
-            for _, row in df2.iterrows():
-                mid = (row["start"] + row["end"]) // 2
-                s2 = mid - DART_SEQ_LEN // 2 + CROP
-                e2 = mid + DART_SEQ_LEN // 2 - CROP
-                vals = bw.values(row["chrom"], s2, e2)
-                vals = np.nan_to_num(vals, nan=0.0)
-                counts.append(np.log1p(np.sum(vals)))
-            bw.close()
-            entry["counts"] = np.array(counts)
+            import figwig
+            mid = (df["start"].to_numpy() + df["end"].to_numpy()) // 2
+            # figwig needs starts >= 0; bases past a chromosome end are NaN.
+            starts = np.maximum(mid - DART_SEQ_LEN // 2 + CROP, 0)
+            vals = figwig.read_bigwig(bw_path, df["chrom"].to_numpy(), starts,
+                                      DART_SEQ_LEN - 2 * CROP, n_jobs=-1)
+            entry["counts"] = np.log1p(np.nansum(vals, axis=1))
 
         result[key] = entry
 
@@ -220,9 +196,21 @@ def _load_task4_bed(cell_line: str) -> dict | None:
     return result
 
 
+def _subsample(seqs, n: int | None, *others, seed: int = 0):
+    """Random n rows of seqs (and matching rows of others); all if n is None."""
+    if n is None or n >= len(seqs):
+        return (seqs, *others)
+    idx = np.sort(np.random.default_rng(seed).choice(len(seqs), n, replace=False))
+    return (seqs[idx], *(o[idx] for o in others))
+
+
 def run_task4_cell_line(model, cell_line: str, device: str,
-                        batch_size: int, verbose: bool) -> dict:
-    """Run Task 4 for a single cell line on test chromosomes."""
+                        batch_size: int, verbose: bool,
+                        max_seqs: int | None = None) -> dict:
+    """Run Task 4 for a single cell line on test chromosomes.
+
+    max_seqs subsamples each sequence class (for quick validation runs).
+    """
     sv_len = _get_sv_len(model)
     print(f"\n--- Task 4: {cell_line} ---")
 
@@ -236,8 +224,10 @@ def run_task4_cell_line(model, cell_line: str, device: str,
             print(f"  SKIP {cell_line}: missing data files", file=sys.stderr)
             return {}
 
-    idr_seqs = _center_crop(data["idr_peaks"]["seqs"], sv_len)
-    nonpeak_seqs = _center_crop(data["nonpeaks"]["seqs"], sv_len)
+    (idr_seqs,) = _subsample(data["idr_peaks"]["seqs"], max_seqs)
+    (nonpeak_seqs,) = _subsample(data["nonpeaks"]["seqs"], max_seqs)
+    idr_seqs = _center_crop(idr_seqs, sv_len)
+    nonpeak_seqs = _center_crop(nonpeak_seqs, sv_len)
     print(f"  IDR peaks: {len(idr_seqs)}, nonpeaks: {len(nonpeak_seqs)}")
     print(f"  Center-cropped {DART_SEQ_LEN} bp → {sv_len} bp")
 
@@ -268,8 +258,9 @@ def run_task4_cell_line(model, cell_line: str, device: str,
     }
 
     if "peaks" in data and "counts" in data["peaks"]:
-        peak_seqs = _center_crop(data["peaks"]["seqs"], sv_len)
-        counts = data["peaks"]["counts"]
+        peak_seqs, counts = _subsample(
+            data["peaks"]["seqs"], max_seqs, np.asarray(data["peaks"]["counts"]))
+        peak_seqs = _center_crop(peak_seqs, sv_len)
         print(f"  Scoring all peaks ({len(peak_seqs)}) for quantitative eval...")
         peak_scores = _score_sequences(model, peak_seqs, batch_size, device, verbose)
         r_pearson, _ = pearsonr(peak_scores, counts)
@@ -351,7 +342,7 @@ def _extract_variant_seqs(variant_df: pd.DataFrame, genome_fa: str,
                 seq = seq + "N" * (DART_SEQ_LEN - len(seq))
             elif len(seq) > DART_SEQ_LEN:
                 seq = seq[:DART_SEQ_LEN]
-            seq_list.append(one_hot_encode(seq))
+            seq_list.append(one_hot_encode(seq, allow_n=True))
 
     fa.close()
     return np.stack(a1_seqs), np.stack(a2_seqs)
@@ -375,32 +366,16 @@ def _vep_gkmexplain(model, a1_seqs: np.ndarray, a2_seqs: np.ndarray,
                     sv_len: int, batch_size: int, device: str,
                     verbose: bool) -> np.ndarray:
     """VEP via model.score_variants(method='gkmexplain')."""
-    from gkmsvm.backend import to_cpu
-
     a1_crop = _center_crop(a1_seqs, sv_len)
     a2_crop = _center_crop(a2_seqs, sv_len)
 
-    N = a1_crop.shape[0]
     print(f"  [gkmexplain] Center-cropped {a1_seqs.shape[2]} bp → {sv_len} bp")
     print(f"  [gkmexplain] Computing via score_variants(method='gkmexplain')...")
 
-    logfc = np.zeros(N, dtype=np.float64)
-    chunks = range(0, N, batch_size)
-    if verbose:
-        from tqdm import tqdm
-        chunks = tqdm(chunks, desc="gkmexplain VEP",
-                      total=(N + batch_size - 1) // batch_size)
-
-    for start in chunks:
-        end = min(start + batch_size, N)
-        ref_b = model._match_device(a1_crop[start:end])
-        alt_b = model._match_device(a2_crop[start:end])
-        scores = model.score_variants(ref_b, alt_b, method="gkmexplain",
-                                      batch_size=end - start,
-                                      verbose=False)
-        logfc[start:end] = to_cpu(scores).flatten()
-
-    return logfc
+    return model.score_variants(
+        a1_crop, a2_crop, method="gkmexplain",
+        batch_size=batch_size, verbose=verbose,
+    ).flatten()
 
 
 def _run_vep_task(model, df: pd.DataFrame, a1_seqs: np.ndarray,
@@ -645,8 +620,8 @@ def main():
     parser.add_argument("--device", default="cpu",
                         choices=["cpu", "cuda"],
                         help="Compute device (default: cpu).")
-    parser.add_argument("--batch-size", type=int, default=32,
-                        help="Batch size (default: 32).")
+    parser.add_argument("--batch-size", type=int, default=256,
+                        help="Batch size (default: 256).")
     parser.add_argument("--sv-chunk-size", default=None,
                         type=lambda s: None if s.lower() == 'none' else int(s),
                         help="SV chunk size (default: None = no chunking).")
@@ -661,6 +636,9 @@ def main():
                         help="Which VEP datasets to run (default: all).")
     parser.add_argument("--max-variants", type=int, default=None,
                         help="Max variants to score (for quick validation runs).")
+    parser.add_argument("--max-seqs", type=int, default=None,
+                        help="Task 4: random subsample of each sequence class "
+                        "(for quick validation runs).")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Show progress bars.")
     args = parser.parse_args()
@@ -669,8 +647,22 @@ def main():
     if args.work_dir:
         WORK_DIR = args.work_dir
     if not WORK_DIR:
-        print("Error: set DART_WORK_DIR or pass --work-dir", file=sys.stderr)
-        sys.exit(1)
+        WORK_DIR = os.path.join(os.path.dirname(__file__), "data", "dart-eval")
+
+    # Auto-download from Synapse if H5 files are missing
+    tasks_needed = []
+    if args.task in ("all", "activity"):
+        h5 = os.path.join(WORK_DIR, "task_4_chromatin_activity/data.h5")
+        if not os.path.exists(h5):
+            tasks_needed.append("task_4")
+    if args.task in ("all", "vep"):
+        h5 = os.path.join(WORK_DIR,
+                          "task_5_variant_effect_prediction/data.h5")
+        if not os.path.exists(h5):
+            tasks_needed.append("task_5")
+    if tasks_needed:
+        from dart_download import download_dart_data
+        download_dart_data(WORK_DIR, tasks=tuple(tasks_needed))
 
     print(f"DART-Eval benchmark")
     print(f"  Model: {args.model}")
@@ -689,7 +681,8 @@ def main():
     if args.task in ("all", "activity"):
         for cell_line in args.cell_lines:
             r = run_task4_cell_line(
-                model, cell_line, args.device, args.batch_size, args.verbose)
+                model, cell_line, args.device, args.batch_size, args.verbose,
+                max_seqs=args.max_seqs)
             if r:
                 results.append(r)
 
@@ -749,9 +742,11 @@ def main():
                   f"{r['n_sig']:>8} {r['n_ctrl']:>8}")
 
     if args.output and results:
-        out_df = pd.DataFrame(results)
-        out_df.to_csv(args.output, sep="\t", index=False)
-        print(f"\nSaved results to {args.output}")
+        from _common import write_tsv
+
+        write_tsv(args.output, pd.DataFrame(results), f"DART-Eval, task {args.task}",
+                  args.device, model=os.path.basename(args.model),
+                  vep_method=args.vep_method)
 
 
 if __name__ == "__main__":

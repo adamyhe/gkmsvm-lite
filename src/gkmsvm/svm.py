@@ -334,17 +334,45 @@ class GkmSVM:
                         )
         return self._sv_idx_windows, self._sv_rc_idx_windows
 
-    def __call__(self, x: np.ndarray, *, verbose: bool = False) -> np.ndarray:
+    def __call__(
+        self, x: np.ndarray, *,
+        batch_size: int | None = None,
+        verbose: bool = False,
+    ) -> np.ndarray:
         """Compute SVM decision values.
 
         Args:
             x: [B, 4, L] one-hot encoded DNA sequences.
-            verbose: Show tqdm progress bar over SV chunks.
+            batch_size: Process inputs in batches of this size.  ``None``
+                means process all at once.  When set, ``verbose`` shows
+                progress over input batches instead of SV chunks.
+            verbose: Show tqdm progress bar.
 
         Returns:
             [B, 1] uncalibrated decision values.
         """
+        if batch_size is not None and x.shape[0] > batch_size:
+            chunks = range(0, x.shape[0], batch_size)
+            if verbose:
+                from tqdm import tqdm
+                chunks = tqdm(
+                    chunks, desc="Scoring",
+                    total=(x.shape[0] + batch_size - 1) // batch_size,
+                )
+            parts = []
+            for start in chunks:
+                end = min(start + batch_size, x.shape[0])
+                batch = self._match_device(x[start:end])
+                parts.append(to_cpu(self._score_unbatched(batch)))
+            return np.concatenate(parts, axis=0)
+
         x = self._match_device(x)
+        return self._score_unbatched(x, verbose=verbose)
+
+    def _score_unbatched(
+        self, x: np.ndarray, *, verbose: bool = False,
+    ) -> np.ndarray:
+        """Score a single batch (no input-level chunking)."""
         xp = get_array_module(x)
         S = self.num_support_vectors
         chunk = self.sv_chunk_size
@@ -451,7 +479,7 @@ class GkmSVM:
     def score_variants(
         self, ref: np.ndarray, alt: np.ndarray, *,
         method: str = "kernel",
-        batch_size: int = 50,
+        batch_size: int | None = None,
         verbose: bool = False,
     ) -> np.ndarray:
         """Variant effect scores.
@@ -461,36 +489,26 @@ class GkmSVM:
             alt: [B, 4, L] alternate sequences.
             method: Scoring strategy.
                 "kernel" — score(alt) - score(ref) via full kernel (default).
-                "gkmexplain" — GkmExplain hypothetical importance at the
-                    variant position (Shrikumar et al. 2019 §5.2).  Computes
-                    mode-1 attributions on ref, then reads off the predicted
-                    effect at each position where ref and alt differ.  Faster
-                    than kernel when the model has many SVs, because only one
-                    attribution pass is needed per sequence.
-            batch_size: Batch size for gkmexplain (ignored for kernel).
+                "gkmexplain" — GkmExplain mutation impact score
+                    (Shrikumar et al. 2019, lsgkm ``gkmexplain -m 5``).
+                    See :func:`gkmsvm.explain.mutation_impact`.
+            batch_size: Process inputs in batches of this size.  ``None``
+                means process all at once.
             verbose: Show tqdm progress bar.
 
         Returns:
             [B, 1] score differences.
         """
         if method == "kernel":
-            ref = self._match_device(ref)
-            alt = self._match_device(alt)
-            return self(alt, verbose=verbose) - self(ref, verbose=verbose)
+            return (self(alt, batch_size=batch_size, verbose=verbose)
+                    - self(ref, batch_size=batch_size, verbose=verbose))
 
         if method == "gkmexplain":
-            from gkmsvm.explain import gkmexplain
-            from gkmsvm.backend import get_array_module, to_cpu
+            from gkmsvm.explain import mutation_impact
 
-            ref = self._match_device(ref)
-            alt = self._match_device(alt)
-            hyp = gkmexplain(self, ref, mode=1, batch_size=batch_size,
-                             verbose=verbose)
-            diff_mask = ref != alt
-            ref_contrib = (hyp * ref * diff_mask).sum(axis=(1, 2))
-            alt_contrib = (hyp * alt * diff_mask).sum(axis=(1, 2))
-            xp = get_array_module(hyp)
-            return xp.reshape(alt_contrib - ref_contrib, (-1, 1))
+            return mutation_impact(
+                self, ref, alt, batch_size=batch_size, verbose=verbose,
+            )
 
         raise ValueError(
             f"method must be 'kernel' or 'gkmexplain', got {method!r}"
@@ -499,7 +517,8 @@ class GkmSVM:
     _MAX_LMER_TABLE_L = 14  # 4^14 ≈ 268M entries, ~1 GB
 
     def to_deltasvm(
-        self, *, device: str = "cpu", verbose: bool = False,
+        self, *, device: str = "cpu", query_norm: bool = False,
+        verbose: bool = False,
     ) -> "DeltaSVM":
         """Convert to a DeltaSVM linear scoring model.
 
@@ -518,6 +537,9 @@ class GkmSVM:
 
         Args:
             device: Device for the returned DeltaSVM model.
+            query_norm: Keep the per-l-mer normalization, so each weight
+                equals ``gkmpredict`` on that l-mer minus bias (how
+                deltaSVM weights are built from lsgkm models).
             verbose: Show progress bar during weight computation.
 
         Returns:
@@ -540,13 +562,15 @@ class GkmSVM:
         weights = np.zeros(n_lmers, dtype=np.float32)
 
         S = self.num_support_vectors
+        # [B, S] intermediate × 2 (RC) × 2 (norm + accumulation)
+        bytes_per_seq = S * 8 * 4
         if self._on_gpu:
             import cupy as cp
             free, _ = cp.cuda.Device().mem_info
-            chunk = max(256, min(100_000, int(free * 0.4) // (S * 8)))
+            chunk = max(256, min(100_000, int(free * 0.3) // bytes_per_seq))
         else:
             mem_budget = 2 * 1024**3
-            chunk = max(256, min(100_000, mem_budget // (S * 8)))
+            chunk = max(256, min(100_000, mem_budget // bytes_per_seq))
 
         chunks = range(0, n_lmers, chunk)
         if verbose:
@@ -561,17 +585,18 @@ class GkmSVM:
 
         kernel = self.kernel
         adj_coefs = to_cpu(self.coefficients).astype(np.float64)
-        if kernel.normalize:
+        if kernel.normalize and not query_norm:
             sv_diag = to_cpu(self._get_sv_diag()).astype(np.float64)
             adj_coefs = adj_coefs / np.sqrt(np.clip(sv_diag, 1e-10, None))
 
         saved_norm = kernel.normalize
         saved_coefs = self.coefficients
         coef_dtype = to_cpu(saved_coefs).dtype
-        kernel.normalize = False
-        self.coefficients = self._match_device(
-            adj_coefs.astype(coef_dtype)
-        )
+        if not query_norm:
+            kernel.normalize = False
+            self.coefficients = self._match_device(
+                adj_coefs.astype(coef_dtype)
+            )
         try:
             for start in chunks:
                 end = min(start + chunk, n_lmers)

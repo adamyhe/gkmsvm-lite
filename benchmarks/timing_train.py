@@ -1,0 +1,750 @@
+#!/usr/bin/env python3
+"""Training and prediction time, gkmsvm-lite vs LS-GKM C (Fig. 1B).
+
+Measures wall-clock training and inference time across dataset sizes.
+Both implementations use the same kernel (-t 2 gkm_esttrunc, l=11 k=7 d=3)
+and their default solvers: LS-GKM's SMO with on-demand kernel rows, and
+gkmsvm-lite's solver="auto" (precomputed Gram while it fits). --smo adds
+gkmsvm-lite SMO runs; the solver comparison itself is Fig. S3
+(training_memory.py).
+
+Setup:
+    conda create -n lsgkm -c bioconda -c conda-forge ls-gkm -y
+
+Usage:
+    python benchmarks/timing_train.py                          # CPU only
+    python benchmarks/timing_train.py --device cuda             # include GPU
+    python benchmarks/timing_train.py --sizes 500,1000,5000
+    python benchmarks/timing_train.py --setup                   # create env first
+    python benchmarks/timing_train.py --plot                    # save figure
+"""
+
+from __future__ import annotations
+
+import argparse
+import gc
+import resource
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+import numpy as np
+from _common import (
+    LSGKM_THREADS,
+    RESULTS,
+    SEQ_DIR,
+    lsgkm_binary,
+    lsgkm_default_threads,
+    lsgkm_has_option,
+    lsgkm_version,
+    set_cpu_threads,
+    write_header,
+)
+
+DATA = SEQ_DIR
+
+DEFAULT_SIZES = [500, 1000, 2000, 5000, 10000]
+N_TEST = 1000
+INFER_REPEATS = 3
+
+
+# ── Conda env helpers ──────────────────────────────────────────────
+
+
+def setup_conda_env(name: str) -> None:
+    print(f"Creating conda env '{name}' with ls-gkm from bioconda...")
+    subprocess.run(
+        ["conda", "create", "-n", name, "-c", "bioconda", "-c", "conda-forge",
+         "ls-gkm", "-y"],
+        check=True,
+    )
+    print(f"Done. Env '{name}' ready.")
+
+
+# ── Memory helpers ─────────────────────────────────────────────────
+
+
+def _read_rss_mb() -> float | None:
+    """Current process RSS in MB."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024
+    except (FileNotFoundError, ValueError):
+        pass
+    try:
+        ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return ru / 1024 if sys.platform != "darwin" else ru / 1024 / 1024
+    except Exception:
+        return None
+
+
+def _parse_gnu_time_rss(stderr: str) -> float | None:
+    """Parse peak RSS (MB) from GNU /usr/bin/time -v stderr."""
+    for line in stderr.split("\n"):
+        if "Maximum resident set size" in line:
+            try:
+                return int(line.strip().split()[-1]) / 1024
+            except (ValueError, IndexError):
+                pass
+    return None
+
+
+def _has_gnu_time() -> bool:
+    """GNU time (Linux) supports -v for peak RSS; BSD time (macOS) does not."""
+    try:
+        r = subprocess.run(["/usr/bin/time", "--version"], capture_output=True,
+                           text=True, check=False)
+    except OSError:
+        return False
+    return "GNU" in r.stdout + r.stderr
+
+
+_HAS_GNU_TIME = _has_gnu_time()
+
+
+# ── Data helpers ───────────────────────────────────────────────────
+
+
+def load_dsqtl_seqs() -> tuple[list[str], list[str]]:
+    from gkmsvm import read_fasta
+
+    pos = [seq for _, seq in read_fasta(str(DATA / "gm12878_shared.fa"))]
+    neg = [seq for _, seq in read_fasta(str(DATA / "nullseqs_gm12878_shared.1.1.fa"))]
+    return pos, neg
+
+
+def write_fasta(seqs: list[str], path: Path, prefix: str = "s") -> None:
+    with open(path, "w") as f:
+        for i, seq in enumerate(seqs):
+            f.write(f">{prefix}{i}\n{seq}\n")
+
+
+def subsample(seqs: list[str], n: int, rng) -> list[str]:
+    idx = rng.choice(len(seqs), size=min(n, len(seqs)), replace=False)
+    return [seqs[i] for i in sorted(idx)]
+
+
+# ── LS-GKM C wrappers ─────────────────────────────────────────────
+
+
+def run_gkmtrain(
+    binary: str, pos_fa: Path, neg_fa: Path, prefix: Path,
+    l: int, k: int, d: int, threads: int, cache_mb: float | None = None,
+) -> tuple[float | None, float | None]:
+    cmd = [binary, "-t", "2", "-l", str(l), "-k", str(k), "-d", str(d), "-T", str(threads)]
+    if cache_mb is not None:
+        cmd += ["-m", f"{cache_mb:.0f}"]
+    cmd += [str(pos_fa), str(neg_fa), str(prefix)]
+    if _HAS_GNU_TIME:
+        cmd = ["/usr/bin/time", "-v"] + cmd
+    t0 = time.perf_counter()
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    elapsed = time.perf_counter() - t0
+    if r.returncode != 0:
+        print(f"    gkmtrain FAILED: {r.stderr[:300]}", file=sys.stderr)
+        return None, None
+    peak_mb = _parse_gnu_time_rss(r.stderr) if _HAS_GNU_TIME else None
+    return elapsed, peak_mb
+
+
+def run_gkmpredict(
+    binary: str, test_fa: Path, model_path: Path, output_path: Path,
+    threads: int | None = None,
+) -> tuple[float | None, np.ndarray | None]:
+    cmd = [binary]
+    if threads is not None:
+        cmd += ["-T", str(threads)]
+    cmd += [str(test_fa), str(model_path), str(output_path)]
+    t0 = time.perf_counter()
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    elapsed = time.perf_counter() - t0
+    if r.returncode != 0:
+        print(f"    gkmpredict FAILED: {r.stderr[:300]}", file=sys.stderr)
+        return None, None
+    scores = []
+    with open(output_path) as f:
+        for line in f:
+            parts = line.strip().split("\t")
+            scores.append(float(parts[-1]))
+    return elapsed, np.array(scores)
+
+
+def count_svs_in_model(path: Path) -> int:
+    n = 0
+    in_svs = False
+    with open(path) as f:
+        for line in f:
+            if line.startswith("SV"):
+                in_svs = True
+                continue
+            if in_svs and line.strip():
+                n += 1
+    return n
+
+
+# ── gkmsvm-lite wrappers ──────────────────────────────────────────
+
+
+_GRAM_SECONDS = [0.0]
+
+
+def _install_gram_timer() -> None:
+    """Time gkmsvm.gram.compute_gram calls, to split training into Gram and solve.
+
+    The training paths import compute_gram at call time, so patching the
+    module attribute catches them. Tiles are copied to host memory, so the
+    timing includes GPU work.
+    """
+    import gkmsvm.gram as gram
+
+    if getattr(gram.compute_gram, "_timed", False):
+        return
+    inner = gram.compute_gram
+
+    def timed(*args, **kwargs):
+        t0 = time.perf_counter()
+        try:
+            return inner(*args, **kwargs)
+        finally:
+            _GRAM_SECONDS[0] += time.perf_counter() - t0
+
+    timed._timed = True
+    gram.compute_gram = timed
+
+
+def train_lite(
+    pos_seqs: list[str], neg_seqs: list[str],
+    l: int, k: int, d: int, device: str,
+    solver: str = "auto",
+):
+    from gkmsvm import train_gkmsvm
+
+    gc.collect()
+    rss_before = _read_rss_mb()
+    _install_gram_timer()
+    _GRAM_SECONDS[0] = 0.0
+
+    t0 = time.perf_counter()
+    model = train_gkmsvm(
+        pos_seqs, neg_seqs,
+        kernel_type="estimated", l=l, k=k, d=d,
+        C=1.0, solver=solver, device=device, verbose=False,
+    )
+    elapsed = time.perf_counter() - t0
+
+    rss_after = _read_rss_mb()
+    mem_mb = None
+    if rss_before is not None and rss_after is not None:
+        mem_mb = max(0.0, rss_after - rss_before)
+    model.gram_seconds = _GRAM_SECONDS[0]  # time in compute_gram; the rest is the solver
+    return model, elapsed, mem_mb
+
+
+def predict_lite(
+    model, X_test: np.ndarray, device: str,
+) -> tuple[np.ndarray, float]:
+    from gkmsvm.backend import to_cpu
+
+    if device == "cuda":
+        model.cuda()
+    elif device == "mlx":
+        model.mlx()
+
+    X = model._match_device(X_test)
+    _ = model(X[:1])  # warmup (JIT / GPU transfer)
+
+    t0 = time.perf_counter()
+    scores = to_cpu(model(X).flatten())
+    elapsed = time.perf_counter() - t0
+
+    model.cpu()
+    return scores, elapsed
+
+
+# ── Plotting ───────────────────────────────────────────────────────
+
+
+def plot_results(train_results, infer_results, args, out_path):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+    # ── Training time ──
+    ax = axes[0]
+    Ns = [r["N"] for r in train_results]
+
+    t_c = [r["t_lsgkm"] for r in train_results]
+    valid = [(n, t) for n, t in zip(Ns, t_c) if t is not None]
+    if valid:
+        ax.plot(*zip(*valid), "o-", color="gray", label="LS-GKM C",
+                linewidth=2, markersize=6)
+
+    t_cpu = [r["t_lite_cpu"] for r in train_results]
+    ax.plot(Ns, t_cpu, "s-", color="steelblue", label="gkmsvm-lite CPU",
+            linewidth=2, markersize=6)
+
+    valid = [(n, r["t_lite_cpu_smo"]) for n, r in zip(Ns, train_results)
+             if r["t_lite_cpu_smo"] is not None]
+    if valid:
+        ax.plot(*zip(*valid), "s--", color="steelblue", label="gkmsvm-lite CPU (SMO)",
+                linewidth=2, markersize=5)
+
+    t_gpu = [r["t_lite_gpu"] for r in train_results]
+    valid = [(n, t) for n, t in zip(Ns, t_gpu) if t is not None]
+    if valid:
+        ax.plot(*zip(*valid), "^-", color="coral",
+                label=f"gkmsvm-lite {args.device.upper()} (Gram)",
+                linewidth=2, markersize=6)
+
+    t_gpu_smo = [r["t_lite_gpu_smo"] for r in train_results]
+    valid = [(n, t) for n, t in zip(Ns, t_gpu_smo) if t is not None]
+    if valid:
+        ax.plot(*zip(*valid), "D--", color="orangered",
+                label=f"gkmsvm-lite {args.device.upper()} (SMO)",
+                linewidth=2, markersize=5)
+
+    ax.set_xlabel("Training set size (N)")
+    ax.set_ylabel("Wall-clock time (s)")
+    ax.set_title("Training Time")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    # ── Inference throughput ──
+    ax = axes[1]
+    n_svs = [r["n_sv"] for r in infer_results]
+    n_test = infer_results[0]["n_test"]
+
+    t_c = [r["t_lsgkm"] for r in infer_results]
+    valid = [(s, n_test / t) for s, t in zip(n_svs, t_c) if t is not None]
+    if valid:
+        ax.plot(*zip(*valid), "o-", color="gray", label="LS-GKM C",
+                linewidth=2, markersize=6)
+
+    t_cpu = [r["t_lite_cpu"] for r in infer_results]
+    ax.plot(n_svs, [n_test / t for t in t_cpu], "s-", color="steelblue",
+            label="gkmsvm-lite CPU", linewidth=2, markersize=6)
+
+    t_gpu = [r["t_lite_gpu"] for r in infer_results]
+    valid = [(s, n_test / t) for s, t in zip(n_svs, t_gpu) if t is not None]
+    if valid:
+        ax.plot(*zip(*valid), "^-", color="coral",
+                label=f"gkmsvm-lite {args.device.upper()}", linewidth=2, markersize=6)
+
+    ax.set_xlabel("Number of support vectors")
+    ax.set_ylabel("Throughput (sequences/s)")
+    ax.set_title("Inference Throughput")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    png = out_path.with_suffix(".png")
+    fig.savefig(png, dpi=150, bbox_inches="tight")
+    fig.savefig(out_path.with_suffix(".pdf"), bbox_inches="tight")
+    plt.close(fig)
+    print(f"Plot saved: {png}")
+
+
+# ── Main ───────────────────────────────────────────────────────────
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Timing benchmark: gkmsvm-lite vs LS-GKM C",
+    )
+    parser.add_argument("--conda-env", default="lsgkm",
+                        help="Conda env containing ls-gkm (default: lsgkm)")
+    parser.add_argument("--lsgkm-bin", default=None,
+                        help="Directory with LS-GKM binaries (overrides --conda-env)")
+    parser.add_argument("--setup", action="store_true",
+                        help="Create the conda env before benchmarking")
+    parser.add_argument("--device", default="cpu", choices=["cpu", "cuda", "mlx"],
+                        help="Device for gkmsvm-lite GPU column (default: cpu)")
+    parser.add_argument("--sizes", default=",".join(map(str, DEFAULT_SIZES)),
+                        help="Comma-separated training set sizes (total N)")
+    parser.add_argument("--n-test", type=int, default=N_TEST,
+                        help="Test sequences for inference (default: 1000)")
+    parser.add_argument("--repeats", type=int, default=INFER_REPEATS,
+                        help="Inference timing repeats, reports median (default: 3)")
+    parser.add_argument("-l", type=int, default=11, help="L-mer length")
+    parser.add_argument("-k", type=int, default=7, help="Informative positions")
+    parser.add_argument("-d", type=int, default=3, help="Max mismatches")
+    parser.add_argument("--threads", type=int, default=lsgkm_default_threads(),
+                        choices=LSGKM_THREADS,
+                        help="LS-GKM -T for gkmtrain and gkmpredict, and gkmsvm-lite CPU "
+                        "threads; LS-GKM accepts "
+                        "only 1, 4 or 16 (default: largest the machine has cores for)")
+    parser.add_argument("--output", default=str(RESULTS / "timing_train.tsv"),
+                        help="Output TSV path")
+    parser.add_argument("--lsgkm-cache", default=None, metavar="MB|gram",
+                        help="LS-GKM kernel cache (gkmtrain -m) in MB, or 'gram' for the "
+                        "size of gkmsvm-lite's Gram at each N (default: LS-GKM's 100 MB)")
+    parser.add_argument("--smo", action="store_true",
+                        help="Also time gkmsvm-lite solver='smo' on CPU and --device "
+                        "(LS-GKM's algorithm; slower than the Gram while it fits)")
+    parser.add_argument("--plot", action="store_true", help="Save timing plot")
+    args = parser.parse_args()
+    lite_threads = set_cpu_threads(args.threads)
+
+    if args.setup:
+        setup_conda_env(args.conda_env)
+
+    gkmtrain_bin = lsgkm_binary("gkmtrain", args.conda_env, args.lsgkm_bin)
+    gkmpredict_bin = lsgkm_binary("gkmpredict", args.conda_env, args.lsgkm_bin)
+
+    if not gkmtrain_bin or not gkmpredict_bin:
+        where = args.lsgkm_bin or f"conda env '{args.conda_env}'"
+        print(f"Error: gkmtrain/gkmpredict not found in {where}.")
+        print(f"Create the env with:  conda create -n {args.conda_env} "
+              f"-c bioconda -c conda-forge ls-gkm -y")
+        print(f"Or run:  python {__file__} --setup, or pass --lsgkm-bin")
+        sys.exit(1)
+
+    print(f"LS-GKM C:          {gkmtrain_bin}")
+    print(f"gkmsvm-lite device: {args.device}")
+    print(f"Kernel:             -t 2 -l {args.l} -k {args.k} -d {args.d}")
+    predict_threads = args.threads if lsgkm_has_option(gkmpredict_bin, "-T") else None
+    print(f"LS-GKM threads:     {args.threads} (gkmpredict: {predict_threads or 1})")
+    print(f"gkmsvm-lite CPU threads: {lite_threads}")
+    print(f"Inference repeats:  {args.repeats}")
+
+    if not DATA.exists():
+        import dsqtl_auprc
+
+        dsqtl_auprc.download_sequence_sets()
+
+    sizes = [int(s) for s in args.sizes.split(",")]
+
+    print("\nLoading GM12878 dsQTL sequences...")
+    all_pos, all_neg = load_dsqtl_seqs()
+    seq_len = len(all_pos[0])
+    print(f"  {len(all_pos)} pos + {len(all_neg)} neg, {seq_len}bp")
+
+    rng = np.random.default_rng(42)
+    test_seqs = (subsample(all_pos, args.n_test // 2, rng)
+                 + subsample(all_neg, args.n_test // 2, rng))
+
+    from gkmsvm import one_hot_encode
+    X_test = np.stack([one_hot_encode(s) for s in test_seqs])
+    print(f"  Test set: {len(test_seqs)} sequences\n")
+
+    train_results = []
+    infer_results = []
+
+    with tempfile.TemporaryDirectory(prefix="gkmsvm_bench_") as tmpdir:
+        tmpdir = Path(tmpdir)
+        test_fa = tmpdir / "test.fa"
+        write_fasta(test_seqs, test_fa, prefix="test")
+
+        # Compile Numba/CUDA kernels before the first timed fit
+        warm = (all_pos[:10], all_neg[:10])
+        devices = ["cpu"] + ([args.device] if args.device != "cpu" else [])
+        solvers = ["auto"] + (["smo"] if args.smo else [])
+        for dev in devices:
+            for solver in solvers:
+                train_lite(*warm, args.l, args.k, args.d, dev, solver=solver)
+
+        for N in sizes:
+            n_half = N // 2
+            if n_half > len(all_pos) or n_half > len(all_neg):
+                print(f"  SKIP N={N}: exceeds available sequences")
+                continue
+
+            gram_gb = N * N * 8 / 1024**3
+            print(f"{'=' * 65}")
+            print(f"N = {N}  ({n_half} pos + {n_half} neg)  "
+                  f"Gram = {gram_gb:.2f} GB")
+            print(f"{'=' * 65}")
+
+            rng_sub = np.random.default_rng(100 + N)
+            pos_sub = subsample(all_pos, n_half, rng_sub)
+            neg_sub = subsample(all_neg, n_half, rng_sub)
+
+            pos_fa = tmpdir / f"pos_{N}.fa"
+            neg_fa = tmpdir / f"neg_{N}.fa"
+            write_fasta(pos_sub, pos_fa, prefix="pos")
+            write_fasta(neg_sub, neg_fa, prefix="neg")
+
+            # ── Training ──────────────────────────────────────────
+
+            print(f"  Training LS-GKM C ({args.threads} threads)...")
+            prefix_c = tmpdir / f"lsgkm_{N}"
+            cache_mb = (None if args.lsgkm_cache is None
+                        else gram_gb * 1024 * 1.1 + 64 if args.lsgkm_cache == "gram"
+                        else float(args.lsgkm_cache))
+            t_train_c, mem_c = run_gkmtrain(
+                gkmtrain_bin, pos_fa, neg_fa, prefix_c,
+                args.l, args.k, args.d, args.threads, cache_mb,
+            )
+            model_c_path = Path(f"{prefix_c}.model.txt")
+            n_sv_c = count_svs_in_model(model_c_path) if t_train_c else 0
+            if t_train_c is not None:
+                mem_str = f", {mem_c:.0f} MB" if mem_c else ""
+                print(f"    {t_train_c:.1f}s  ({n_sv_c} SVs{mem_str})")
+
+            print(f"  Training gkmsvm-lite (CPU)...")
+            model_lite_cpu, t_train_cpu, mem_cpu = train_lite(
+                pos_sub, neg_sub, args.l, args.k, args.d, "cpu",
+            )
+            n_sv_lite = model_lite_cpu.num_support_vectors
+            mem_str = f", {mem_cpu:.0f} MB" if mem_cpu else ""
+            print(f"    {t_train_cpu:.1f}s  ({n_sv_lite} SVs{mem_str}; "
+                  f"Gram {model_lite_cpu.gram_seconds:.1f}s, "
+                  f"solver {t_train_cpu - model_lite_cpu.gram_seconds:.1f}s)")
+
+            # Same algorithm as LS-GKM: SMO computing kernel columns on demand
+            t_train_cpu_smo = None
+            mem_cpu_smo = None
+            if args.smo:
+                print("  Training gkmsvm-lite (CPU, SMO)...")
+                model_smo, t_train_cpu_smo, mem_cpu_smo = train_lite(
+                    pos_sub, neg_sub, args.l, args.k, args.d, "cpu", solver="smo",
+                )
+                print(f"    {t_train_cpu_smo:.1f}s  "
+                      f"({model_smo.num_support_vectors} SVs)")
+                del model_smo
+
+            t_train_gpu = None
+            mem_gpu = None
+            model_lite_gpu = None
+            if args.device != "cpu":
+                print(f"  Training gkmsvm-lite ({args.device}, Gram)...")
+                model_lite_gpu, t_train_gpu, mem_gpu = train_lite(
+                    pos_sub, neg_sub, args.l, args.k, args.d, args.device,
+                )
+                mem_str = f", {mem_gpu:.0f} MB" if mem_gpu else ""
+                print(f"    {t_train_gpu:.1f}s  "
+                      f"({model_lite_gpu.num_support_vectors} SVs{mem_str}; "
+                      f"Gram {model_lite_gpu.gram_seconds:.1f}s, "
+                      f"solver {t_train_gpu - model_lite_gpu.gram_seconds:.1f}s)")
+
+            t_train_gpu_smo = None
+            mem_gpu_smo = None
+            if args.smo and args.device != "cpu":
+                print(f"  Training gkmsvm-lite ({args.device}, SMO)...")
+                model_smo, t_train_gpu_smo, mem_gpu_smo = train_lite(
+                    pos_sub, neg_sub, args.l, args.k, args.d, args.device,
+                    solver="smo",
+                )
+                mem_str = f", {mem_gpu_smo:.0f} MB" if mem_gpu_smo else ""
+                print(f"    {t_train_gpu_smo:.1f}s  "
+                      f"({model_smo.num_support_vectors} SVs{mem_str})")
+                del model_smo
+
+            train_results.append({
+                "N": N, "seq_len": seq_len, "gram_gb": gram_gb,
+                "t_lsgkm": t_train_c, "t_lite_cpu": t_train_cpu,
+                "t_lite_cpu_smo": t_train_cpu_smo,
+                "t_lite_gpu": t_train_gpu,
+                "t_lite_gpu_smo": t_train_gpu_smo,
+                "t_lite_cpu_gram": model_lite_cpu.gram_seconds,
+                "t_lite_gpu_gram": model_lite_gpu.gram_seconds if model_lite_gpu else None,
+                "lsgkm_cache_mb": cache_mb,
+                "mem_lsgkm": mem_c, "mem_lite_cpu": mem_cpu,
+                "mem_lite_cpu_smo": mem_cpu_smo,
+                "mem_lite_gpu": mem_gpu,
+                "mem_lite_gpu_smo": mem_gpu_smo,
+                "n_sv_lsgkm": n_sv_c, "n_sv_lite": n_sv_lite,
+            })
+
+            # ── Inference ─────────────────────────────────────────
+
+            print(f"  Inference ({len(test_seqs)} seqs, "
+                  f"median of {args.repeats} runs):")
+
+            # LS-GKM C
+            t_infer_c = None
+            scores_c = None
+            if t_train_c is not None:
+                times_c = []
+                for rep in range(args.repeats):
+                    out_c = tmpdir / f"pred_c_{N}_{rep}.txt"
+                    t, sc = run_gkmpredict(
+                        gkmpredict_bin, test_fa, model_c_path, out_c,
+                        threads=predict_threads,
+                    )
+                    if t is not None:
+                        times_c.append(t)
+                        scores_c = sc
+                if times_c:
+                    t_infer_c = float(np.median(times_c))
+                    print(f"    LS-GKM C:        {t_infer_c:.2f}s  "
+                          f"({len(test_seqs) / t_infer_c:.0f} seq/s)")
+
+            # gkmsvm-lite CPU
+            times_cpu = []
+            for rep in range(args.repeats):
+                sc_cpu, t = predict_lite(model_lite_cpu, X_test, "cpu")
+                times_cpu.append(t)
+            t_infer_cpu = float(np.median(times_cpu))
+            print(f"    lite CPU:        {t_infer_cpu:.2f}s  "
+                  f"({len(test_seqs) / t_infer_cpu:.0f} seq/s)")
+
+            # gkmsvm-lite GPU
+            t_infer_gpu = None
+            if args.device != "cpu":
+                times_gpu = []
+                m_gpu = model_lite_gpu if model_lite_gpu else model_lite_cpu
+                for rep in range(args.repeats):
+                    sc_gpu, t = predict_lite(m_gpu, X_test, args.device)
+                    times_gpu.append(t)
+                t_infer_gpu = float(np.median(times_gpu))
+                print(f"    lite {args.device.upper():4s}:        "
+                      f"{t_infer_gpu:.2f}s  "
+                      f"({len(test_seqs) / t_infer_gpu:.0f} seq/s)")
+
+            # Score sanity check (independently trained models)
+            if scores_c is not None and len(scores_c) == len(sc_cpu):
+                r = np.corrcoef(scores_c, sc_cpu)[0, 1]
+                print(f"    Score correlation (C vs lite): r = {r:.4f}")
+
+            infer_results.append({
+                "N_train": N, "n_sv": n_sv_lite,
+                "n_test": len(test_seqs),
+                "t_lsgkm": t_infer_c, "t_lite_cpu": t_infer_cpu,
+                "t_lite_gpu": t_infer_gpu,
+            })
+
+            print()
+
+    # ── Summary tables ─────────────────────────────────────────────
+
+    gpu = args.device != "cpu"
+
+    print(f"{'=' * 110}")
+    print("TRAINING TIME + MEMORY")
+    print(f"{'=' * 110}")
+    hdr = f"{'N':>7}  {'Gram':>6}  {'LS-GKM C':>10}  {'lite CPU':>10}  {'CPU SMO':>10}"
+    if gpu:
+        hdr += f"  {'GPU Gram':>10}  {'GPU SMO':>10}  {'C/GPU':>6}"
+    hdr += f"  {'mem C':>7}  {'mem lite':>8}"
+    hdr += f"  {'SV(C)':>6}  {'SV(lite)':>8}"
+    print(hdr)
+    print("-" * len(hdr))
+    for r in train_results:
+        line = f"{r['N']:>7d}  {r['gram_gb']:>5.2f}G"
+        line += f"  {r['t_lsgkm']:>9.1f}s" if r["t_lsgkm"] else f"  {'N/A':>10}"
+        line += f"  {r['t_lite_cpu']:>9.1f}s"
+        line += (f"  {r['t_lite_cpu_smo']:>9.1f}s" if r["t_lite_cpu_smo"] is not None
+                 else f"  {'N/A':>10}")
+        if gpu:
+            if r["t_lite_gpu"] is not None:
+                line += f"  {r['t_lite_gpu']:>9.1f}s"
+            else:
+                line += f"  {'N/A':>10}"
+            if r["t_lite_gpu_smo"] is not None:
+                line += f"  {r['t_lite_gpu_smo']:>9.1f}s"
+            else:
+                line += f"  {'N/A':>10}"
+            best_gpu = min(
+                t for t in [r["t_lite_gpu"], r["t_lite_gpu_smo"]]
+                if t is not None
+            ) if any(t is not None for t in [r["t_lite_gpu"], r["t_lite_gpu_smo"]]) else None
+            if best_gpu and r["t_lsgkm"]:
+                line += f"  {r['t_lsgkm'] / best_gpu:>5.1f}x"
+            else:
+                line += f"  {'':>6}"
+        line += f"  {r['mem_lsgkm']:>6.0f}M" if r["mem_lsgkm"] else f"  {'N/A':>7}"
+        line += f"  {r['mem_lite_cpu']:>7.0f}M" if r["mem_lite_cpu"] else f"  {'N/A':>8}"
+        line += f"  {r['n_sv_lsgkm']:>6d}  {r['n_sv_lite']:>8d}"
+        print(line)
+
+    print(f"\n{'=' * 78}")
+    print("INFERENCE TIME")
+    print(f"{'=' * 78}")
+    hdr = f"{'N_train':>7}  {'N_SV':>6}  {'N_test':>6}  {'LS-GKM C':>10}  {'lite CPU':>10}"
+    if gpu:
+        hdr += f"  {'lite GPU':>10}  {'C/GPU':>6}"
+    print(hdr)
+    print("-" * len(hdr))
+    for r in infer_results:
+        line = f"{r['N_train']:>7d}  {r['n_sv']:>6d}  {r['n_test']:>6d}"
+        line += f"  {r['t_lsgkm']:>9.2f}s" if r["t_lsgkm"] else f"  {'N/A':>10}"
+        line += f"  {r['t_lite_cpu']:>9.2f}s"
+        if gpu:
+            if r["t_lite_gpu"] is not None:
+                line += f"  {r['t_lite_gpu']:>9.2f}s"
+                if r["t_lsgkm"]:
+                    line += f"  {r['t_lsgkm'] / r['t_lite_gpu']:>5.1f}x"
+                else:
+                    line += f"  {'':>6}"
+            else:
+                line += f"  {'N/A':>10}  {'':>6}"
+        print(line)
+
+    # ── Save TSV ───────────────────────────────────────────────────
+
+    out_path = Path(args.output)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(out_path, "w") as f:
+        write_header(
+            f, "gkmsvm-lite vs LS-GKM C timing comparison", args.device,
+            kernel=f"-t 2 -l {args.l} -k {args.k} -d {args.d}",
+            lsgkm=(lsgkm_version(args.conda_env) if not args.lsgkm_bin
+                   else f"built from source ({args.lsgkm_bin})"),
+            lsgkm_threads=args.threads,
+            lsgkm_cache_mb=args.lsgkm_cache or "100 (default)",
+            lite_cpu_threads=lite_threads,
+            test_sequences=args.n_test,
+            inference_repeats=args.repeats,
+        )
+        f.write("\n")
+
+        f.write("## Training\n")
+        f.write("N\tseq_len\tgram_gb\tt_lsgkm_train\tt_lite_cpu_train\t"
+                "t_lite_cpu_smo_train\t"
+                "t_lite_gpu_train\tt_lite_gpu_smo_train\t"
+                "mem_lsgkm_mb\tmem_lite_cpu_mb\tmem_lite_cpu_smo_mb\t"
+                "mem_lite_gpu_mb\tmem_lite_gpu_smo_mb\t"
+                "n_sv_lsgkm\tn_sv_lite\t"
+                "t_lite_cpu_gram\tt_lite_gpu_gram\tlsgkm_cache_mb\n")
+        for r in train_results:
+            vals = [
+                str(r["N"]), str(r["seq_len"]), f"{r['gram_gb']:.3f}",
+                f"{r['t_lsgkm']:.2f}" if r["t_lsgkm"] else "NA",
+                f"{r['t_lite_cpu']:.2f}",
+                f"{r['t_lite_cpu_smo']:.2f}" if r["t_lite_cpu_smo"] else "NA",
+                f"{r['t_lite_gpu']:.2f}" if r["t_lite_gpu"] else "NA",
+                f"{r['t_lite_gpu_smo']:.2f}" if r["t_lite_gpu_smo"] else "NA",
+                f"{r['mem_lsgkm']:.0f}" if r["mem_lsgkm"] else "NA",
+                f"{r['mem_lite_cpu']:.0f}" if r["mem_lite_cpu"] else "NA",
+                f"{r['mem_lite_cpu_smo']:.0f}" if r["mem_lite_cpu_smo"] else "NA",
+                f"{r['mem_lite_gpu']:.0f}" if r["mem_lite_gpu"] else "NA",
+                f"{r['mem_lite_gpu_smo']:.0f}" if r["mem_lite_gpu_smo"] else "NA",
+                str(r["n_sv_lsgkm"]), str(r["n_sv_lite"]),
+                f"{r['t_lite_cpu_gram']:.2f}",
+                f"{r['t_lite_gpu_gram']:.2f}" if r["t_lite_gpu_gram"] is not None else "NA",
+                f"{r['lsgkm_cache_mb']:.0f}" if r["lsgkm_cache_mb"] is not None else "NA",
+            ]
+            f.write("\t".join(vals) + "\n")
+
+        f.write("\n## Inference\n")
+        f.write("N_train\tn_sv\tn_test\tt_lsgkm_infer\t"
+                "t_lite_cpu_infer\tt_lite_gpu_infer\n")
+        for r in infer_results:
+            vals = [
+                str(r["N_train"]), str(r["n_sv"]), str(r["n_test"]),
+                f"{r['t_lsgkm']:.3f}" if r["t_lsgkm"] else "NA",
+                f"{r['t_lite_cpu']:.3f}",
+                f"{r['t_lite_gpu']:.3f}" if r["t_lite_gpu"] else "NA",
+            ]
+            f.write("\t".join(vals) + "\n")
+
+    print(f"\nResults saved: {out_path}")
+
+    if args.plot:
+        plot_results(train_results, infer_results, args, out_path)
+
+
+if __name__ == "__main__":
+    main()

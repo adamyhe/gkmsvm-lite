@@ -82,6 +82,38 @@ def _fused_pairwise_packed_numba(bx, by, table, l, min_matches):
 
 
 @njit(parallel=True, cache=True, fastmath=True)
+def _fused_pairwise_packed_sym_numba(bx, by, table, l, min_matches):
+    """_fused_pairwise_packed_numba for a symmetric result (B == S).
+
+    Valid when by holds the windows of the same sequences as bx, or of their
+    reverse complements: m(a, rc(b)) = m(rc(a), b), so both blocks of the RC
+    kernel are symmetric. Computes the upper triangle and mirrors it. Rows b
+    and B-1-b share an iteration so every iteration does B+1 entries.
+    """
+    B = bx.shape[0]
+    Wx = bx.shape[1]
+    Wy = by.shape[1]
+    result = np.empty((B, B), dtype=np.float64)
+    for r in prange((B + 1) // 2):
+        r = np.int64(r)  # prange index is unsigned; B - 1 - r would type as float
+        for half in range(2):
+            b = r if half == 0 else B - 1 - r
+            if half == 1 and b == r:
+                break
+            for s in range(b, B):
+                acc = 0.0
+                for i in range(Wx):
+                    bx_val = bx[b, i]
+                    for j in range(Wy):
+                        matches = l - _packed_mismatches(bx_val, by[s, j])
+                        if matches >= min_matches:
+                            acc += table[l - matches]
+                result[b, s] = acc
+                result[s, b] = acc
+    return result
+
+
+@njit(parallel=True, cache=True, fastmath=True)
 def _fused_diagonal_packed_numba(bx, table, l, min_matches):
     """Self-kernel diagonal from packed uint32 windows."""
     B = bx.shape[0]
@@ -802,7 +834,7 @@ class DirectGkmKernel(GkmKernel):
 
     def pairwise_from_indices(
         self, bx: np.ndarray, by: np.ndarray, *, by_packed_t=None,
-        bx_packed=None,
+        bx_packed=None, symmetric: bool = False,
     ) -> np.ndarray:
         """Raw kernel from base-index windows (no RC, no normalization).
 
@@ -813,6 +845,9 @@ class DirectGkmKernel(GkmKernel):
                 GPU: [Wy, S] uint32 (transposed for coalesced access).
             bx_packed: pre-packed query windows. CPU: [B, Wx] uint32.
                 GPU: [B, Wx] uint32.
+            symmetric: by holds the windows of the same sequences as bx (or
+                of their reverse complements), so the result is symmetric.
+                CPU computes one triangle; other devices compute it all.
 
         Returns:
             [B, S] raw kernel values.
@@ -826,7 +861,9 @@ class DirectGkmKernel(GkmKernel):
                 if by_packed_t is not None
                 else _pack_windows_cpu(np.ascontiguousarray(by))
             )
-            return _fused_pairwise_packed_numba(
+            fn = (_fused_pairwise_packed_sym_numba if symmetric
+                  else _fused_pairwise_packed_numba)
+            return fn(
                 bx_packed,
                 by_packed,
                 self._mismatch_table,

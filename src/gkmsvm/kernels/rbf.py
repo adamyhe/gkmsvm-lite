@@ -10,10 +10,11 @@ from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
 class RbfGkmKernel(GkmKernel):
     """RBF kernel on top of the estimated truncated gkm kernel (-t 3 / gkmrbf).
 
-    K_rbf(x, y) = exp(-gamma * (K_raw(x,x) + K_raw(y,y) - 2*K_raw(x,y)))
+    K_rbf(x, y) = exp(gamma * (K_norm(x, y) - 1))
 
-    where K_raw is the unnormalized gkm_esttrunc kernel. Self-similarity is
-    always 1 (distance to self is zero), so the normalize flag is a no-op.
+    where K_norm = K_raw(x,y) / sqrt(K_raw(x,x) * K_raw(y,y)) is the
+    normalized base kernel (matching lsgkm's -t 3 convention). Self-similarity
+    is always 1, so the normalize flag on the outer kernel is a no-op.
     """
 
     def __init__(
@@ -30,17 +31,13 @@ class RbfGkmKernel(GkmKernel):
         self.gamma = gamma
         self.d = d
         self._base = EstTruncGkmKernel(
-            l, k, d=d, normalize=False, include_rc=include_rc
+            l, k, d=d, normalize=True, include_rc=include_rc
         )
 
     def _raw_pairwise(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
         xp = get_array_module(x)
-        K_xy = self._base._raw_pairwise(x, y)
-        K_xx = self._base._raw_diagonal(x)
-        cs = 1000 if y.shape[0] > self._DIAG_CHUNK_THRESHOLD else None
-        K_yy = self._base._raw_diagonal(y, chunk_size=cs)
-        dist_sq = K_xx[:, None] + K_yy[None, :] - 2 * K_xy
-        return xp.exp(-self.gamma * xp.clip(dist_sq, 0, None))
+        K_norm = self._base.pairwise(x, y)
+        return xp.exp(self.gamma * (K_norm - 1))
 
     def _raw_diagonal(
         self, x: np.ndarray, *, chunk_size: int | None = None

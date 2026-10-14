@@ -12,11 +12,11 @@ Ship an LS-GKM model importer and predictor before building training. Match `gkm
 
 `-t 1` (`gkm_estfull`) is supported via `EstTruncGkmKernel(truncate=False)`.
 
-`-t 3` (`gkmrbf`) wraps the unnormalized `-t 2` kernel with an RBF transform: `K_rbf(x,y) = exp(-gamma * (K(x,x) + K(y,y) - 2*K(x,y)))`. Self-similarity is always 1.
+`-t 3` (`gkmrbf`) wraps the normalized `-t 2` kernel with an RBF transform: `K_rbf(x,y) = exp(gamma * (K_norm(x,y) - 1))`, matching lsgkm. This equals `exp(-gamma/2 * ||phi(x) - phi(y)||^2)` on unit-norm features. Self-similarity is always 1.
 
 `-t 4` (`wgkm`) uses center-weighted position importance. Positions near the l-mer center get weight 1.0; edges decay as `2^(-d/H)`. Uses per-position match computation with an elementary symmetric polynomial DP — exact position weighting, not a mismatch-count average.
 
-`-t 5` (`wgkmrbf`) combines center-weighted base with RBF distance transform.
+`-t 5` (`wgkmrbf`) applies the same RBF transform to the normalized center-weighted kernel.
 
 ## Score formula
 

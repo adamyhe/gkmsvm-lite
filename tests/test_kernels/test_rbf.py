@@ -83,21 +83,17 @@ class TestRbfGkmKernelRC:
 
 class TestRbfGkmKernelConsistency:
     def test_matches_manual_rbf(self):
-        """RBF kernel should equal exp(-gamma * dist^2) where
-        dist^2 = K(x,x) + K(y,y) - 2*K(x,y) using unnormalized base kernel."""
+        """RBF kernel should equal exp(gamma * (K_norm - 1)) matching lsgkm."""
         gamma = 2.0
-        base = EstTruncGkmKernel(l=5, k=3, d=3, normalize=False, include_rc=False)
+        base = EstTruncGkmKernel(l=5, k=3, d=3, normalize=True, include_rc=False)
         rbf = RbfGkmKernel(l=5, k=3, d=3, gamma=gamma, include_rc=False)
 
         seqs = _make_seqs(3, 15, seed=4)
         x = np.stack([one_hot_encode(s) for s in seqs[:2]])
         y = np.stack([one_hot_encode(s) for s in seqs[2:]])
 
-        K_xy = base._raw_pairwise(x, y)
-        K_xx = base._raw_diagonal(x)
-        K_yy = base._raw_diagonal(y)
-        dist_sq = K_xx[:, np.newaxis] + K_yy[np.newaxis, :] - 2 * K_xy
-        expected = np.exp(-gamma * np.clip(dist_sq, 0, None))
+        K_norm = base.pairwise(x, y)
+        expected = np.exp(gamma * (K_norm - 1))
 
         got = rbf.pairwise(x, y)
         np.testing.assert_allclose(

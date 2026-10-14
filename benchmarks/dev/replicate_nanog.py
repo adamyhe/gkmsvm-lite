@@ -22,10 +22,10 @@ Data requirements:
     Cached in benchmarks/data/nanog/ for subsequent runs.
 
 Usage:
-    python benchmarks/replicate_nanog.py                 # full replication
-    python benchmarks/replicate_nanog.py --skip-train    # scoring + attribution only
-    python benchmarks/replicate_nanog.py --skip-modisco  # skip TF-MoDISco
-    python benchmarks/replicate_nanog.py --device cuda   # GPU acceleration
+    python benchmarks/dev/replicate_nanog.py                 # full replication
+    python benchmarks/dev/replicate_nanog.py --skip-train    # scoring + attribution only
+    python benchmarks/dev/replicate_nanog.py --skip-modisco  # skip TF-MoDISco
+    python benchmarks/dev/replicate_nanog.py --device cuda   # GPU acceleration
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ from pathlib import Path
 
 import numpy as np
 
-DATA_DIR = Path(__file__).parent / "data" / "nanog"
+DATA_DIR = Path(__file__).parents[1] / "data" / "nanog"
 
 GKMEXPLAIN_REPO = (
     "https://raw.githubusercontent.com/kundajelab/gkmexplain/master/Nanog_H1ESC"
@@ -116,20 +116,6 @@ def _to_numpy(arr, device):
     return np.asarray(arr)
 
 
-def _gkmexplain_batched(model, x, mode, batch_size=50, device="cpu", verbose=True):
-    """Run GkmExplain in batches to avoid GPU OOM."""
-    from gkmsvm.explain import gkmexplain
-    results = []
-    for i in range(0, len(x), batch_size):
-        batch_np = x[i:i + batch_size]
-        batch = _to_device(batch_np, device)
-        exp = gkmexplain(model, batch, mode=mode, verbose=False)
-        results.append(_to_numpy(exp, device))
-    if verbose:
-        print(f"    {len(x)} seqs, batch_size={batch_size}")
-    return np.concatenate(results)
-
-
 def main():
     parser = argparse.ArgumentParser(description="Nanog H1-ESC replication")
     parser.add_argument(
@@ -154,6 +140,8 @@ def main():
         "--batch-size", type=int, default=50,
         help="Batch size for GkmExplain (lower if GPU OOM)",
     )
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="Show progress bars during scoring and attribution")
     args = parser.parse_args()
 
     print("=" * 70)
@@ -200,8 +188,8 @@ def main():
     neg_x = _to_device(neg_x_np, args.device)
 
     t0 = time.perf_counter()
-    pos_scores = _to_numpy(ref_model(pos_x, verbose=True).squeeze(-1), args.device)
-    neg_scores = _to_numpy(ref_model(neg_x, verbose=True).squeeze(-1), args.device)
+    pos_scores = _to_numpy(ref_model(pos_x, verbose=args.verbose).squeeze(-1), args.device)
+    neg_scores = _to_numpy(ref_model(neg_x, verbose=args.verbose).squeeze(-1), args.device)
     t_score = time.perf_counter() - t0
 
     print(f"  Scored {len(pos_scores) + len(neg_scores)} sequences in {t_score:.2f}s")
@@ -235,7 +223,7 @@ def main():
             kernel_type="estimated", l=11, k=7, d=3, C=1.0,
             solver=args.solver,
             device=args.device if args.device != "auto" else "auto",
-            verbose=True,
+            verbose=args.verbose,
         )
         t_train = time.perf_counter() - t0
         print(f"  Trained in {t_train:.1f}s — {our_model.num_support_vectors} SVs")
@@ -263,12 +251,13 @@ def main():
     else:
         exp_model = ref_model
 
-    # Mode 1: hypothetical contribution scores (mode 0 = mode 1 × OHE)
+    from gkmsvm.explain import gkmexplain
+
     t0 = time.perf_counter()
-    hyp_scores = _gkmexplain_batched(
-        exp_model, pos_x_np, mode=1,
-        batch_size=args.batch_size, device=explain_device,
-    )
+    hyp_scores = _to_numpy(gkmexplain(
+        exp_model, pos_x_np, mode="hypothetical",
+        batch_size=args.batch_size, verbose=args.verbose,
+    ), explain_device)
     t_explain = time.perf_counter() - t0
     print(f"  GkmExplain: {len(pos_x_np)} seqs in {t_explain:.1f}s "
           f"({len(pos_x_np)/t_explain:.1f} seq/s)")
@@ -276,7 +265,7 @@ def main():
 
     # Completeness check on full set
     ref_full_scores = _to_numpy(
-        ref_model(pos_x, verbose=False).squeeze(-1), args.device
+        ref_model(pos_x, verbose=args.verbose).squeeze(-1), args.device
     )
     exp_sums = (imp_scores * pos_x_np).sum(axis=(1, 2))
     expected = ref_full_scores - ref_model.bias

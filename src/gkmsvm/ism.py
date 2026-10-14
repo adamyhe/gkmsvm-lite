@@ -21,7 +21,7 @@ def ism(
     model: GkmSVM,
     x: np.ndarray,
     *,
-    sv_chunk_size: int | None = None,
+    batch_size: int | None = None,
     verbose: bool = False,
 ) -> np.ndarray:
     """Compute score change for every single-base substitution.
@@ -29,23 +29,31 @@ def ism(
     Args:
         model: A GkmSVM model.
         x: [B, 4, L] one-hot encoded reference sequences.
-        sv_chunk_size: Chunk size for SV pairwise computation.
-        verbose: Show tqdm progress bar over sequences.
+        batch_size: Process inputs in batches of this size.  ``None``
+            means process all at once (when ``verbose=False``) or
+            one at a time (when ``verbose=True``).
+        verbose: Show tqdm progress bar over input batches.
 
     Returns:
         [B, 4, L] score deltas.
     """
     x = model._match_device(x)
     kernel = model.kernel
-    chunk = sv_chunk_size if sv_chunk_size is not None else model.sv_chunk_size
+    chunk = model.sv_chunk_size
     fn = _ism_index if hasattr(kernel, "pairwise_from_indices") else _ism_float
 
-    if verbose and x.shape[0] > 1:
+    bs = batch_size if batch_size is not None else (1 if verbose else None)
+    if bs is not None and x.shape[0] > bs:
         from tqdm import tqdm
         xp = get_array_module(x)
+        chunks = range(0, x.shape[0], bs)
+        if verbose:
+            chunks = tqdm(chunks, desc="ISM",
+                          total=(x.shape[0] + bs - 1) // bs)
         results = []
-        for i in tqdm(range(x.shape[0]), desc="ISM"):
-            results.append(fn(model, x[i : i + 1], chunk))
+        for start in chunks:
+            end = min(start + bs, x.shape[0])
+            results.append(fn(model, x[start:end], chunk))
         return xp.concatenate(results, axis=0)
 
     return fn(model, x, chunk)

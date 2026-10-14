@@ -83,6 +83,15 @@ deltas = dsvm.score_variants(ref_seqs, alt_seqs)
 
 DeltaSVM is orders of magnitude faster than full SVM scoring but is a linear approximation. For accurate scores, use the full model's `score_variants()`.
 
+To build a deltaSVM table from a trained model (any kernel, `l <= 14`):
+
+```python
+dsvm = model.to_deltasvm(query_norm=True)  # weight = gkmpredict(l-mer) - bias
+deltas = dsvm.score_variants(ref_seqs, alt_seqs)
+```
+
+`query_norm=True` matches how deltaSVM weights are built from lsgkm models (`gkmpredict` on every l-mer). The default omits the per-l-mer normalization. Scores published with the Beer lab `deltasvm.pl` script differ for variants containing poly-A/T l-mers; see [validation](validation.md#differences-from-the-papers-scripts).
+
 ## GPU acceleration
 
 ### NVIDIA (CuPy)

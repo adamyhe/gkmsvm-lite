@@ -34,7 +34,8 @@
 - [x] Shared-memory query caching in CUDA kernel
 - [x] Packed SV window caching (CPU + GPU, eliminates redundant packing)
 - [x] tqdm progress bars for inference, ISM, GkmExplain
-- [x] dsQTL benchmark replication (AP=0.19, r=0.73, GPU 337 seq/s, CPU 28 seq/s at 19bp)
+- [x] dsQTL benchmark: GkmExplain paper (Fig. 8) reproduced per model with the paper's models — ISM, GkmExplain mutation impact, deltaSVM ([validation](validation.md))
+- [x] GkmExplain mutation impact score (lsgkm `gkmexplain -m 5`)
 - [x] Training via precomputed Gram matrix (libsvm-official C solver)
 - [x] Tiled Gram matrix computation with symmetry exploitation
 - [x] Model serialization: npz (native) and LS-GKM text (interop) formats
@@ -65,3 +66,5 @@
 ## Next
 
 - [ ] **SMO SVR** — column-cached SMO solver for epsilon-SVR (2N dual variables, epsilon-tube working set selection). Currently SVR uses precomputed Gram only; SMO SVR needed for large-scale regression where the Gram matrix exceeds available memory. Reference implementation: kundajelab/lsgkm-svr
+- [ ] **Binary Platt scaling** — calibrated probability output for binary SVC models. Fit sigmoid (A, B) on held-out decision values; store parameters in GkmSVM and serialize to npz; add `predict_proba()` method. Post-hoc calibration avoids the 5-fold CV overhead of sklearn's `probability=True`. See mLS-GKM (Howard & Harmston, 2026) for reference.
+- [ ] **Multiclass SVC** — one-vs-one classification with K(K-1)/2 binary sub-models. Requires architectural changes to GkmSVM (multiple SV sets, per-pair coefficients/bias). Wu-Lin-Weng coupling converts pairwise probabilities into K-class vector (requires Platt scaling). See mLS-GKM (Howard & Harmston, 2026) for reference.

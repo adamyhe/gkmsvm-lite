@@ -1,5 +1,9 @@
 # benchmarking
 benchmarks/data/
+benchmarks/models/
+benchmarks/results/logs/
+benchmarks/results/quick/
+benchmarks/figures/quick/
 
 # data downloads and analysis outputs
 data/
@@ -205,3 +209,4 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+benchmarks/local.mk

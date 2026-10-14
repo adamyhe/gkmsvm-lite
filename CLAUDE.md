@@ -43,6 +43,10 @@ src/gkmsvm/
     └── deltasvm.py      # load_deltasvm_model()
 ```
 
+## Benchmarks
+
+`benchmarks/` holds the application-note pipeline: one script → one `results/*.tsv` (provenance header from `_common.write_tsv`) → one `make` target per figure panel; `figures.ipynb` only plots. Experiments that feed no figure go in `benchmarks/dev/`. Map of panels and files: `benchmarks/README.md`.
+
 ## Conventions
 
 - Python >=3.10, NumPy, Numba >=0.57, scikit-learn, tqdm. CuPy >=12 optional (`[gpu]` extra). MLX >=0.10 optional (`[mlx]` extra)
@@ -54,9 +58,16 @@ src/gkmsvm/
 - Score = `Σ coef_i × K(x, sv_i) + bias` where `bias = -rho` (LS-GKM) or `+rho` (classic gkmSVM)
 - `resolve_kernel_type()` maps aliases and integers to canonical internal names
 - Kernel modes: `-t 0` gkm_cnt/direct, `-t 1` gkm_estfull/estimated_full, `-t 2` gkm_esttrunc/estimated (default), `-t 3` gkmrbf/rbf, `-t 4` wgkm/weighted, `-t 5` wgkmrbf/weighted_rbf
-- ISM: `ism(model, x)` → `[B, 4, L]` score deltas (window-delta optimization)
-- GkmExplain: `gkmexplain(model, x, mode=0|1)` → `[B, 4, L]` attribution scores. Mode 0 = mode 1 × OHE (single unified kernel). MLX unsupported (float32 violates completion axiom)
-- `verbose=True` on `model()`, `score_variants()`, `ism()`, `gkmexplain()` enables tqdm progress bars
+- ISM: `ism(model, x, batch_size=N)` → `[B, 4, L]` score deltas (window-delta optimization)
+- GkmExplain: `gkmexplain(model, x, mode=..., batch_size=50)` → `[B, 4, L]` attribution scores. MLX unsupported (float32 violates completeness axiom). Modes (string or legacy int):
+  - `"importance"` (0) — hypothetical × one-hot. Sum = score - bias (completeness axiom). For visualization.
+  - `"hypothetical"` (1) — all 4 bases. For TF-MoDISco.
+  - `"perturbation"` (2) — discrete kernel-value Δ per mutation (lsgkm C mode 3, `perturbation_eff=1`). Ignores the RBF `exp()`.
+- Mutation impact: `mutation_impact(model, ref, alt)` = lsgkm `gkmexplain -m 5`, the paper's dsQTL VEP score. `score_variants(method="gkmexplain")` calls it. Normalizes ΔK by the ref norm only; RBF distributes `exp(γ(K-1)) - exp(-γ)` proportionally to ΔK/K. Not equal to ISM. Oracle: `tests/fixtures/lsgkm_mode5_*`.
+- RBF (`-t 3`, `-t 5`): `K = exp(γ(K_norm - 1))` on the normalized base kernel, matching lsgkm.
+- `to_deltasvm(query_norm=True)` makes each weight = gkmpredict on that l-mer (how lsgkm deltaSVM weights are built); default drops the l-mer norm.
+- `batch_size` on `model()`, `score_variants()`, `ism()`, `gkmexplain()` chunks over inputs. SV chunking is internal via `model.sv_chunk_size`.
+- `verbose=True` on `model()`, `score_variants()`, `ism()`, `gkmexplain()` enables tqdm progress bars over input batches
 - No PyTorch dependency. Gradient-based methods are incompatible — use GkmExplain or ISM
 - tangermeme interop is vendored (pyfaidx for FASTA extraction)
 
@@ -68,6 +79,7 @@ src/gkmsvm/
 - CPU inner loop: Numba `@njit(parallel=True, fastmath=True)`. NVIDIA GPU inner loop: CuPy RawKernel with shared-memory caching. Apple GPU inner loop: Metal kernel with per-thread accumulation and `popcount()`.
 - MLX compatibility: `get_strides()` for arrays without `.strides`, `xp.ascontiguousarray()` for `.copy()`, `to_cpu(X)[indices]` for fancy indexing. DeltaSVM auto-chunks intermediates >256 MB.
 - SV diagonal is cached after first computation.
+- `compute_gram` self-Gram: skips tiles below the diagonal; on CPU, diagonal tiles compute one triangle (`_fused_pairwise_packed_sym_numba`, also valid for the RC block). `-t 3` tiles use the base esttrunc packed path, then `exp`.
 - Training: `solver="auto"` estimates Gram matrix size — uses precomputed Gram + sklearn when it fits in device memory (< 75%); on GPU, falls back to GPU-computed Gram + CPU-side sklearn when it fits in system RAM (< 75%); else column-cached SMO. SMO uses WSS3 working set selection (C extension `_csmo` with Python kernel column callback), shrinking, and LRU-cached kernel columns — memory is O(cache_size × N) not O(N²). `solver="nystrom"` uses low-rank kernel approximation for fast approximate training. `max_gram_gb` caps Gram allocation on shared compute.
 - `KernelColumnCache` pre-packs all training windows once, computes single columns via `pairwise_from_indices(bx[1,W,l], by_all)` on cache miss.
 - SVR (`train_gkmsvr`) uses sklearn epsilon-SVR with precomputed Gram. SMO SVR is not yet implemented.
@@ -83,3 +95,5 @@ src/gkmsvm/
 - `-t 4`/`-t 5` (wgkm/wgkmrbf) require M and H parameters; these use per-position DP, not the matmul+table path.
 - LS-GKM C is GPL v3 — cannot wrap or link against it (gkmsvm-lite is MIT).
 - GPU float32 diagonal causes <3e-3 score difference vs CPU float64.
+- Beer lab `deltasvm.pl` drops the first weight-file line as a bias header; with gkmpredict output on `nrkmers.py` l-mers that gives AAAAAAAAAA/TTTTTTTTTT raw score 0 (bias included, so -bias in a `to_deltasvm` table). Published deltaSVM scores from that script (e.g. the GkmExplain paper) include this; `dsqtl_auprc.deltasvm_pl()` reproduces it.
+- The gkmexplain repo's summed deltaSVM AUPRCs (README 0.18943 / 0.18795) cover negsets 1, 3, 5 only (`combine_folds.sh` cuts the wrong columns). Five-model sums from its output files are 0.19021 / 0.18997 (`PAPER_SUM_AUPRC`). Reproduction write-up: `docs/validation.md`.
