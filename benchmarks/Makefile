@@ -31,6 +31,7 @@ RETRAINED     := l10k6
 COMPL_ARGS    := --n-random 20
 VARIANT_ARGS  := --n-variants 500
 SOLVER_ARGS   := --sizes 500,1000,2000 --n-test 200
+SOLVER_CPU_ARGS := --sizes 500,1000 --n-test 200
 DART_ARGS     := --max-variants 200
 DART4_ARGS    := --max-seqs 2000
 else
@@ -43,6 +44,8 @@ RETRAINED     := l10k6,l10k6_rbf
 COMPL_ARGS    :=
 VARIANT_ARGS  :=
 SOLVER_ARGS   :=
+# CPU SMO costs ~N^2 kernel values; 10k is hours on a 16-core Xeon
+SOLVER_CPU_ARGS := --sizes 1000,2000,5000,10000
 DART_ARGS     :=
 DART4_ARGS    :=
 endif
@@ -95,7 +98,7 @@ fig1d: $(FIG1D)
 
 S1 := $(OUT)/dsqtl_retrained_per_model.tsv
 S2 := $(OUT)/throughput.tsv
-S3 := $(OUT)/training_memory.tsv
+S3 := $(OUT)/training_memory.tsv $(OUT)/training_memory_cpu.tsv
 S4 := $(OUT)/completeness.tsv
 S5 := $(foreach m,$(DART_ENCODE),$(OUT)/dart_task4_$(m).tsv $(OUT)/dart_task5_dsqtl_$(m).tsv)
 
@@ -110,6 +113,11 @@ $(OUT)/throughput.tsv: throughput_sweep.py $(COMMON)
 $(OUT)/training_memory.tsv: training_memory.py $(DSQTL)
 	$(PY) training_memory.py --device $(DEVICE) $(LSGKM) $(THR) $(SOLVER_ARGS) \
 	    --output $@
+
+# gkmsvm-lite solvers on CPU alone; LS-GKM rows come from the run above
+$(OUT)/training_memory_cpu.tsv: training_memory.py $(DSQTL)
+	$(PY) training_memory.py --device cpu --solvers libsvm,smo --no-lsgkm $(THR) \
+	    $(SOLVER_CPU_ARGS) --output $@
 
 $(OUT)/completeness.tsv: completeness.py $(COMMON)
 	$(PY) completeness.py --device $(DEVICE) $(COMPL_ARGS) --output $@

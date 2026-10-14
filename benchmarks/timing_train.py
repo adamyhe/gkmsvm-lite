@@ -2,7 +2,11 @@
 """Training and prediction time, gkmsvm-lite vs LS-GKM C (Fig. 1B).
 
 Measures wall-clock training and inference time across dataset sizes.
-Both implementations use the same kernel (-t 2 gkm_esttrunc, l=11 k=7 d=3).
+Both implementations use the same kernel (-t 2 gkm_esttrunc, l=11 k=7 d=3)
+and their default solvers: LS-GKM's SMO with on-demand kernel rows, and
+gkmsvm-lite's solver="auto" (precomputed Gram while it fits). --smo adds
+gkmsvm-lite SMO runs; the solver comparison itself is Fig. S3
+(training_memory.py).
 
 Setup:
     conda create -n lsgkm -c bioconda -c conda-forge ls-gkm -y
@@ -351,8 +355,9 @@ def main():
                         "only 1, 4 or 16 (default: largest the machine has cores for)")
     parser.add_argument("--output", default=str(RESULTS / "timing_train.tsv"),
                         help="Output TSV path")
-    parser.add_argument("--no-cpu-smo", action="store_true",
-                        help="Skip gkmsvm-lite CPU SMO (LS-GKM's algorithm; slow at large N)")
+    parser.add_argument("--smo", action="store_true",
+                        help="Also time gkmsvm-lite solver='smo' on CPU and --device "
+                        "(LS-GKM's algorithm; slower than the Gram while it fits)")
     parser.add_argument("--plot", action="store_true", help="Save timing plot")
     args = parser.parse_args()
     lite_threads = set_cpu_threads(args.threads)
@@ -409,10 +414,11 @@ def main():
 
         # Compile Numba/CUDA kernels before the first timed fit
         warm = (all_pos[:10], all_neg[:10])
-        for dev, solver in [("cpu", "auto"), ("cpu", "smo")] + (
-            [(args.device, "auto"), (args.device, "smo")] if args.device != "cpu" else []
-        ):
-            train_lite(*warm, args.l, args.k, args.d, dev, solver=solver)
+        devices = ["cpu"] + ([args.device] if args.device != "cpu" else [])
+        solvers = ["auto"] + (["smo"] if args.smo else [])
+        for dev in devices:
+            for solver in solvers:
+                train_lite(*warm, args.l, args.k, args.d, dev, solver=solver)
 
         for N in sizes:
             n_half = N // 2
@@ -460,7 +466,7 @@ def main():
             # Same algorithm as LS-GKM: SMO computing kernel columns on demand
             t_train_cpu_smo = None
             mem_cpu_smo = None
-            if not args.no_cpu_smo:
+            if args.smo:
                 print("  Training gkmsvm-lite (CPU, SMO)...")
                 model_smo, t_train_cpu_smo, mem_cpu_smo = train_lite(
                     pos_sub, neg_sub, args.l, args.k, args.d, "cpu", solver="smo",
@@ -483,7 +489,7 @@ def main():
 
             t_train_gpu_smo = None
             mem_gpu_smo = None
-            if args.device != "cpu":
+            if args.smo and args.device != "cpu":
                 print(f"  Training gkmsvm-lite ({args.device}, SMO)...")
                 model_smo, t_train_gpu_smo, mem_gpu_smo = train_lite(
                     pos_sub, neg_sub, args.l, args.k, args.d, args.device,
