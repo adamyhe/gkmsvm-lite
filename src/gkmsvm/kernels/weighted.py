@@ -168,14 +168,14 @@ class CenterWeightedGkmKernel(GkmKernel):
         return not bool((x.max(axis=1) == 0).any())
 
     def _packed(self, x):
-        from gkmsvm.backend import is_gpu
+        from gkmsvm.backend import is_gpu, is_mlx, to_cpu
         from gkmsvm.kernels.direct import _pack_windows_cpu, _pack_windows_uint32
 
         xp = get_array_module(x)
         bw = self.base_index_windows(x)
-        if is_gpu(bw):
+        if is_gpu(bw) and not is_mlx(bw):
             return _pack_windows_uint32(bw, xp)
-        return _pack_windows_cpu(np.ascontiguousarray(bw))
+        return _pack_windows_cpu(np.ascontiguousarray(to_cpu(bw)))
 
     def _masked_pairwise(self, x, y):
         """Masked-join K_raw(x, y), or None when it doesn't apply."""
@@ -183,11 +183,17 @@ class CenterWeightedGkmKernel(GkmKernel):
         from gkmsvm.kernels.direct import _MASKED_MIN_ROWS
 
         plan = self._masked_plan()
-        if (plan is None or is_mlx(x) or min(x.shape[0], y.shape[0]) < _MASKED_MIN_ROWS
+        if (plan is None or min(x.shape[0], y.shape[0]) < _MASKED_MIN_ROWS
                 or not (self._packed_exact(x) and self._packed_exact(y))):
             return None
         bx, by = self._packed(x), self._packed(y)
         by_rc = self._packed(reverse_complement(y)) if self.include_rc else None
+        if is_mlx(x):
+            import mlx.core as mx
+
+            from gkmsvm.kernels.masked import masked_pairwise_mlx
+
+            return mx.array(masked_pairwise_mlx(bx, by, plan, by_rc).astype(np.float32))
         if is_gpu(bx):
             from gkmsvm.kernels.masked import masked_pairwise_gpu
 
@@ -198,11 +204,11 @@ class CenterWeightedGkmKernel(GkmKernel):
 
     def _masked_diagonal(self, x):
         """Masked-join K_raw(x, x) (computed on CPU), or None when it doesn't apply."""
-        from gkmsvm.backend import is_mlx, to_cpu
+        from gkmsvm.backend import to_cpu
         from gkmsvm.kernels.masked import masked_self_kernel
 
         plan = self._masked_plan()
-        if plan is None or is_mlx(x) or not self._packed_exact(x):
+        if plan is None or not self._packed_exact(x):
             return None
         xc = to_cpu(x)
         brc = self._packed(reverse_complement(xc)) if self.include_rc else None

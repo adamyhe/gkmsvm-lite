@@ -910,6 +910,15 @@ class DirectGkmKernel(GkmKernel):
                 by_packed = xp.asarray(
                     _pack_windows_cpu(np.ascontiguousarray(to_cpu(by)))
                 )
+            plan = self._masked_plan()
+            if (plan is not None and bx_packed.shape[0] >= _MASKED_MIN_ROWS
+                    and by_packed.shape[0] >= _MASKED_MIN_ROWS):
+                from gkmsvm.kernels.masked import masked_pairwise_mlx
+
+                # Exact integer counts combined in float64; Metal holds float32
+                return xp.asarray(
+                    masked_pairwise_mlx(bx_packed, by_packed, plan).astype(np.float32)
+                )
             return _fused_pairwise_packed_mlx(
                 bx_packed,
                 by_packed,

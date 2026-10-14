@@ -1,6 +1,6 @@
 # Masked-join gkm kernel: handoff
 
-Status: phase 1 (CPU and CUDA Gram, `-t 0` to `-t 5`) and phase 1b (l-mer table prediction and `to_deltasvm`, `-t 0/1/2/4`) implemented; SMO columns (phase 3), MLX (planned below) and further GPU tuning open. Branch: `mask-join-kernel` (off `main` at `67da231`, which includes the benchmark pipeline).
+Status: phase 1 (CPU and CUDA Gram, `-t 0` to `-t 5`) and phase 1b (l-mer table prediction and `to_deltasvm`, `-t 0/1/2/4`) implemented; MLX steps 1-2 (table on MLX, Metal join with CPU index: 1.6x/2.7x faster than the M4 CPU at 1k/2k) implemented; SMO columns (phase 3), Metal index build and further GPU tuning open. Branch: `mask-join-kernel` (off `main` at `67da231`, which includes the benchmark pipeline).
 
 ## Goal
 

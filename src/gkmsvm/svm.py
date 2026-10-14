@@ -420,7 +420,10 @@ class GkmSVM:
         if xp is np:
             return self._lmer_table
         if self._lmer_table_dev is None or get_array_module(self._lmer_table_dev) is not xp:
-            self._lmer_table_dev = xp.asarray(self._lmer_table)
+            # Metal has no float64: MLX gets a float32 copy (scores are float32 there)
+            table = (self._lmer_table.astype(np.float32)
+                     if getattr(xp, "__name__", "") == "mlx.core" else self._lmer_table)
+            self._lmer_table_dev = xp.asarray(table)
         return self._lmer_table_dev
 
     def _score_lmer_table(self, x, table):

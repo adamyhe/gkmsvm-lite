@@ -377,3 +377,107 @@ def masked_self_kernel(bx_packed, plan, bx_rc_packed=None):
     for j, coef, positions in plan:
         _self_join_counts(bx, brc, positions, j, coef, out)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Metal (MLX)
+# ---------------------------------------------------------------------------
+
+# Same structure as masked_join (CUDA). Metal has no float64, so each launch
+# writes exact int32 counts per (query, column) and the caller combines
+# levels in float64 on the CPU (unified memory makes that copy cheap).
+_METAL_MASKED_JOIN = """
+    uint b = threadgroup_position_in_grid.x;
+    uint tid = thread_position_in_threadgroup.x;
+    uint tg = threads_per_threadgroup.x;
+    int Wx = params[0], M = params[1], j = params[2], S = params[3], lanes = params[4];
+    uint K1 = (uint)params[5];
+    uint n_win = (uint)params[6];
+    threadgroup atomic_int counts[TILE];
+    for (int s = tid; s < S; s += tg)
+        atomic_store_explicit(&counts[s], 0, memory_order_relaxed);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    int group = tid / lanes, lane = tid % lanes, n_groups = tg / lanes;
+    for (int it = group; it < M * Wx; it += n_groups) {
+        int m = it / Wx;
+        int i = it - m * Wx;
+        uint w = bx[b * Wx + i];
+        uint key = 0;
+        for (int q = 0; q < j; q++)
+            key |= ((w >> (2 * pos[m * j + q])) & 3u) << (2 * q);
+        uint base = (uint)m * K1;
+        int hi = offsets[base + key + 1];
+        uint cbase = (uint)m * n_win;
+        for (int t = offsets[base + key] + lane; t < hi; t += lanes)
+            atomic_fetch_add_explicit(&counts[colseq[cbase + t]], 1, memory_order_relaxed);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (int s = tid; s < S; s += tg)
+        out[b * S + s] = atomic_load_explicit(&counts[s], memory_order_relaxed);
+"""
+
+_metal_join = None
+# Columns per launch: the threadgroup counter row (32 KB limit) is TILE int32
+_METAL_COL_TILE = 4096
+_METAL_LANES = 16
+_METAL_THREADS = 256
+
+
+def _get_metal_join():
+    global _metal_join
+    if _metal_join is None:
+        import mlx.core as mx
+
+        _metal_join = mx.fast.metal_kernel(
+            name="gkm_masked_join",
+            input_names=["bx", "pos", "offsets", "colseq", "params"],
+            output_names=["out"],
+            source=_METAL_MASKED_JOIN,
+        )
+    return _metal_join
+
+
+def masked_pairwise_mlx(bx_packed, by_packed, plan, by_rc_packed=None) -> np.ndarray:
+    """Metal version of masked_pairwise(): join on the GPU, index on the CPU.
+
+    Inputs may be NumPy or MLX uint32 arrays. Returns [B, S] float64 NumPy,
+    combined exactly from per-level integer counts.
+    """
+    import mlx.core as mx
+
+    join = _get_metal_join()
+    bx = np.ascontiguousarray(np.asarray(bx_packed), dtype=np.uint32)
+    by_all = np.asarray(by_packed, dtype=np.uint32)
+    by_rc_all = None if by_rc_packed is None else np.asarray(by_rc_packed, dtype=np.uint32)
+    B, Wx = bx.shape
+    S_total, Wy = by_all.shape
+    bx_mx = mx.array(bx.ravel())
+    result = np.zeros((B, S_total), dtype=np.float64)
+
+    for c0 in range(0, S_total, _METAL_COL_TILE):
+        c1 = min(c0 + _METAL_COL_TILE, S_total)
+        S = c1 - c0
+        rows = [by_all[c0:c1]] + ([by_rc_all[c0:c1]] if by_rc_all is not None else [])
+        by = np.ascontiguousarray(np.concatenate(rows))
+        seq_of_row = np.tile(np.arange(S, dtype=np.int32), len(rows))
+        n_win = by.shape[0] * Wy
+        for j, coef, positions in plan:
+            K1 = (1 << (2 * j)) + 1
+            level = None
+            for m0 in range(0, len(positions), _MASK_CHUNK):
+                chunk = positions[m0 : m0 + _MASK_CHUNK]
+                offsets, colseq = _build_column_index(by, seq_of_row, chunk, j)
+                params = mx.array([Wx, len(chunk), j, S, _METAL_LANES, K1, n_win],
+                                  dtype=mx.int32)
+                counts = join(
+                    inputs=[bx_mx, mx.array(chunk.astype(np.int32).ravel()),
+                            mx.array(offsets.ravel()), mx.array(colseq.ravel()), params],
+                    template=[("TILE", _METAL_COL_TILE)],
+                    grid=(B * _METAL_THREADS, 1, 1),
+                    threadgroup=(_METAL_THREADS, 1, 1),
+                    output_shapes=[(B * S,)],
+                    output_dtypes=[mx.int32],
+                )[0]
+                level = counts if level is None else level + counts
+            result[:, c0:c1] += coef * np.array(level, dtype=np.float64).reshape(B, S)
+    return result
