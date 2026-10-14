@@ -228,7 +228,7 @@ _GPU_MASK_CHUNK = 32
 # Set to a dict to accumulate per-stage seconds (synchronizes between stages)
 GPU_PROFILE: dict | None = None
 # Threads that share one bucket scan in the join (power of two <= 32)
-GPU_JOIN_LANES = 8
+GPU_JOIN_LANES = 16  # best on a Titan Xp (sweep 1-32: 16 > 8 > 4 > 32 > 1)
 
 
 def _stage(name, t0):
