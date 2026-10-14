@@ -177,7 +177,7 @@ def _load_task4_bed(cell_line: str) -> dict | None:
             seq_str = str(fa[row["chrom"]][max(0, s):e]).upper()
             if len(seq_str) < DART_SEQ_LEN:
                 seq_str = seq_str + "N" * (DART_SEQ_LEN - len(seq_str))
-            seqs.append(one_hot_encode(seq_str))
+            seqs.append(one_hot_encode(seq_str, allow_n=True))
 
         entry = {"seqs": np.stack(seqs)}
 
@@ -350,7 +350,7 @@ def _extract_variant_seqs(variant_df: pd.DataFrame, genome_fa: str,
                 seq = seq + "N" * (DART_SEQ_LEN - len(seq))
             elif len(seq) > DART_SEQ_LEN:
                 seq = seq[:DART_SEQ_LEN]
-            seq_list.append(one_hot_encode(seq))
+            seq_list.append(one_hot_encode(seq, allow_n=True))
 
     fa.close()
     return np.stack(a1_seqs), np.stack(a2_seqs)
