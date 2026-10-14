@@ -490,3 +490,48 @@ class TestMLXTraining:
         )
         assert model.num_support_vectors > 0
         assert "Moving training data to MLX" in capsys.readouterr().out
+
+
+class TestMaskedMLX:
+    """Metal masked join and l-mer table vs the CPU paths."""
+
+    @pytest.mark.parametrize("kernel_type,params", [
+        ("gkm_cnt", {"L": 8, "k": 5}),
+        ("gkm_esttrunc", {"L": 9, "k": 6, "d": 3}),
+        ("wgkm", {"L": 8, "k": 5, "M": 3, "H": 2.0}),
+    ])
+    @pytest.mark.parametrize("col_tile", [4096, 7])
+    def test_join_matches_cpu(self, kernel_type, params, col_tile, monkeypatch):
+        import gkmsvm.kernels.masked as masked
+        from gkmsvm.codec import reverse_complement
+        from gkmsvm.kernels.direct import _pack_windows_cpu
+
+        monkeypatch.setattr(masked, "_METAL_COL_TILE", col_tile)
+        kernel = _make_model(20, 60, kernel_type, params).kernel
+        X = np.stack([one_hot_encode(s) for s in _make_seqs(21, 80, seed=3)])
+        X[2, :, 5:45] = X[9, :, 30:70]
+        Y = np.stack([one_hot_encode(s) for s in _make_seqs(30, 60, seed=4)])
+
+        def pack(A):
+            return _pack_windows_cpu(np.ascontiguousarray(kernel.base_index_windows(A)))
+
+        plan = kernel._join_plan()
+        args = (pack(X), pack(Y), plan, pack(reverse_complement(Y)))
+        np.testing.assert_allclose(masked.masked_pairwise_mlx(*args),
+                                   masked.masked_pairwise(*args), rtol=1e-12, atol=1e-12)
+
+    @pytest.mark.parametrize("kernel_type,params", [
+        ("gkm_esttrunc", {"L": 9, "k": 6, "d": 3}),
+        ("wgkm", {"L": 8, "k": 5, "M": 3, "H": 2.0}),
+    ])
+    @pytest.mark.parametrize("table", [False, True])
+    def test_model_scores(self, kernel_type, params, table):
+        """MLX scoring (masked join or l-mer table) matches CPU scoring."""
+        model = _make_model(40, 60, kernel_type, params, seed=6)
+        X = np.stack([one_hot_encode(s) for s in _make_seqs(30, 80, seed=5)])
+        model.use_lmer_table = False
+        cpu = np.asarray(model(X)).ravel()
+        model.use_lmer_table = table
+        model.mlx()
+        got = np.array(model(mx.array(X))).ravel()
+        np.testing.assert_allclose(got, cpu, atol=1e-5)

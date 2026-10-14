@@ -137,8 +137,88 @@ class CenterWeightedGkmKernel(GkmKernel):
         wx = xp.ascontiguousarray(wx.transpose(0, 2, 3, 1))  # [B, W, l, 4]
         return xp.einsum("bplc,bqlc->bpql", wx, wx)
 
+    # Use the masked-join kernel (kernels/masked.py) when the inputs have no N
+    # positions; set False to force the per-position path
+    use_masked = True
+
+    def _join_plan(self):
+        """Mask plan: every size-k mask, coefficient prod of its weights."""
+        if getattr(self, "_plan_cache", None) is None:
+            from gkmsvm.kernels.masked import weighted_mask_plan
+
+            self._plan_cache = weighted_mask_plan(self.l, self.k, self._pos_weights)
+        return self._plan_cache
+
+    def _masked_plan(self):
+        """_join_plan() for the pairwise kernel, unless use_masked is off."""
+        return self._join_plan() if self.use_masked else None
+
+    def base_index_windows(self, x: np.ndarray) -> np.ndarray:
+        """[B, W, l] int8 base indices of sliding windows (as DirectGkmKernel)."""
+        from gkmsvm.kernels.direct import DirectGkmKernel
+
+        return DirectGkmKernel.base_index_windows(self, x)
+
+    def _packed_exact(self, x) -> bool:
+        """The packed path is exact only without N (all-zero) positions.
+
+        Packing maps N to A, while this kernel's one-hot path lets N match
+        nothing.
+        """
+        return not bool((x.max(axis=1) == 0).any())
+
+    def _packed(self, x):
+        from gkmsvm.backend import is_gpu, is_mlx, to_cpu
+        from gkmsvm.kernels.direct import _pack_windows_cpu, _pack_windows_uint32
+
+        xp = get_array_module(x)
+        bw = self.base_index_windows(x)
+        if is_gpu(bw) and not is_mlx(bw):
+            return _pack_windows_uint32(bw, xp)
+        return _pack_windows_cpu(np.ascontiguousarray(to_cpu(bw)))
+
+    def _masked_pairwise(self, x, y):
+        """Masked-join K_raw(x, y), or None when it doesn't apply."""
+        from gkmsvm.backend import is_gpu, is_mlx
+        from gkmsvm.kernels.direct import _MASKED_MIN_ROWS
+
+        plan = self._masked_plan()
+        if (plan is None or min(x.shape[0], y.shape[0]) < _MASKED_MIN_ROWS
+                or not (self._packed_exact(x) and self._packed_exact(y))):
+            return None
+        bx, by = self._packed(x), self._packed(y)
+        by_rc = self._packed(reverse_complement(y)) if self.include_rc else None
+        if is_mlx(x):
+            import mlx.core as mx
+
+            from gkmsvm.kernels.masked import masked_pairwise_mlx
+
+            return mx.array(masked_pairwise_mlx(bx, by, plan, by_rc).astype(np.float32))
+        if is_gpu(bx):
+            from gkmsvm.kernels.masked import masked_pairwise_gpu
+
+            return masked_pairwise_gpu(bx, by, plan, by_rc)
+        from gkmsvm.kernels.masked import masked_pairwise
+
+        return masked_pairwise(bx, by, plan, by_rc)
+
+    def _masked_diagonal(self, x):
+        """Masked-join K_raw(x, x) (computed on CPU), or None when it doesn't apply."""
+        from gkmsvm.backend import to_cpu
+        from gkmsvm.kernels.masked import masked_self_kernel
+
+        plan = self._masked_plan()
+        if plan is None or not self._packed_exact(x):
+            return None
+        xc = to_cpu(x)
+        brc = self._packed(reverse_complement(xc)) if self.include_rc else None
+        return masked_self_kernel(self._packed(xc), plan, brc)
+
     def _raw_pairwise(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
         xp = get_array_module(x)
+        masked = self._masked_pairwise(x, y)
+        if masked is not None:
+            return masked.astype(x.dtype)
         pw = xp.asarray(self._pos_weights).astype(x.dtype)
         matches = self._per_position_matches(x, y)
         result = _weighted_kernel_from_matches(matches, pw, self.k)
@@ -162,6 +242,9 @@ class CenterWeightedGkmKernel(GkmKernel):
                 chunks.append(self._raw_diagonal(x[start:end]))
             return xp.concatenate(chunks)
 
+        masked = self._masked_diagonal(x)
+        if masked is not None:
+            return xp.asarray(masked).astype(x.dtype)
         pw = xp.asarray(self._pos_weights).astype(x.dtype)
         matches = self._per_position_self_matches(x)
         result = _weighted_kernel_from_matches(matches, pw, self.k)

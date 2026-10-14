@@ -13,6 +13,10 @@ from gkmsvm.kernels.base import GkmKernel
 # Numba-accelerated kernels
 # ---------------------------------------------------------------------------
 
+# Below this many query or column sequences, the masked join's per-call index
+# build costs more than it saves (e.g. single SMO columns)
+_MASKED_MIN_ROWS = 16
+
 
 @njit(parallel=True, cache=True, fastmath=True)
 def _fused_pairwise_numba(wx, wy, table):
@@ -750,6 +754,24 @@ class DirectGkmKernel(GkmKernel):
         )
         self._min_matches = self._get_min_matches()
 
+    # CPU: use the masked-join kernel (kernels/masked.py) when it applies.
+    # Set False to force the brute-force loop (e.g. as a test oracle).
+    use_masked = True
+
+    def _join_plan(self):
+        """Mask plan for this kernel's table, or None without a mismatch cutoff."""
+        from gkmsvm.kernels.masked import mask_plan
+
+        return mask_plan(tuple(self._mismatch_table), self.l, self._min_matches)
+
+    def _masked_plan(self):
+        """_join_plan() for the pairwise kernel, unless use_masked is off."""
+        return self._join_plan() if self.use_masked else None
+
+    def _packed_exact(self, x) -> bool:
+        """The packed path defines this kernel, so it always applies."""
+        return True
+
     def _get_min_matches(self) -> int:
         """Minimum match count that yields a non-zero table entry."""
         for m in range(len(self._mismatch_table) - 1, -1, -1):
@@ -861,6 +883,12 @@ class DirectGkmKernel(GkmKernel):
                 if by_packed_t is not None
                 else _pack_windows_cpu(np.ascontiguousarray(by))
             )
+            plan = self._masked_plan()
+            if (plan is not None and bx_packed.shape[0] >= _MASKED_MIN_ROWS
+                    and by_packed.shape[0] >= _MASKED_MIN_ROWS):
+                from gkmsvm.kernels.masked import masked_pairwise
+
+                return masked_pairwise(bx_packed, by_packed, plan)
             fn = (_fused_pairwise_packed_sym_numba if symmetric
                   else _fused_pairwise_packed_numba)
             return fn(
@@ -882,6 +910,15 @@ class DirectGkmKernel(GkmKernel):
                 by_packed = xp.asarray(
                     _pack_windows_cpu(np.ascontiguousarray(to_cpu(by)))
                 )
+            plan = self._masked_plan()
+            if (plan is not None and bx_packed.shape[0] >= _MASKED_MIN_ROWS
+                    and by_packed.shape[0] >= _MASKED_MIN_ROWS):
+                from gkmsvm.kernels.masked import masked_pairwise_mlx
+
+                # Exact integer counts combined in float64; Metal holds float32
+                return xp.asarray(
+                    masked_pairwise_mlx(bx_packed, by_packed, plan).astype(np.float32)
+                )
             return _fused_pairwise_packed_mlx(
                 bx_packed,
                 by_packed,
@@ -890,6 +927,17 @@ class DirectGkmKernel(GkmKernel):
                 self._min_matches,
                 xp,
             )
+        plan = self._masked_plan()
+        n_rows = bx_packed.shape[0] if bx_packed is not None else bx.shape[0]
+        n_cols = by_packed_t.shape[1] if by_packed_t is not None else by.shape[0]
+        if plan is not None and min(n_rows, n_cols) >= _MASKED_MIN_ROWS:
+            from gkmsvm.kernels.masked import masked_pairwise_gpu
+
+            if bx_packed is None:
+                bx_packed = _pack_windows_uint32(xp.asarray(bx), xp)
+            by_packed = (xp.ascontiguousarray(by_packed_t.T) if by_packed_t is not None
+                         else _pack_windows_uint32(xp.asarray(by), xp))
+            return masked_pairwise_gpu(bx_packed, by_packed, plan)
         return _fused_pairwise_idx_gpu(
             bx,
             by,

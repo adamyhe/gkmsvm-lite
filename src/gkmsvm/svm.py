@@ -159,6 +159,12 @@ class GkmSVM:
         self._sv_rc_idx_windows: np.ndarray | None = None
         self._sv_packed_t: np.ndarray | None = None
         self._sv_rc_packed_t: np.ndarray | None = None
+        # Exact l-mer weight table for non-RBF kernels (lmer_table.py):
+        # "auto" uses it when it applies and there are enough SVs to pay for
+        # building it; True/False force it on or off
+        self.use_lmer_table: bool | str = "auto"
+        self._lmer_table: np.ndarray | bool | None = None
+        self._lmer_table_dev = None
         self._on_gpu = False
         self._on_mlx = False
 
@@ -198,6 +204,7 @@ class GkmSVM:
         self._sv_rc_idx_windows = None
         self._sv_packed_t = None
         self._sv_rc_packed_t = None
+        self._lmer_table_dev = None
         if had_mlx:
             try:
                 import mlx.core as mx
@@ -369,6 +376,75 @@ class GkmSVM:
         x = self._match_device(x)
         return self._score_unbatched(x, verbose=verbose)
 
+    # "auto" builds the l-mer table only for models at least this large
+    _LMER_TABLE_MIN_SVS = 500
+
+    def _build_lmer_table(self) -> np.ndarray | None:
+        """Exact table w(u) = sum_sv c_sv K_raw(u, sv) over packed l-mers (cached).
+
+        None when the kernel has no table (RBF, weighted, no mismatch
+        cutoff, l > lmer_table.MAX_TABLE_L).
+        """
+        if self._lmer_table is None:
+            from gkmsvm.kernels.direct import _pack_windows_cpu
+            from gkmsvm.lmer_table import build_lmer_table
+
+            kernel = self.kernel
+            if not hasattr(kernel, "_join_plan"):
+                self._lmer_table = False
+                return None
+            sv = to_cpu(self.support_sequences).astype(np.float64)
+
+            def pack(a):
+                return _pack_windows_cpu(np.ascontiguousarray(kernel.base_index_windows(a)))
+
+            coef = to_cpu(self.coefficients).astype(np.float64)
+            if kernel.normalize:
+                diag = to_cpu(kernel._raw_diagonal(sv, chunk_size=1000)).astype(np.float64)
+                coef = coef / np.sqrt(np.clip(diag, 1e-10, None))
+            rc = pack(reverse_complement(sv)) if kernel.include_rc else None
+            table = build_lmer_table(kernel, pack(sv), rc, coef)
+            self._lmer_table = False if table is None else table
+        return None if self._lmer_table is False else self._lmer_table
+
+    def _lmer_table_for(self, xp):
+        """The l-mer table on xp's device, or None when it doesn't apply."""
+        use = self.use_lmer_table
+        if use is False or not hasattr(self.kernel, "_join_plan"):
+            return None
+        if use == "auto" and self.num_support_vectors < self._LMER_TABLE_MIN_SVS:
+            return None
+        table = self._build_lmer_table()
+        if table is None:
+            return None
+        if xp is np:
+            return self._lmer_table
+        if self._lmer_table_dev is None or get_array_module(self._lmer_table_dev) is not xp:
+            # Metal has no float64: MLX gets a float32 copy (scores are float32 there)
+            table = (self._lmer_table.astype(np.float32)
+                     if getattr(xp, "__name__", "") == "mlx.core" else self._lmer_table)
+            self._lmer_table_dev = xp.asarray(table)
+        return self._lmer_table_dev
+
+    def _score_lmer_table(self, x, table):
+        """f(x) = sum of table weights over x's windows / sqrt(K(x, x)) + b."""
+        from gkmsvm.kernels.direct import _pack_windows_cpu, _pack_windows_uint32
+
+        xp = get_array_module(x)
+        kernel = self.kernel
+        bx = kernel.base_index_windows(x)
+        if xp is np:
+            packed = _pack_windows_cpu(np.ascontiguousarray(bx))
+        elif is_mlx(bx):
+            packed = xp.asarray(_pack_windows_cpu(np.ascontiguousarray(to_cpu(bx))))
+        else:
+            packed = _pack_windows_uint32(bx, xp)
+        raw = table[packed].sum(axis=1)
+        if kernel.normalize:
+            diag_x = kernel._raw_diagonal(x).astype(raw.dtype)
+            raw = raw / xp.sqrt(xp.clip(diag_x, 1e-10, None))
+        return raw.astype(x.dtype)[:, None] + self.bias
+
     def _score_unbatched(
         self, x: np.ndarray, *, verbose: bool = False,
     ) -> np.ndarray:
@@ -378,6 +454,10 @@ class GkmSVM:
         chunk = self.sv_chunk_size
         kernel = self.kernel
         do_norm = kernel.normalize
+
+        table = self._lmer_table_for(xp)
+        if table is not None and kernel._packed_exact(x):
+            return self._score_lmer_table(x, table)
 
         if do_norm:
             diag_x = kernel._raw_diagonal(x)
@@ -516,6 +596,53 @@ class GkmSVM:
 
     _MAX_LMER_TABLE_L = 14  # 4^14 ≈ 268M entries, ~1 GB
 
+    def _deltasvm_weights_from_table(self, table, query_norm: bool) -> np.ndarray:
+        """DeltaSVM weights (first base most significant) from the packed table.
+
+        query_norm divides each weight by the l-mer's own self-kernel,
+        h(0) (+ h(m(u, rc u)) with RC), as scoring that l-mer alone would.
+        """
+        kernel = self.kernel
+        l = kernel.l
+        # Packed index has position k in digit k (low first); DeltaSVM's has
+        # position 0 most significant, so reverse the digit order
+        w = table.reshape((4,) * l).transpose(tuple(range(l - 1, -1, -1))).ravel()
+        if query_norm and kernel.normalize:
+            w = w / np.sqrt(np.clip(self._lmer_self_kernels(), 1e-10, None))
+        return w.astype(np.float32)
+
+    def _lmer_self_kernels(self) -> np.ndarray:
+        """K_raw(u, u) for every l-mer u, in DeltaSVM index order.
+
+        The identical pair plus, with RC, the pair (u, rc u), which agrees at
+        positions p where u_p is the complement of u_{l-1-p}.
+        """
+        from gkmsvm.kernels.weighted import CenterWeightedGkmKernel, _elementary_symmetric_k
+
+        kernel = self.kernel
+        l = kernel.l
+        idx = np.arange(4 ** l)
+        digits = (idx[:, None] // 4 ** np.arange(l - 1, -1, -1)) % 4  # [:, p] = base at p
+        agree = digits == 3 - digits[:, ::-1]
+        if isinstance(kernel, CenterWeightedGkmKernel):
+            w = kernel._pos_weights
+            self_k = np.full(len(idx), _elementary_symmetric_k(w, kernel.k))
+            if kernel.include_rc:
+                # e_k of the weights at agreeing positions, per l-mer
+                dp = np.zeros((len(idx), kernel.k + 1))
+                dp[:, 0] = 1.0
+                for p in range(l):
+                    v = agree[:, p] * w[p]
+                    for j in range(min(p + 1, kernel.k), 0, -1):
+                        dp[:, j] += v * dp[:, j - 1]
+                self_k = self_k + dp[:, kernel.k]
+            return self_k
+        h = np.asarray(kernel._mismatch_table, dtype=np.float64)
+        self_k = np.full(len(idx), h[0])
+        if kernel.include_rc:
+            self_k = self_k + h[(~agree).sum(axis=1)]
+        return self_k
+
     def to_deltasvm(
         self, *, device: str = "cpu", query_norm: bool = False,
         verbose: bool = False,
@@ -555,8 +682,13 @@ class GkmSVM:
                 f"{4**l * 4 / 1e9:.1f} GB). Got l={l}."
             )
 
-        was_on_gpu = self._on_gpu
-        was_on_mlx = self._on_mlx
+        table = self._build_lmer_table()
+        if table is not None:
+            weights = self._deltasvm_weights_from_table(table, query_norm)
+            return DeltaSVM(
+                weights, l, l,
+                include_rc=False, bias=self.bias, device=device,
+            )
 
         n_lmers = 4**l
         weights = np.zeros(n_lmers, dtype=np.float32)
@@ -591,7 +723,11 @@ class GkmSVM:
 
         saved_norm = kernel.normalize
         saved_coefs = self.coefficients
+        saved_use_table = self.use_lmer_table
         coef_dtype = to_cpu(saved_coefs).dtype
+        # The loop below scores through self() with a modified kernel and
+        # coefficients; keep it off the cached l-mer table
+        self.use_lmer_table = False
         if not query_norm:
             kernel.normalize = False
             self.coefficients = self._match_device(
@@ -613,6 +749,7 @@ class GkmSVM:
         finally:
             kernel.normalize = saved_norm
             self.coefficients = saved_coefs
+            self.use_lmer_table = saved_use_table
 
         result = DeltaSVM(
             weights, l, l,
