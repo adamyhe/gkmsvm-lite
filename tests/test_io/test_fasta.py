@@ -66,3 +66,49 @@ class TestWriteFasta:
         text = p.read_text()
         lines = text.strip().split("\n")
         assert lines[1:] == ["ACGT", "ACGT", "ACGT"]
+
+
+class TestExtractLoci:
+    @pytest.fixture
+    def genome(self, tmp_path):
+        p = tmp_path / "genome.fa"
+        p.write_text(">chr1\nACGTACGTAC\nGTACGTACGT\n>chr2\nNNACGTNNAC\n")
+        return p
+
+    def test_mask_marks_dropped_loci(self, genome):
+        pd = pytest.importorskip("pandas")
+        from gkmsvm.fasta import extract_loci
+
+        loci = pd.DataFrame({
+            "chrom": ["chr1", "chr1", "chr1", "chr3", "chr2"],
+            "start": [4, 0, 18, 4, 4],
+            "end": [6, 2, 20, 6, 6],
+        })
+        X, mask = extract_loci(loci, genome, in_window=4, return_mask=True)
+        # Second and third run off chr1, fourth is not in the genome.
+        assert mask.tolist() == [True, False, False, False, True]
+        assert X.shape == (2, 4, 4)
+        assert X[0].argmax(axis=0).tolist() == [3, 0, 1, 2]  # TACG
+        assert X[1].sum(axis=0).tolist() == [1, 1, 1, 0]  # CGTN
+
+    def test_mask_covers_chroms_filter(self, genome):
+        pd = pytest.importorskip("pandas")
+        from gkmsvm.fasta import extract_loci
+
+        loci = pd.DataFrame({
+            "chrom": ["chr2", "chr1"], "start": [4, 4], "end": [6, 6],
+        })
+        X, mask = extract_loci(
+            loci, genome, in_window=4, chroms=["chr1"], return_mask=True
+        )
+        assert mask.tolist() == [False, True]
+        assert len(loci[mask]) == len(X) == 1
+
+    def test_default_returns_sequences_only(self, genome):
+        pd = pytest.importorskip("pandas")
+        from gkmsvm.fasta import extract_loci
+
+        loci = pd.DataFrame({"chrom": ["chr1"], "start": [0], "end": [2]})
+        out = extract_loci(loci, genome, in_window=4)
+        assert len(out) == 1
+        assert out[0].shape == (0, 4, 4)
