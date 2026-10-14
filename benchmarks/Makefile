@@ -10,6 +10,9 @@
 # rerun after a fix only recomputes the affected panels. Force one with
 # `make -B <target>` or by deleting its file.
 
+# Per-host settings (LSGKM_BIN, THREADS, DEVICE, ...); not committed
+-include local.mk
+
 PY            ?= python
 DEVICE        ?= cuda
 LSGKM_ENV     ?= lsgkm
