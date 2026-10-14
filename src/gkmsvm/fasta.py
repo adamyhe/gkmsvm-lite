@@ -97,6 +97,7 @@ def extract_loci(
     *,
     in_window: int = 2114,
     chroms: list[str] | None = None,
+    return_mask: bool = False,
     **kwargs,
 ) -> tuple:
     """Extract one-hot encoded sequences from genomic coordinates.
@@ -104,14 +105,21 @@ def extract_loci(
     Requires pyfaidx. Accepts BED file paths or DataFrames for loci,
     and FASTA path for sequences.
 
+    Loci on chromosomes outside ``chroms`` or missing from ``sequences``, and
+    loci whose window runs off a chromosome end, are dropped.
+
     Args:
         loci: BED file path or DataFrame.
         sequences: Genome FASTA path or pyfaidx.Fasta object.
         in_window: Sequence window size to extract (centered on locus).
         chroms: Restrict to these chromosomes.
+        return_mask: Also return a boolean mask over the input loci, True
+            for each locus kept. ``loci[mask]`` lines up with the returned
+            sequences.
 
     Returns:
-        Tuple of (sequences_array, ...).
+        ``(sequences_array,)``, or ``(sequences_array, mask)`` when
+        ``return_mask`` is True.
     """
     try:
         import pandas as pd
@@ -131,32 +139,35 @@ def extract_loci(
             usecols=[0, 1, 2],
         )
 
-    if chroms is not None:
-        loci = loci[loci["chrom"].isin(chroms)]
-
+    mask = np.zeros(len(loci), dtype=bool)
     results = []
-    for _, row in loci.iterrows():
-        chrom = row["chrom"]
-        mid = (row["start"] + row["end"]) // 2
-        start = mid - in_window // 2
-        end = start + in_window
-
+    for i, (chrom, start, end) in enumerate(
+        zip(loci["chrom"], loci["start"], loci["end"])
+    ):
+        if chroms is not None and chrom not in chroms:
+            continue
         if chrom not in sequences:
             continue
 
-        seq = str(sequences[chrom][start:end]).upper()
-        if len(seq) != in_window:
+        mid = (start + end) // 2
+        start = mid - in_window // 2
+        end = start + in_window
+        if start < 0 or end > len(sequences[chrom]):
             continue
 
+        seq = str(sequences[chrom][start:end]).upper()
         arr = np.zeros((4, in_window), dtype=np.float32)
-        for i, base in enumerate(seq):
+        for j, base in enumerate(seq):
             idx = _BASE_TO_IDX.get(base)
             if idx is not None:
-                arr[idx, i] = 1.0
+                arr[idx, j] = 1.0
 
         results.append(arr)
+        mask[i] = True
 
-    if not results:
-        return (np.zeros((0, 4, in_window), dtype=np.float32),)
+    if results:
+        X = np.stack(results)
+    else:
+        X = np.zeros((0, 4, in_window), dtype=np.float32)
 
-    return (np.stack(results),)
+    return (X, mask) if return_mask else (X,)
