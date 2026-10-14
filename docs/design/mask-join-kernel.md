@@ -1,6 +1,6 @@
 # Masked-join gkm kernel: handoff
 
-Status: design, not started. Branch: `mask-join-kernel` (off `benchmarks` at `6bad352`).
+Status: design, not started. Branch: `mask-join-kernel` (off `main` at `67da231`, which includes the benchmark pipeline).
 
 ## Goal
 
@@ -19,7 +19,7 @@ LS-GKM computes the same kernel with a k-mer tree that abandons a branch beyond 
 | 2,000 | 22.3 s | 56.8 s | 1.8 s | 12× |
 | 5,000 | 75.4 s | 353 s | 8.9 s | 8.5× |
 
-Fitted time ∝ N^b between 2k and 5k: LS-GKM b = 1.33, lite GPU b = 1.74 (heading to 2), lite CPU b = 1.99. Extrapolated to the full GM12878 set (~45k), the GPU's lead falls to 2–3.5×, and the CPU is ~10× slower than LS-GKM. Diagonal-tile symmetry (already on `benchmarks`) and a pigeonhole filter (`benchmarks/dev/pigeonhole_gram.py`, 1.5–2.2×) shift the curve but don't change its slope.
+Fitted time ∝ N^b between 2k and 5k: LS-GKM b = 1.33, lite GPU b = 1.74 (heading to 2), lite CPU b = 1.99. Extrapolated to the full GM12878 set (~45k), the GPU's lead falls to 2–3.5×, and the CPU is ~10× slower than LS-GKM. Diagonal-tile symmetry (already on `main`) and a pigeonhole filter (`benchmarks/dev/pigeonhole_gram.py`, 1.5–2.2×) shift the curve but don't change its slope.
 
 ## The identity
 
