@@ -16,6 +16,15 @@ class OptionalBuildExt(build_ext):
             self._warn_failed()
 
     def build_extension(self, ext):
+        # conda-forge Python repeats its -rpath in LDSHARED and LDFLAGS, and
+        # newer macOS dyld refuses to load a library with duplicate LC_RPATHs.
+        linker = getattr(self.compiler, "linker_so", None)
+        if linker:
+            seen = set()
+            self.compiler.linker_so = [
+                arg for arg in linker
+                if not (arg.startswith("-Wl,-rpath,") and (arg in seen or seen.add(arg)))
+            ]
         try:
             super().build_extension(ext)
         except Exception:
