@@ -13,6 +13,10 @@ from gkmsvm.kernels.base import GkmKernel
 # Numba-accelerated kernels
 # ---------------------------------------------------------------------------
 
+# Below this many query or column sequences, the masked join's per-call index
+# build costs more than it saves (e.g. single SMO columns)
+_MASKED_MIN_ROWS = 16
+
 
 @njit(parallel=True, cache=True, fastmath=True)
 def _fused_pairwise_numba(wx, wy, table):
@@ -750,6 +754,18 @@ class DirectGkmKernel(GkmKernel):
         )
         self._min_matches = self._get_min_matches()
 
+    # CPU: use the masked-join kernel (kernels/masked.py) when it applies.
+    # Set False to force the brute-force loop (e.g. as a test oracle).
+    use_masked = True
+
+    def _masked_plan(self):
+        """Masked-join plan for this kernel's table, or None to use brute force."""
+        if not self.use_masked:
+            return None
+        from gkmsvm.kernels.masked import mask_plan
+
+        return mask_plan(tuple(self._mismatch_table), self.l, self._min_matches)
+
     def _get_min_matches(self) -> int:
         """Minimum match count that yields a non-zero table entry."""
         for m in range(len(self._mismatch_table) - 1, -1, -1):
@@ -861,6 +877,12 @@ class DirectGkmKernel(GkmKernel):
                 if by_packed_t is not None
                 else _pack_windows_cpu(np.ascontiguousarray(by))
             )
+            plan = self._masked_plan()
+            if (plan is not None and bx_packed.shape[0] >= _MASKED_MIN_ROWS
+                    and by_packed.shape[0] >= _MASKED_MIN_ROWS):
+                from gkmsvm.kernels.masked import masked_pairwise
+
+                return masked_pairwise(bx_packed, by_packed, plan)
             fn = (_fused_pairwise_packed_sym_numba if symmetric
                   else _fused_pairwise_packed_numba)
             return fn(
