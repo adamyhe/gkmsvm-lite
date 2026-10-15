@@ -51,7 +51,8 @@ def test_index_skips_padding():
     index = lmer_index.LmerIndex(kernel, *kernel.pack_both(Y))
     bx = kernel.pack(_onehot(3, 20, rng))
     padded = np.concatenate([bx, np.full((3, 5), PAD_WINDOW, dtype=np.uint32)], axis=1)
-    np.testing.assert_array_equal(index.pairwise(padded), index.pairwise(bx))
+    # Padding shifts the per-thread window chunks, so only the summation order differs
+    np.testing.assert_allclose(index.pairwise(padded), index.pairwise(bx), rtol=1e-12, atol=0)
 
 
 def test_applies():
