@@ -95,6 +95,49 @@ def _query_cpu(bx, offsets, ids, masks, weights, n_lmers, S, n_split):
     return part.reshape(B, n_split, S).sum(axis=1)
 
 
+@njit(parallel=True, cache=True, fastmath={"nsz", "arcp", "contract", "reassoc"})
+def _query_reduce_cpu(bx, offsets, ids, masks, weights, n_lmers, inv_dx, inv_ds, coef,
+                      gamma, n_tasks):
+    """[B]: sum_s coef_s f(K_raw[b, s] * inv_dx[b] * inv_ds[s]), without the [B, S] block.
+
+    f(k) = exp(gamma (k - 1)) when gamma is not NaN (RBF), else k. Each task
+    accumulates one row's hits in a length-S buffer that stays in cache and is
+    zeroed as it is reduced.
+    """
+    B, W = bx.shape
+    S = inv_ds.shape[0]
+    rbf = not np.isnan(gamma)
+    floor = np.exp(-gamma) if rbf else 1.0
+    out = np.zeros(B)
+    for task in prange(n_tasks):
+        acc = np.zeros(S)
+        for b in range(task, B, n_tasks):
+            for i in range(W):
+                w = bx[b, i]
+                for t in range(masks.shape[0]):
+                    v = np.int64(w ^ masks[t])
+                    if v >= n_lmers:  # padding window
+                        continue
+                    wt = weights[t]
+                    for e in range(offsets[v], offsets[v + 1]):
+                        acc[ids[e]] += wt
+            scale = inv_dx[b]
+            total = 0.0
+            if rbf:
+                g = gamma * scale
+                for j in range(S):
+                    total += coef[j] * np.exp(g * acc[j] * inv_ds[j])
+                    acc[j] = 0.0
+                total *= floor
+            else:
+                for j in range(S):
+                    total += coef[j] * acc[j] * inv_ds[j]
+                    acc[j] = 0.0
+                total *= scale
+            out[b] = total
+    return out
+
+
 _CUDA_SRC = r"""
 extern "C" __global__ void lmer_index_query(
     const unsigned int* __restrict__ bx, int W, long long n_items,
@@ -180,6 +223,21 @@ class LmerIndex:
         if dev == "cuda":
             return self._pairwise_cuda(bx)
         return self._pairwise_mlx(bx)
+
+    def reduce(self, bx, inv_dx, inv_ds, coef, gamma=np.nan):
+        """sum_s coef_s f(K_raw(row, s) inv_dx[row] inv_ds[s]) [B] for CPU rows bx.
+
+        f is exp(gamma (k - 1)) when gamma is given (RBF), else identity.
+        The same as reducing pairwise(bx), without materializing it.
+        """
+        import numba
+
+        bx = np.ascontiguousarray(bx)
+        return _query_reduce_cpu(bx, self.offsets, self.ids, self.masks, self.weights,
+                                 self.n_lmers, np.ascontiguousarray(inv_dx, dtype=np.float64),
+                                 np.ascontiguousarray(inv_ds, dtype=np.float64),
+                                 np.ascontiguousarray(coef, dtype=np.float64), float(gamma),
+                                 max(1, min(bx.shape[0], 4 * numba.get_num_threads())))
 
     def _arrays(self, dev):
         if dev not in self._dev:
