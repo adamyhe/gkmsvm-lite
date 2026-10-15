@@ -47,6 +47,7 @@ from _common import (
     gpu_sync,
     lsgkm_binary,
     lsgkm_default_threads,
+    lsgkm_has_option,
     read_seqs,
     run_measured,
     set_cpu_threads,
@@ -67,6 +68,8 @@ def _subset_model(full, idx, kernel: str):
     from gkmsvm import GkmSVM
 
     kernel_type, extra = KERNELS[kernel]
+    # Positive-coefficient SVs first, as LIBSVM-format files list them by class
+    idx = idx[np.argsort(full.coefficients[idx] <= 0, kind="stable")]
     return GkmSVM(full.support_sequences[idx], full.coefficients[idx], full.bias,
                   kernel_type, {**full.kernel_params, **extra})
 
@@ -140,6 +143,9 @@ def main():
                                                          args.lsgkm_bin)
     if not args.no_lsgkm and gkmpredict is None:
         sys.exit("gkmpredict not found; pass --lsgkm-bin or --no-lsgkm")
+    # Some builds' gkmpredict has no -T (single-threaded)
+    lsgkm_threads = (args.threads if gkmpredict and lsgkm_has_option(gkmpredict, "-T")
+                     else 1)
 
     full = load_lsgkm_model(MODEL_PATH, dtype=np.float64)
     S = full.num_support_vectors
@@ -169,10 +175,13 @@ def main():
                 if gkmpredict is not None:
                     txt = work / f"{kernel}_{n_sv}.model.txt"
                     model.save(str(txt), fmt="lsgkm")
-                    m = run_measured([gkmpredict, "-T", str(args.threads), str(queries),
-                                      str(txt), str(work / "pred.txt")], timeout=args.timeout)
+                    opts = ["-T", str(lsgkm_threads)] if lsgkm_threads > 1 else []
+                    m = run_measured([gkmpredict, *opts, str(queries), str(txt),
+                                      str(work / "pred.txt")], timeout=args.timeout)
+                    if m.status != "ok":
+                        print(f"  LS-GKM {m.status}: {(m.stderr or m.stdout)[-500:]}")
                     rows.append({**base, "implementation": "LS-GKM", "path": "gkmpredict",
-                                 "device": "cpu", "threads": args.threads,
+                                 "device": "cpu", "threads": lsgkm_threads,
                                  "status": m.status, "first_s": m.wall_s,
                                  "steady_s": m.wall_s, "peak_rss_mb": m.peak_rss_mb})
                     print(f"  LS-GKM: {m.wall_s:.1f}s [{m.status}]")
@@ -203,7 +212,7 @@ def main():
     df = pd.DataFrame(rows)
     df["seqs_per_sec"] = df["n_seqs"] / df["steady_s"]
     write_tsv(args.output, df, "Prediction throughput vs number of SVs", args.device,
-              model=MODEL_PATH.name, lsgkm_threads=args.threads,
+              model=MODEL_PATH.name, lsgkm_threads=lsgkm_threads if gkmpredict else None,
               lite_cpu_threads=lite_threads)
 
 
