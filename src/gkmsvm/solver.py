@@ -232,10 +232,11 @@ def _smo_csolver(kernel, X, y, C, tol, max_iter, cache_size, verbose):
     # 1.0 in state[2N:] for columns in its cache
     state = np.zeros(3 * N, dtype=np.float64)
     in_cache = state[2 * N:]
-    # Batches only pay off for the masked join; with the l-mer index a column
-    # costs one query row, and unrequested prefetches would displace columns
-    batched = cache._use_fast and cache._index is None
-    max_batch = max(1, _SMO_PREFETCH) if batched else 1
+    max_batch = max(1, _SMO_PREFETCH) if cache._use_fast else 1
+    # With the l-mer index a column costs one query row, so prefetch only
+    # fills empty slots: replacing unrequested prefetches would just churn
+    capacity = min(cache_size, N)
+    free_only = cache._index is not None
     lib.csmo_cache_room.restype = _ct.c_int
     lib.csmo_cache_room.argtypes = [_ct.c_void_p]
     lib.csmo_cache_insert.restype = _ct.c_int
@@ -255,6 +256,8 @@ def _smo_csolver(kernel, X, y, C, tol, max_iter, cache_size, verbose):
         extra = []
         if max_batch > 1:
             room = lib.csmo_cache_room(c_cache)  # excludes idx's slot
+            if free_only:
+                room = min(room, capacity - 1 - int(in_cache.sum()))
             if room > 0:
                 fresh = in_cache == 0
                 fresh[idx] = False
