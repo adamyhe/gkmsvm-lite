@@ -195,7 +195,11 @@ def lsgkm_has_option(binary: str, option: str) -> bool:
         out = subprocess.run([binary], capture_output=True, text=True, timeout=30, check=False)
     except (OSError, subprocess.TimeoutExpired):
         return False
-    return f" {option} " in out.stdout + out.stderr
+    import re
+
+    # Usage lines may indent options with tabs: match on any whitespace
+    return re.search(rf"(^|\s){re.escape(option)}(\s|$)", out.stdout + out.stderr,
+                     re.MULTILINE) is not None
 
 
 def lsgkm_version(conda_env: str = "lsgkm") -> str | None:
