@@ -31,17 +31,20 @@ score = model(x)  # [1, 1]
 # Variant effect prediction
 ref = one_hot_encode("ACGTACGTACGTACGT")[None, ...]
 alt = one_hot_encode("ACGTACGAACGTACGT")[None, ...]
-delta = model(alt).item() - model(ref).item()
+delta = model.score_variants(ref, alt)                         # score(alt) - score(ref)
+impact = model.score_variants(ref, alt, method="gkmexplain")   # lsgkm gkmexplain -m 5
 
 # Attribution
-hyp = gkmexplain(model, x, mode=1)   # [1, 4, 16] hypothetical importance
-attr = gkmexplain(model, x, mode=0)  # [1, 4, 16] importance (= mode 1 × input)
-deltas = ism(model, x)                # [1, 4, 16] mutation deltas
+hyp = gkmexplain(model, x, mode="hypothetical")  # [1, 4, 16], -t 0/1/2 models
+attr = gkmexplain(model, x, mode="importance")   # hypothetical × input
+deltas = ism(model, x)                           # [1, 4, 16] mutation deltas, any kernel
 
 # GPU acceleration
-model.cuda()  # NVIDIA (~6x speedup)
-model.mlx()   # Apple Silicon (~2-6x speedup)
+model.cuda()  # NVIDIA
+model.mlx()   # Apple Silicon
 ```
+
+Speed and memory against LS-GKM are in [docs/performance.md](docs/performance.md).
 
 ## Command-line interface
 
@@ -91,7 +94,7 @@ All six LS-GKM kernel types are supported:
 
 | `-t` | Name | Description |
 |------|------|-------------|
-| 0 | gkm | Direct gapped k-mer count |
+| 0 | gkm_cnt | Direct gapped k-mer count |
 | 1 | gkm_estfull | Estimated full l-mer |
 | 2 | gkm_esttrunc | Estimated truncated l-mer (LS-GKM default) |
 | 3 | gkmrbf | RBF-transformed estimated |

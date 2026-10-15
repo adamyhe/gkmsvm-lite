@@ -14,7 +14,7 @@ from itertools import combinations
 import numpy as np
 from numba import njit, prange
 
-from gkmsvm.backend import get_array_module, get_strides, is_gpu, is_mlx, to_cpu, to_gpu, to_mlx
+from gkmsvm.backend import DeviceModel, get_array_module, get_strides
 from gkmsvm.codec import reverse_complement
 
 
@@ -64,7 +64,7 @@ def _index_to_kmer(idx: int, k: int) -> str:
     return "".join(reversed(chars))
 
 
-class DeltaSVM:
+class DeltaSVM(DeviceModel):
     """Linear gapped k-mer scoring model.
 
     Stores a weight table of size 4^k and scores sequences by summing
@@ -72,6 +72,8 @@ class DeltaSVM:
 
     Score = Σ_{windows} Σ_{C(l,k) combos} weight[kmer_index]
     """
+
+    _DEVICE_ARRAYS = ("weights",)
 
     def __init__(
         self,
@@ -94,8 +96,6 @@ class DeltaSVM:
         self.l = l
         self.k = k
         self.include_rc = include_rc
-        self._on_gpu = False
-        self._on_mlx = False
 
         self._combos = np.array(list(combinations(range(l), k)), dtype=np.int64)
         self._powers = 4 ** np.arange(k - 1, -1, -1, dtype=np.int64)
@@ -106,53 +106,6 @@ class DeltaSVM:
     @property
     def num_kmers(self) -> int:
         return int((self.weights != 0).sum())
-
-    def _to_device(self, device: str) -> None:
-        from gkmsvm.backend import HAS_CUPY, HAS_MLX
-        if device in ("cuda", "gpu"):
-            self.cuda()
-        elif device == "mlx":
-            self.mlx()
-        elif device == "auto":
-            if HAS_CUPY:
-                self.cuda()
-            elif HAS_MLX:
-                self.mlx()
-        elif device != "cpu":
-            raise ValueError(
-                f"Unknown device {device!r}. Use 'auto', 'cpu', 'cuda', or 'mlx'."
-            )
-
-    def cuda(self) -> DeltaSVM:
-        """Move model arrays to GPU (CuPy)."""
-        self.weights = to_gpu(self.weights)
-        self._on_gpu = True
-        self._on_mlx = False
-        return self
-
-    def mlx(self) -> DeltaSVM:
-        """Move model arrays to Apple GPU (MLX)."""
-        self.weights = to_mlx(to_cpu(self.weights))
-        self._on_gpu = False
-        self._on_mlx = True
-        return self
-
-    def cpu(self) -> DeltaSVM:
-        """Move model arrays to CPU (NumPy)."""
-        self.weights = to_cpu(self.weights)
-        self._on_gpu = False
-        self._on_mlx = False
-        return self
-
-    def _match_device(self, x: np.ndarray) -> np.ndarray:
-        """Convert input array to match the model's device."""
-        if self._on_gpu and not is_gpu(x):
-            return to_gpu(np.asarray(x) if is_mlx(x) else x)
-        if self._on_mlx and not is_mlx(x):
-            return to_mlx(to_cpu(x) if is_gpu(x) else x)
-        if not self._on_gpu and not self._on_mlx and (is_gpu(x) or is_mlx(x)):
-            return to_cpu(x)
-        return x
 
     def __call__(
         self, x: np.ndarray, *, verbose: bool = False,

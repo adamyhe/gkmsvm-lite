@@ -53,20 +53,6 @@ class PackedGkmKernel(GkmKernel):
         """Whether the packed path is exact for x (always, unless overridden)."""
         return True
 
-    def base_index_windows(self, x: np.ndarray) -> np.ndarray:
-        """[B, W, l] int8 base indices (0-3) of the length-l windows."""
-        from gkmsvm.backend import get_strides
-
-        xp = get_array_module(x)
-        B, _, L = x.shape
-        self._check_length(L)
-        W = L - self.l + 1
-        base_idx = xp.argmax(x, axis=1).astype(xp.int8)  # [B, L]
-        s = get_strides(base_idx)
-        bw = xp.lib.stride_tricks.as_strided(base_idx, shape=(B, W, self.l),
-                                             strides=(s[0], s[1], s[1]))
-        return xp.ascontiguousarray(bw)
-
     def _check_length(self, L: int) -> None:
         if L < self.l:
             raise ValueError(f"Sequence length {L} is shorter than window length {self.l}")

@@ -44,8 +44,8 @@ gkmsvm train -p positive.fa -n negative.fa -o model.npz -t estimated -l 11 -k 7 
 | `-k` | K informative positions (default: 7) |
 | `-d` | Max mismatches (default: 3) |
 | `-C` | Regularization parameter (default: 1.0) |
-| `--solver` | `auto`, `smo`, or `libsvm` (default: auto) |
-| `--cache-size` | SMO cache columns (default: 256) |
+| `--solver` | `auto`, `libsvm`, `smo`, or `nystrom` (default: auto: libsvm if the Gram fits in RAM, else smo) |
+| `--cache-size` | SMO kernel-column cache size (default: sized from available RAM) |
 | `--no-rc` | Disable reverse complement |
 | `--gamma` | RBF gamma for `-t 3`, `-t 5` (default: 1.0) |
 | `-M` | Center-weight window for `-t 4`, `-t 5` |
@@ -68,12 +68,13 @@ gkmsvm trainsvr -i sequences.fa --labels values.txt -o model.npz -C 1.0 --epsilo
 | `--labels` | Labels file (one value per line, same order as FASTA) |
 | `-o`, `--output` | Output model |
 | `--epsilon` | SVR epsilon / tube width (default: 0.1) |
+| `--solver` | `auto`, `libsvm`, or `nystrom` (default: auto) |
 
-Accepts the same kernel and device options as `train`. SVR currently uses the precomputed Gram solver only (`solver="smo"` is not yet supported for SVR), so training dataset size is bounded by available memory.
+Accepts the same kernel and device options as `train`. SVR uses the precomputed Gram (or Nyström); SMO is not implemented for SVR, so training dataset size is bounded by available memory.
 
 ## explain
 
-Compute GkmExplain attribution scores. Outputs two `.npz` files directly usable with [TF-MoDISco](https://github.com/jmschrei/tfmodisco-lite).
+Compute GkmExplain hypothetical attribution scores (`-t 0/1/2` models). Outputs two `.npz` files directly usable with [TF-MoDISco](https://github.com/jmschrei/tfmodisco-lite).
 
 ```bash
 gkmsvm explain -m model.npz -i sequences.fa -o attr.npz -s seqs.npz --device cuda
@@ -110,7 +111,7 @@ gkmsvm ism -m model.npz -i sequences.fa -o ism_results.npz --device cuda
 
 ## score-variants
 
-Score variant effects: `score(alt) - score(ref)`.
+Score variant effects: `score(alt) - score(ref)`, or the GkmExplain mutation impact.
 
 ```bash
 gkmsvm score-variants -m model.npz --ref ref.fa --alt alt.fa -o deltas.tsv
@@ -122,6 +123,7 @@ gkmsvm score-variants -m model.npz --ref ref.fa --alt alt.fa -o deltas.tsv
 | `--ref` | Reference sequences FASTA |
 | `--alt` | Alternate sequences FASTA (same order as ref) |
 | `-o`, `--output` | Output TSV (default: stdout) |
+| `--method` | `kernel` (score delta, default) or `gkmexplain` (mutation impact, lsgkm `gkmexplain -m 5`) |
 | `--device` | Compute device (default: auto) |
 
 ## deltasvm
@@ -153,6 +155,10 @@ gkmsvm to-deltasvm -m model.npz -o weights.txt
 |---|---|
 | `-m`, `--model` | Model file |
 | `-o`, `--output` | Output DeltaSVM weight file |
+| `--query-norm` | Keep each l-mer's normalization: weights = `gkmpredict` on the l-mer minus bias, as lsgkm deltaSVM weights (implied for RBF models) |
+| `--device` | Compute device (default: auto) |
+
+`-t 0/1/2/4` models with l <= 12 convert from the exact l-mer table in seconds; RBF models score all 4^l l-mers through the kernel, which takes minutes for a large model.
 
 ## import
 

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 from numba import njit, prange
 
-from gkmsvm.backend import get_array_module, is_gpu, is_mlx, to_cpu, to_gpu, to_mlx
-from gkmsvm.kernels.base import GkmKernel
+from gkmsvm.backend import DeviceModel, get_array_module, to_cpu
 from gkmsvm.kernels.direct import DirectGkmKernel
 from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
 from gkmsvm.kernels.packed import PackedGkmKernel
@@ -13,6 +14,9 @@ from gkmsvm.kernels.weighted import (
     CenterWeightedGkmKernel,
     CenterWeightedRbfGkmKernel,
 )
+
+if TYPE_CHECKING:
+    from gkmsvm.deltasvm import DeltaSVM
 
 
 @njit(parallel=True, cache=True)
@@ -136,7 +140,7 @@ def resolve_kernel_type(kernel_type: str | int) -> str:
     )
 
 
-class GkmSVM:
+class GkmSVM(DeviceModel):
     """Gapped k-mer SVM model for sequence classification.
 
     Stores support sequences, signed dual coefficients, bias, and kernel
@@ -144,6 +148,8 @@ class GkmSVM:
 
     Score = sum_i(coef_i * K(x, sv_i)) + bias
     """
+
+    _DEVICE_ARRAYS = ("support_sequences", "coefficients")
 
     def __init__(
         self,
@@ -189,28 +195,9 @@ class GkmSVM:
         self.use_lmer_table: bool | str = "auto"
         self._lmer_table: np.ndarray | bool | None = None
         self._lmer_table_dev = None
-        self._on_gpu = False
-        self._on_mlx = False
 
         if device != "cpu":
             self._to_device(device)
-
-    def _to_device(self, device: str) -> None:
-        """Move model to the specified device."""
-        from gkmsvm.backend import HAS_CUPY, HAS_MLX
-        if device in ("cuda", "gpu"):
-            self.cuda()
-        elif device == "mlx":
-            self.mlx()
-        elif device == "auto":
-            if HAS_CUPY:
-                self.cuda()
-            elif HAS_MLX:
-                self.mlx()
-        elif device != "cpu":
-            raise ValueError(
-                f"Unknown device {device!r}. Use 'auto', 'cpu', 'cuda', or 'mlx'."
-            )
 
     @property
     def num_support_vectors(self) -> int:
@@ -220,60 +207,23 @@ class GkmSVM:
     def kernel_params(self) -> dict:
         return dict(self._kernel_params)
 
-    def _invalidate_caches(self):
-        had_gpu, had_mlx = self._on_gpu, self._on_mlx
+    def _on_device_move(self) -> None:
+        """Drop device caches and free the old device's memory pool."""
         self._sv_cache = {}
         self._lmer_table_dev = None
-        if had_mlx:
+        if self._on_mlx:
             try:
                 import mlx.core as mx
                 mx.clear_cache()
             except (ImportError, AttributeError):
                 pass
-        if had_gpu:
+        if self._on_gpu:
             try:
                 import cupy as cp
                 cp.get_default_memory_pool().free_all_blocks()
                 cp.get_default_pinned_memory_pool().free_all_blocks()
             except (ImportError, AttributeError):
                 pass
-
-    def cuda(self) -> GkmSVM:
-        """Move model arrays to GPU (CuPy)."""
-        self.support_sequences = to_gpu(self.support_sequences)
-        self.coefficients = to_gpu(self.coefficients)
-        self._invalidate_caches()
-        self._on_gpu = True
-        self._on_mlx = False
-        return self
-
-    def mlx(self) -> GkmSVM:
-        """Move model arrays to Apple GPU (MLX)."""
-        self.support_sequences = to_mlx(to_cpu(self.support_sequences))
-        self.coefficients = to_mlx(to_cpu(self.coefficients))
-        self._invalidate_caches()
-        self._on_gpu = False
-        self._on_mlx = True
-        return self
-
-    def cpu(self) -> GkmSVM:
-        """Move model arrays to CPU (NumPy)."""
-        self.support_sequences = to_cpu(self.support_sequences)
-        self.coefficients = to_cpu(self.coefficients)
-        self._invalidate_caches()
-        self._on_gpu = False
-        self._on_mlx = False
-        return self
-
-    def _match_device(self, x: np.ndarray) -> np.ndarray:
-        """Convert input array to match the model's device."""
-        if self._on_gpu and not is_gpu(x):
-            return to_gpu(np.asarray(x) if is_mlx(x) else x)
-        if self._on_mlx and not is_mlx(x):
-            return to_mlx(to_cpu(x) if is_gpu(x) else x)
-        if not self._on_gpu and not self._on_mlx and (is_gpu(x) or is_mlx(x)):
-            return to_cpu(x)
-        return x
 
     def save(self, path: str, *, fmt: str | None = None) -> None:
         """Save model to disk.
@@ -537,7 +487,8 @@ class GkmSVM:
             f"method must be 'kernel' or 'gkmexplain', got {method!r}"
         )
 
-    _MAX_LMER_TABLE_L = 14  # 4^14 ≈ 268M entries, ~1 GB
+    # Largest l to_deltasvm() accepts: 4^14 float32 weights = 1 GB
+    _MAX_DELTASVM_L = 14
 
     def _deltasvm_weights_from_table(self, table, query_norm: bool) -> np.ndarray:
         """DeltaSVM weights (first base most significant) from the packed table.
@@ -560,9 +511,12 @@ class GkmSVM:
         The identical pair plus, with RC, the pair (u, rc u), which agrees at
         positions p where u_p is the complement of u_{l-1-p}.
         """
-        from gkmsvm.kernels.weighted import CenterWeightedGkmKernel, _elementary_symmetric_k
+        from gkmsvm.kernels.weighted import (
+            CenterWeightedGkmKernel,
+            _elementary_symmetric_k,
+        )
 
-        kernel = self.kernel
+        kernel = self.kernel.base
         l = kernel.l
         idx = np.arange(4 ** l)
         digits = (idx[:, None] // 4 ** np.arange(l - 1, -1, -1)) % 4  # [:, p] = base at p
@@ -589,21 +543,19 @@ class GkmSVM:
     def to_deltasvm(
         self, *, device: str = "cpu", query_norm: bool = False,
         verbose: bool = False,
-    ) -> "DeltaSVM":
-        """Convert to a DeltaSVM linear scoring model.
+    ) -> DeltaSVM:
+        """Convert to a DeltaSVM linear scoring model: one weight per l-mer.
 
-        Scores all 4^l l-mers through the full model to build a weight
-        lookup table. The resulting DeltaSVM uses one table lookup per
-        window position (no gapped k-mer decomposition).
+        Each weight is the model's kernel sum on that l-mer alone. Kernels
+        with an exact l-mer table (-t 0/1/2/4, l <= 12) read it off the
+        table; others (RBF, larger l) score all 4^l l-mers through the
+        kernel, which for an RBF model with many SVs takes minutes.
 
-        The approximation is in query normalization: the full SVM divides
-        by sqrt(K(x,x)), which varies per query. The DeltaSVM omits this
-        and gives unnormalized scores. For variant scoring, K(ref,ref)
-        and K(alt,alt) are nearly equal (single-SNP changes affect few
-        windows), so the normalization cancels and variant effects
-        correlate near-perfectly (r > 0.999 for l >= 10).
-
-        Works for any kernel type. Requires l <= 14 (4^l table entries).
+        Without ``query_norm`` the weights drop the l-mer's own
+        normalization 1/sqrt(K(u, u)), so a DeltaSVM score sums
+        unnormalized kernel values; for variant effects K(ref, ref) and
+        K(alt, alt) nearly cancel (r > 0.999 for l >= 10). RBF kernels are
+        defined on the normalized kernel, so they always use ``query_norm``.
 
         Args:
             device: Device for the returned DeltaSVM model.
@@ -618,86 +570,42 @@ class GkmSVM:
         from gkmsvm.deltasvm import DeltaSVM
 
         l = self.kernel.l
-        if l > self._MAX_LMER_TABLE_L:
+        if l > self._MAX_DELTASVM_L:
             raise ValueError(
-                f"to_deltasvm() requires l <= {self._MAX_LMER_TABLE_L} "
-                f"(4^{l} = {4**l:,} table entries would use "
-                f"{4**l * 4 / 1e9:.1f} GB). Got l={l}."
+                f"to_deltasvm() requires l <= {self._MAX_DELTASVM_L} "
+                f"(4^{l} = {4**l:,} weights would use {4**l * 4 / 1e9:.1f} GB). Got l={l}."
             )
-
         table = self._build_lmer_table()
         if table is not None:
             weights = self._deltasvm_weights_from_table(table, query_norm)
-            return DeltaSVM(
-                weights, l, l,
-                include_rc=False, bias=self.bias, device=device,
-            )
-
-        n_lmers = 4**l
-        weights = np.zeros(n_lmers, dtype=np.float32)
-
-        S = self.num_support_vectors
-        # [B, S] intermediate × 2 (RC) × 2 (norm + accumulation)
-        bytes_per_seq = S * 8 * 4
-        if self._on_gpu:
-            import cupy as cp
-            free, _ = cp.cuda.Device().mem_info
-            chunk = max(256, min(100_000, int(free * 0.3) // bytes_per_seq))
         else:
-            mem_budget = 2 * 1024**3
-            chunk = max(256, min(100_000, mem_budget // bytes_per_seq))
+            weights = self._deltasvm_weights_from_kernel(query_norm, verbose)
+        return DeltaSVM(weights, l, l, include_rc=False, bias=self.bias, device=device)
 
-        chunks = range(0, n_lmers, chunk)
+    # l-mers scored per call in _deltasvm_weights_from_kernel (scoring then
+    # works in [rows, S] blocks of _MAX_SCORE_BYTES)
+    _DELTASVM_CHUNK = 65536
+
+    def _deltasvm_weights_from_kernel(self, query_norm: bool, verbose: bool) -> np.ndarray:
+        """DeltaSVM weights by scoring every l-mer (DeltaSVM index order)."""
+        base = self.kernel.base
+        unnorm = not query_norm and base.normalize and base is self.kernel  # not RBF
+        l = self.kernel.l
+        n_lmers = 4**l
+        powers = 4 ** np.arange(l - 1, -1, -1)  # first base most significant
+        weights = np.empty(n_lmers, dtype=np.float32)
+        dtype = to_cpu(self.coefficients).dtype
+        starts = range(0, n_lmers, self._DELTASVM_CHUNK)
         if verbose:
             from tqdm import tqdm
-            chunks = tqdm(
-                chunks, desc="to_deltasvm",
-                total=(n_lmers + chunk - 1) // chunk,
-            )
-
-        powers = 4 ** np.arange(l - 1, -1, -1)
-        pos_idx = np.arange(l)
-
-        kernel = self.kernel
-        adj_coefs = to_cpu(self.coefficients).astype(np.float64)
-        if kernel.normalize and not query_norm:
-            sv_diag = to_cpu(self._sv_diag()).astype(np.float64)
-            adj_coefs = adj_coefs / np.sqrt(np.clip(sv_diag, 1e-10, None))
-
-        saved_norm = kernel.normalize
-        saved_coefs = self.coefficients
-        saved_use_table = self.use_lmer_table
-        coef_dtype = to_cpu(saved_coefs).dtype
-        # The loop below scores through self() with a modified kernel and
-        # coefficients; keep it off the cached l-mer table
-        self.use_lmer_table = False
-        if not query_norm:
-            kernel.normalize = False
-            self.coefficients = self._match_device(
-                adj_coefs.astype(coef_dtype)
-            )
-        try:
-            for start in chunks:
-                end = min(start + chunk, n_lmers)
-                indices = np.arange(start, end)
-                bases = (indices[:, None] // powers[None, :]) % 4
-                n = end - start
-                x = np.zeros((n, 4, l), dtype=coef_dtype)
-                x[np.arange(n)[:, None], bases, pos_idx[None, :]] = 1.0
-                x = self._match_device(x)
-                scores = self(x).flatten()
-                if self._on_gpu or self._on_mlx:
-                    scores = to_cpu(scores)
-                weights[start:end] = scores - self.bias
-        finally:
-            kernel.normalize = saved_norm
-            self.coefficients = saved_coefs
-            self.use_lmer_table = saved_use_table
-
-        result = DeltaSVM(
-            weights, l, l,
-            include_rc=False, bias=self.bias, device=device,
-        )
-
-        return result
-
+            starts = tqdm(starts, desc="to_deltasvm", total=len(starts))
+        for start in starts:
+            idx = np.arange(start, min(start + self._DELTASVM_CHUNK, n_lmers))
+            x = np.eye(4, dtype=dtype)[(idx[:, None] // powers) % 4].transpose(0, 2, 1)
+            x = self._match_device(np.ascontiguousarray(x))
+            w = to_cpu(self._score_unbatched(x)).ravel().astype(np.float64) - self.bias
+            if unnorm:
+                diag = to_cpu(base._raw_diagonal(x)).astype(np.float64)
+                w *= np.sqrt(np.clip(diag, 1e-10, None))
+            weights[idx] = w
+        return weights

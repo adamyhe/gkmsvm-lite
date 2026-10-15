@@ -17,7 +17,8 @@ pytest tests/ -k "test_rc"          # pattern match
 ```
 src/gkmsvm/
 ├── __init__.py          # public API re-exports
-├── svm.py               # GkmSVM model, scoring, chunked inference
+├── svm.py               # GkmSVM model, scoring, SV cache, to_deltasvm
+├── lmer_table.py        # exact 4^l l-mer weight table (-t 0/1/2/4 prediction)
 ├── cli.py               # CLI entry point (gkmsvm command)
 ├── train.py             # train_gkmsvm() (C-SVC) + train_gkmsvr() (epsilon-SVR)
 ├── solver.py            # KernelColumnCache, smo_solve(), _csmo C extension — column-cached SMO
@@ -42,6 +43,7 @@ src/gkmsvm/
 └── importers/
     ├── lsgkm.py         # load_lsgkm_model()
     ├── classic.py       # load_classic_model() — C gkmSVM (LIBSVM-style)
+    ├── __init__.py      # shared header parsing (parse_header_value) and build_model()
     ├── r_gkmsvm.py      # load_r_gkmsvm_model() — R gkmSVM (.gkmmodel, _svalpha.out)
     └── deltasvm.py      # load_deltasvm_model()
 ```
@@ -56,13 +58,13 @@ src/gkmsvm/
 - Array format: `[batch, 4, length]` one-hot DNA, channel order A=0/C=1/G=2/T=3
 - Output: `[batch, 1]` floating-point margin scores
 - Arrays are numpy.ndarray (CPU), cupy.ndarray (NVIDIA GPU), or mlx.core.array (Apple GPU)
-- `model.cuda()` / `model.mlx()` / `model.cpu()` moves arrays between devices
+- `model.cuda()` / `model.mlx()` / `model.cpu()` moves arrays between devices (`backend.DeviceModel`, shared by `GkmSVM` and `DeltaSVM`)
 - Kernel normalization on by default, RC equivalence on by default
 - Score = `Σ coef_i × K(x, sv_i) + bias` where `bias = -rho` (LS-GKM) or `+rho` (classic gkmSVM)
 - `resolve_kernel_type()` maps aliases and integers to canonical internal names
 - Kernel modes: `-t 0` gkm_cnt/direct, `-t 1` gkm_estfull/estimated_full, `-t 2` gkm_esttrunc/estimated (default), `-t 3` gkmrbf/rbf, `-t 4` wgkm/weighted, `-t 5` wgkmrbf/weighted_rbf
 - ISM: `ism(model, x, batch_size=N)` → `[B, 4, L]` score deltas (window-delta optimization)
-- GkmExplain: `gkmexplain(model, x, mode=..., batch_size=50)` → `[B, 4, L]` attribution scores. MLX unsupported (float32 violates completeness axiom). Modes (string or legacy int):
+- GkmExplain: `gkmexplain(model, x, mode=..., batch_size=50)` → `[B, 4, L]` attribution scores, `-t 0/1/2` only (others raise; use `mutation_impact`/ISM). MLX falls back to CPU (float32 violates completeness axiom). Modes (string or legacy int):
   - `"importance"` (0) — hypothetical × one-hot. Sum = score - bias (completeness axiom). For visualization.
   - `"hypothetical"` (1) — all 4 bases. For TF-MoDISco.
   - `"perturbation"` (2) — discrete kernel-value Δ per mutation (lsgkm C mode 3, `perturbation_eff=1`). Ignores the RBF `exp()`.
@@ -76,18 +78,19 @@ src/gkmsvm/
 
 ## Key implementation details
 
-- Forward pass, ISM, and GkmExplain use the packed uint32 path (XOR + popcount). GkmExplain's inner kernel fuses normalization + coefficient multiplication + SV-dimension reduction, accumulating directly into `[B, 4, L]` result (no per-SV intermediate). Forward + RC SV windows concatenated for single kernel launch. CPU: `prange(B)` with L1-resident per-thread result arrays. GPU: float64 `atomicAdd` (CC >= 6.0). Apple GPU: custom Metal shaders via `mx.fast.metal_kernel` (forward/ISM only; GkmExplain falls back to CPU). ISM builds the packed windows covering each position (padded with `PAD_WINDOW`, which cancels in new − old) and works for every kernel type; inputs the packed path can't represent (weighted with N) score all 4L mutants through `model()`.
+- Forward pass, ISM, and GkmExplain use the packed uint32 path (XOR + popcount). GkmExplain has one kernel per device (`_explain_cpu`, CUDA `fused_explain`) with a `perturbation` flag; it fuses normalization + coefficient multiplication + SV-dimension reduction, accumulating directly into `[B, 4, L]` result (no per-SV intermediate). Forward + RC SV windows concatenated for single kernel launch. CPU: `prange(B)` with L1-resident per-thread result arrays. GPU: float64 `atomicAdd` (CC >= 6.0). Apple GPU: custom Metal shaders via `mx.fast.metal_kernel` (forward/ISM only; GkmExplain falls back to CPU). ISM builds the packed windows covering each position (padded with `PAD_WINDOW`, which cancels in new − old) and works for every kernel type; inputs the packed path can't represent (weighted with N) score all 4L mutants through `model()`.
 - Kernel interface: `kernel.base` is the kernel giving raw values (the base of an RBF kernel, else itself) and `kernel.finish(k_norm)` applies the RBF. Base kernels are `PackedGkmKernel`s: `pack(x)` gives [B, W] uint32 windows on x's device (MLX packs on CPU), `raw_packed(bx, by, by_rc)` the raw kernel with the RC block in the same call (masked join, or brute force below 16 rows), `raw_diag_packed(bx, bx_rc)` the self-kernel. `packs(x)` is False for weighted kernels on inputs with N (one-hot fallback). Gram, SMO columns, scoring, ISM and mutation impact all use this, so `-t 3`/`-t 5` get packed caches, Gram panels and batched SMO columns.
 - The model caches packed SV windows, their base self-kernels and the l-mer index per device (`GkmSVM._sv_cache`, cleared on device moves).
 - CPU kernel scoring normalizes, applies the RBF and reduces over SVs in one numba pass (`svm._normalized_dot`), so no [B, S] temporaries beyond the raw kernel. This dominates for short queries (`to_deltasvm` on RBF models: 4^l queries × S).
 - Min-matches skip: for esttrunc l=11 k=7 d=3, `min_matches=8`. 99.88% of window pairs skipped.
 - CPU inner loop: Numba `@njit(parallel=True, fastmath=True)`. NVIDIA GPU inner loop: CuPy RawKernel with shared-memory caching. Apple GPU inner loop: Metal kernel with per-thread accumulation and `popcount()`.
 - MLX compatibility: `get_strides()` for arrays without `.strides`, `xp.ascontiguousarray()` for `.copy()`, `to_cpu(X)[indices]` for fancy indexing. DeltaSVM auto-chunks intermediates >256 MB.
-- Scoring against the SVs uses the cached l-mer index (`kernels/lmer_index.py`) for count-table kernels with at most `MAX_NEIGHBORS` l-mers within dmax mismatches (e.g. `-t 1`/`-t 2`/`-t 3` with d <= 3, l <= 12): CSR over 4^l l-mers listing the SVs containing each, built once; a query window visits its dmax-neighborhood, so a call costs nothing per SV. CPU/CUDA accumulate float64; Metal counts hits per mismatch level in int32 and combines on CPU. `model.use_lmer_index = False` forces the masked join.
+- Scoring against the SVs uses the cached l-mer index (`kernels/lmer_index.py`) for count-table kernels with at most `MAX_NEIGHBORS` l-mers within dmax mismatches (e.g. `-t 1`/`-t 2`/`-t 3` with d <= 3, l <= 12): CSR over 4^l l-mers listing the SVs containing each, built once; a query window visits its dmax-neighborhood, so a call costs nothing per SV. CPU accumulates float64; CUDA and Metal count hits per mismatch level in int32 and combine levels in float64 (`LmerIndex._combine`). `model.use_lmer_index = False` forces the masked join.
 - `raw_packed` uses the masked-join kernel (`kernels/masked.py`) when both sides have >= 16 sequences: h(m) as a signed sum of C(l-m, j), each term an exact-match join on masked l-mer keys. `kernel.use_masked = False` forces brute force. `compute_gram` then works in column panels so each column index is built once. MLX builds the index and joins in Metal, writing int32 counts that the CPU combines in float64. `-t 4`/`-t 5` use it too (per-mask coefficients; inputs with N fall back to the per-position path).
+- `to_deltasvm` reads the l-mer table when it applies, else scores all 4^l l-mers through `_score_unbatched` (RBF always keeps the query normalization; non-RBF without `query_norm` multiplies weights back by sqrt(K(u,u))). It never mutates the model.
 - Prediction for `-t 0`/`-t 1`/`-t 2`/`-t 4` (l <= 12) uses an exact 4^l l-mer weight table (`lmer_table.py`, built from marginals of the SV l-mer weights): f(x) = sum_i w(x_i) / sqrt(K(x,x)) + b. `model.use_lmer_table`: `"auto"` (>= 500 SVs), True, False. RBF uses the kernel path.
-- `compute_gram` self-Gram: skips tiles below the diagonal; on CPU, diagonal tiles compute one triangle (`_fused_pairwise_packed_sym_numba`, also valid for the RC block). `-t 3` tiles use the base esttrunc packed path, then `exp`.
-- Training: `solver="auto"` estimates Gram matrix size — uses precomputed Gram + sklearn when it fits in device memory (< 75%); on GPU, falls back to GPU-computed Gram + CPU-side sklearn when it fits in system RAM (< 75%); else column-cached SMO. SMO uses WSS3 working set selection (C extension `_csmo` with Python kernel column callback), shrinking, and kernel columns cached in C — memory is O(cache_size × N) not O(N²). No Python fallback: without the extension, `solver="smo"` raises. `solver="nystrom"` uses low-rank kernel approximation for fast approximate training. `max_gram_gb` caps Gram allocation on shared compute.
+- `compute_gram` self-Gram: skips tiles below the diagonal; on CPU, diagonal tiles compute one triangle (`_fused_pairwise_packed_sym_numba`, also valid for the RC block). RBF tiles use the base kernel's packed path, then `kernel.finish`.
+- Training: `solver="auto"` uses the precomputed Gram + sklearn when the N×N float64 Gram fits in 75% of available RAM and under `max_gram_gb` (the Gram always lives in host RAM; tiles are computed on the training device); else column-cached SMO. `train.py` dispatches every solver through `_fit`, which builds the model. SMO uses WSS3 working set selection (C extension `_csmo` with Python kernel column callback), shrinking, and kernel columns cached in C — memory is O(cache_size × N) not O(N²). No Python fallback: without the extension, `solver="smo"` raises. `solver="nystrom"` uses low-rank kernel approximation for fast approximate training (fewer kernel evaluations; still a dense N×N approximate Gram, so no memory saving). `max_gram_gb` caps Gram allocation on shared compute.
 - `KernelColumnCache` packs all training sequences once (through `kernel.base`). When the l-mer index applies (`-t 1/2/3`), it indexes all training sequences once and a column is one query row (~3-6 ms on CPU for 300 bp, N=5-10k), so SMO prefetches only into empty cache slots (the first fill), then computes single requested columns. Otherwise columns are all rows against the requested columns and their RCs, so the masked join indexes only the batch, and misses prefetch up to `_SMO_PREFETCH` columns into free cache slots. Without the index, a cache smaller than N degrades to single brute-force columns once full.
 - SVR (`train_gkmsvr`) uses sklearn epsilon-SVR with precomputed Gram. SMO SVR is not yet implemented.
 - `scikit-learn` provides the LIBSVM C solver for both SVC and SVR via `SVC(kernel='precomputed')` / `SVR(kernel='precomputed')`. No direct `libsvm-official` dependency.

@@ -95,28 +95,27 @@ def _query_cpu(bx, offsets, ids, masks, weights, n_lmers, S, n_split):
     return part.reshape(B, n_split, S).sum(axis=1)
 
 
+# GPU kernels count hits per mismatch level in int32 (integer atomics are
+# fast; Metal has no float64 at all), and the levels are combined in float64
+# afterwards, so results are exact. grid.y = query row; each thread takes
+# one (window, neighbor) item.
 _CUDA_SRC = r"""
-extern "C" __global__ void lmer_index_query(
+extern "C" __global__ void lmer_index_count(
     const unsigned int* __restrict__ bx, int W, long long n_items,
     const long long* __restrict__ offsets, const int* __restrict__ ids,
-    const unsigned int* __restrict__ masks, const double* __restrict__ weights,
-    int n_masks, long long n_lmers, int S, double* __restrict__ out)
+    const unsigned int* __restrict__ masks, const int* __restrict__ levels,
+    int n_masks, long long n_lmers, int B, int S, int* __restrict__ counts)
 {
-    // grid.y = query row; each thread takes one (window, neighbor) item
     long long it = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (it >= n_items) return;
     int b = blockIdx.y;
     int i = (int)(it / n_masks), t = (int)(it - (long long)i * n_masks);
     long long v = (long long)(bx[(long long)b * W + i] ^ masks[t]);
     if (v >= n_lmers) return;  // padding window
-    double wt = weights[t];
-    double* row = out + (long long)b * S;
-    for (long long e = offsets[v]; e < offsets[v + 1]; e++) atomicAdd(&row[ids[e]], wt);
+    int* row = counts + ((long long)levels[t] * B + b) * S;
+    for (long long e = offsets[v]; e < offsets[v + 1]; e++) atomicAdd(&row[ids[e]], 1);
 }
 """
-
-# Metal has no float64: count hits per mismatch level in int32 and combine
-# levels in float64 on the CPU, so results are exact
 _METAL_SRC = """
     uint it = thread_position_in_grid.x;
     uint b = thread_position_in_grid.y;
@@ -132,8 +131,8 @@ _METAL_SRC = """
 """
 _cuda_fn = None
 _metal_fn = None
-# Rows per Metal launch: caps the int32 [levels, rows, S] counts
-_METAL_COUNT_BYTES = 256 * 2**20
+# Rows per GPU launch: caps the int32 [levels, rows, S] counts
+_COUNT_BYTES = 256 * 2**20
 
 
 class LmerIndex:
@@ -165,7 +164,8 @@ class LmerIndex:
         """K_raw [B, S] of packed query rows bx [B, W] against the columns.
 
         Rows may contain padding windows (any value >= 4^l), which add nothing.
-        CPU/CUDA return float64, MLX float32, on bx's device.
+        CPU/CUDA return float64, MLX float32, on bx's device. Hit counts per
+        column and mismatch level must fit in int32 on the GPU paths.
         """
         from gkmsvm.kernels.packed import device_of
 
@@ -187,7 +187,7 @@ class LmerIndex:
                 import cupy as cp
 
                 self._dev[dev] = (cp.asarray(self.offsets), cp.asarray(self.ids),
-                                  cp.asarray(self.masks), cp.asarray(self.weights))
+                                  cp.asarray(self.masks), cp.asarray(self.levels))
             else:
                 import mlx.core as mx
 
@@ -195,24 +195,38 @@ class LmerIndex:
                                   mx.array(self.masks), mx.array(self.levels))
         return self._dev[dev]
 
+    def _row_chunks(self, B):
+        """(row ranges, levels) for GPU launches of at most _COUNT_BYTES of counts."""
+        n_lev = int(self.levels.max()) + 1
+        rows = max(1, min(65535, _COUNT_BYTES // (4 * n_lev * self.S)))  # grid.y limit
+        return [(b0, min(rows, B - b0)) for b0 in range(0, B, rows)], n_lev
+
+    def _combine(self, counts, xp):
+        """[rows, S] float64 from int32 counts [levels, rows, S]."""
+        out = self.table[self.level_values[0]] * counts[self.level_values[0]].astype(xp.float64)
+        for m in self.level_values[1:]:
+            out += self.table[m] * counts[m]
+        return out
+
     def _pairwise_cuda(self, bx):
         import cupy as cp
 
         global _cuda_fn
         if _cuda_fn is None:
-            _cuda_fn = cp.RawKernel(_CUDA_SRC, "lmer_index_query")
-        offsets, ids, masks, weights = self._arrays("cuda")
+            _cuda_fn = cp.RawKernel(_CUDA_SRC, "lmer_index_count")
+        offsets, ids, masks, levels = self._arrays("cuda")
         bx = cp.ascontiguousarray(bx, dtype=cp.uint32)
         B, W = bx.shape
-        out = cp.zeros((B, self.S), dtype=cp.float64)
+        out = cp.empty((B, self.S), dtype=cp.float64)
         n_items = W * len(self.masks)
-        block = 256
-        for b0 in range(0, B, 65535):  # grid.y limit
-            nb = min(65535, B - b0)
-            _cuda_fn(((n_items + block - 1) // block, nb), (block,),
+        chunks, n_lev = self._row_chunks(B)
+        for b0, nb in chunks:
+            counts = cp.zeros((n_lev, nb, self.S), dtype=cp.int32)
+            _cuda_fn(((n_items + 255) // 256, nb), (256,),
                      (bx[b0:b0 + nb], np.int32(W), np.int64(n_items), offsets, ids, masks,
-                      weights, np.int32(len(self.masks)), np.int64(self.n_lmers),
-                      np.int32(self.S), out[b0:b0 + nb]))
+                      levels, np.int32(len(self.masks)), np.int64(self.n_lmers),
+                      np.int32(nb), np.int32(self.S), counts))
+            out[b0:b0 + nb] = self._combine(counts, cp)
         return out
 
     def _pairwise_mlx(self, bx):
@@ -229,19 +243,15 @@ class LmerIndex:
         offsets, ids, masks, levels = self._arrays("mlx")
         bx_np = np.ascontiguousarray(to_cpu(bx), dtype=np.uint32)
         B, W = bx_np.shape
-        n_lev = int(self.levels.max()) + 1
-        rows = max(1, _METAL_COUNT_BYTES // (4 * n_lev * self.S))
-        out = np.zeros((B, self.S), dtype=np.float64)
+        out = np.empty((B, self.S), dtype=np.float64)
         n_items = W * len(self.masks)
-        for b0 in range(0, B, rows):
-            nb = min(rows, B - b0)
+        chunks, n_lev = self._row_chunks(B)
+        for b0, nb in chunks:
             params = mx.array([W, len(self.masks), self.S, self.n_lmers, nb], dtype=mx.int32)
             counts = _metal_fn(
                 inputs=[mx.array(bx_np[b0:b0 + nb].ravel()), offsets, ids, masks, levels, params],
                 template=[], grid=((n_items + 255) // 256 * 256, nb, 1), threadgroup=(256, 1, 1),
                 output_shapes=[(n_lev * nb * self.S,)], output_dtypes=[mx.int32],
                 init_value=0)[0]
-            counts = np.array(counts).reshape(n_lev, nb, self.S)
-            for m in self.level_values:
-                out[b0:b0 + nb] += self.table[m] * counts[m]
+            out[b0:b0 + nb] = self._combine(np.array(counts).reshape(n_lev, nb, self.S), np)
         return mx.array(out.astype(np.float32))

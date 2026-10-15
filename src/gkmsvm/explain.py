@@ -19,48 +19,42 @@ import numpy as np
 from numba import njit, prange
 
 from gkmsvm.backend import get_array_module, is_mlx
-from gkmsvm.codec import reverse_complement
 from gkmsvm.kernels.direct import _packed_mismatches
 from gkmsvm.svm import GkmSVM
 
-
 # ---------------------------------------------------------------------------
-# Fused CuPy CUDA kernel — reduced output with atomicAdd
+# Fused kernels: coefficient multiplication and SV reduction in the inner loop
 # ---------------------------------------------------------------------------
-# Folds coefficient multiplication and SV-dimension reduction directly
-# into the inner loop, accumulating weighted contributions into a
-# [B, 4, seqlen] result array via float64 atomicAdd (CC >= 6.0).
-# This eliminates the O(B * 4 * L * S_c) intermediate ``persv`` array
-# (~640 MB at typical sizes).  Forward + RC SV windows are concatenated
-# along the Wy axis so a single kernel launch processes both.
+# Each (query, SV) pair accumulates its weighted contributions straight into
+# the [B, 4, seqlen] result, so there is no per-SV intermediate. Forward and
+# RC SV windows are concatenated along the window axis. With `perturbation`,
+# table_a/table_b are the match->mismatch / mismatch->match kernel deltas
+# (lsgkm perturbation_eff=1); otherwise they are the alpha/kappa importance
+# weights. CUDA accumulates with float64 atomicAdd (CC >= 6.0).
 
 _FUSED_EXPLAIN_CUDA = r"""
 extern "C" __global__
-void fused_explain_reduced(
+void fused_explain(
     const unsigned int* __restrict__ bx_packed,
     const unsigned int* __restrict__ by_packed_t,
-    const double* __restrict__ alpha_table,
-    const double* __restrict__ kappa_table,
+    const double* __restrict__ table_a,
+    const double* __restrict__ table_b,
     const double* __restrict__ eff_coef,
     double* __restrict__ result,
-    const int total_pairs,
-    const int S,
-    const int Wx,
-    const int Wy,
-    const int l,
-    const int min_matches,
-    const int seqlen
+    const int total_pairs, const int S, const int Wx, const int Wy,
+    const int l, const int min_matches, const int seqlen, const int perturbation
 ) {
     extern __shared__ char smem[];
-    double* s_alpha = (double*)smem;
-    double* s_kappa = s_alpha + l + 2;
+    double* s_a = (double*)smem;
+    double* s_b = s_a + l + 2;
     unsigned int* s_bx = (unsigned int*)((char*)smem + 2 * (l + 2) * sizeof(double));
 
     for (int i = threadIdx.x; i < l + 2; i += blockDim.x) {
-        s_alpha[i] = alpha_table[i];
-        s_kappa[i] = kappa_table[i];
+        s_a[i] = table_a[i];
+        s_b[i] = table_b[i];
     }
 
+    // Blocks whose pairs all belong to one query row cache its windows
     const int block_start = blockDim.x * blockIdx.x;
     const int b_first = block_start / S;
     const int last_idx = block_start + (int)blockDim.x - 1;
@@ -86,332 +80,117 @@ void fused_explain_reduced(
             unsigned int by_val = by_packed_t[j * S + s];
             unsigned int xv = bx_val ^ by_val;
             int mm = __popc(((xv >> 1) | xv) & 0x55555555u);
-            if (l - mm >= min_matches) {
-                double av = s_alpha[mm];
-                double kv = s_kappa[mm];
-                for (int k = 0; k < l; k++) {
-                    int bx_k = (bx_val >> (2 * k)) & 3;
-                    int by_k = (by_val >> (2 * k)) & 3;
-                    double w = (bx_k == by_k) ? av : kv;
-                    int pos = k + i;
-                    long long off = (long long)(b * 4 + by_k) * seqlen + pos;
-                    atomicAdd(&result[off], ec * w);
+            if (l - mm < min_matches) continue;
+            double av = ec * s_a[mm];
+            double bv = ec * s_b[mm];
+            for (int k = 0; k < l; k++) {
+                int bx_k = (bx_val >> (2 * k)) & 3;
+                int by_k = (by_val >> (2 * k)) & 3;
+                double* row = result + (long long)b * 4 * seqlen + k + i;
+                if (!perturbation) {
+                    atomicAdd(&row[(long long)by_k * seqlen], bx_k == by_k ? av : bv);
+                } else if (bx_k == by_k) {
+                    for (int h = 0; h < 4; h++)
+                        if (h != by_k) atomicAdd(&row[(long long)h * seqlen], av);
+                } else {
+                    atomicAdd(&row[(long long)by_k * seqlen], bv);
                 }
             }
         }
     }
 }
 """
-
-
-# ---------------------------------------------------------------------------
-# CuPy kernel cache and getter
-# ---------------------------------------------------------------------------
 
 _cupy_explain_kernel = None
 
 
-def _get_explain_kernel():
-    global _cupy_explain_kernel
+def _explain_gpu(packed_x, packed_y_t, table_a, table_b, eff_coef, result,
+                 S_c, Wy, l, min_matches, perturbation):
+    """Launch the CUDA kernel, accumulating into ``result`` [B, 4, seqlen]."""
     import cupy as cp
 
+    global _cupy_explain_kernel
     if _cupy_explain_kernel is None:
         _cupy_explain_kernel = cp.RawKernel(
-            _FUSED_EXPLAIN_CUDA,
-            "fused_explain_reduced",
-            options=("--use_fast_math",),
-        )
-    return _cupy_explain_kernel
-
-
-_FUSED_PERTURBATION_CUDA = r"""
-extern "C" __global__
-void fused_perturbation_reduced(
-    const unsigned int* __restrict__ bx_packed,
-    const unsigned int* __restrict__ by_packed_t,
-    const double* __restrict__ gamma_table,
-    const double* __restrict__ kappa_table,
-    const double* __restrict__ eff_coef,
-    double* __restrict__ result,
-    const int total_pairs,
-    const int S,
-    const int Wx,
-    const int Wy,
-    const int l,
-    const int min_matches,
-    const int seqlen
-) {
-    extern __shared__ char smem[];
-    double* s_gamma = (double*)smem;
-    double* s_kappa = s_gamma + l + 2;
-    unsigned int* s_bx = (unsigned int*)((char*)smem + 2 * (l + 2) * sizeof(double));
-
-    for (int i = threadIdx.x; i < l + 2; i += blockDim.x) {
-        s_gamma[i] = gamma_table[i];
-        s_kappa[i] = kappa_table[i];
-    }
-
-    const int block_start = blockDim.x * blockIdx.x;
-    const int b_first = block_start / S;
-    const int last_idx = block_start + (int)blockDim.x - 1;
-    const int b_last = (last_idx < total_pairs ? last_idx : total_pairs - 1) / S;
-    if (b_first == b_last) {
-        const unsigned int* src = bx_packed + b_first * Wx;
-        for (int i = threadIdx.x; i < Wx; i += blockDim.x)
-            s_bx[i] = src[i];
-    }
-    __syncthreads();
-
-    const int idx = block_start + threadIdx.x;
-    if (idx >= total_pairs) return;
-
-    const int b = idx / S;
-    const int s = idx % S;
-    const bool use_smem = (b_first == b_last);
-    const double ec = eff_coef[b * S + s];
-
-    for (int i = 0; i < Wx; i++) {
-        unsigned int bx_val = use_smem ? s_bx[i] : bx_packed[b * Wx + i];
-        for (int j = 0; j < Wy; j++) {
-            unsigned int by_val = by_packed_t[j * S + s];
-            unsigned int xv = bx_val ^ by_val;
-            int mm = __popc(((xv >> 1) | xv) & 0x55555555u);
-            if (l - mm >= min_matches) {
-                double gv = s_gamma[mm];
-                double kv = s_kappa[mm];
-                for (int k = 0; k < l; k++) {
-                    int bx_k = (bx_val >> (2 * k)) & 3;
-                    int by_k = (by_val >> (2 * k)) & 3;
-                    int pos = k + i;
-                    if (bx_k == by_k) {
-                        double w = ec * gv;
-                        for (int h = 0; h < 4; h++) {
-                            if (h != by_k) {
-                                long long off = (long long)(b * 4 + h) * seqlen + pos;
-                                atomicAdd(&result[off], w);
-                            }
-                        }
-                    } else {
-                        long long off = (long long)(b * 4 + by_k) * seqlen + pos;
-                        atomicAdd(&result[off], ec * kv);
-                    }
-                }
-            }
-        }
-    }
-}
-"""
-
-_cupy_perturbation_kernel = None
-
-
-def _get_perturbation_kernel():
-    global _cupy_perturbation_kernel
-    import cupy as cp
-
-    if _cupy_perturbation_kernel is None:
-        _cupy_perturbation_kernel = cp.RawKernel(
-            _FUSED_PERTURBATION_CUDA,
-            "fused_perturbation_reduced",
-            options=("--use_fast_math",),
-        )
-    return _cupy_perturbation_kernel
-
-
-# ---------------------------------------------------------------------------
-# GPU fused kernel wrappers — reduced output
-# ---------------------------------------------------------------------------
-
-
-def _perturbation_gpu_fused_reduced(
-    packed_x, packed_y_t, gamma_table, kappa_table,
-    eff_coef, result_view,
-    B, S_c, Wx, Wy, l, min_matches, seqlen, xp,
-):
-    gamma_gpu = xp.asarray(gamma_table, dtype=xp.float64)
-    kappa_gpu = xp.asarray(kappa_table, dtype=xp.float64)
-    eff_coef_gpu = xp.ascontiguousarray(eff_coef.astype(xp.float64))
-
+            _FUSED_EXPLAIN_CUDA, "fused_explain", options=("--use_fast_math",))
+    B, Wx = packed_x.shape
     total = B * S_c
     block = 256
-    grid = (total + block - 1) // block
-
-    alpha_bytes = (l + 2) * 8
-    kappa_bytes = (l + 2) * 8
-    bx_bytes = Wx * 4
-    shared = alpha_bytes + kappa_bytes + bx_bytes
-
-    _get_perturbation_kernel()(
-        (grid,), (block,),
-        (packed_x, packed_y_t, gamma_gpu, kappa_gpu, eff_coef_gpu,
-         result_view,
+    shared = 2 * (l + 2) * 8 + Wx * 4
+    _cupy_explain_kernel(
+        ((total + block - 1) // block,), (block,),
+        (packed_x, packed_y_t, cp.asarray(table_a, dtype=cp.float64),
+         cp.asarray(table_b, dtype=cp.float64),
+         cp.ascontiguousarray(eff_coef, dtype=cp.float64), result,
          np.int32(total), np.int32(S_c), np.int32(Wx), np.int32(Wy),
-         np.int32(l), np.int32(min_matches), np.int32(seqlen)),
+         np.int32(l), np.int32(min_matches), np.int32(result.shape[2]),
+         np.int32(perturbation)),
         shared_mem=shared,
     )
 
 
-def _explain_gpu_fused_reduced(
-    packed_x, packed_y_t, alpha_table, kappa_table,
-    eff_coef, result_view,
-    B, S_c, Wx, Wy, l, min_matches, seqlen, xp,
-):
-    """Fused CUDA kernel for GkmExplain with inline coefficient reduction.
+@njit(parallel=True, cache=True, fastmath=True)
+def _explain_cpu(packed_x, packed_y, table_a, table_b, eff_coef, l, min_matches,
+                 seqlen, perturbation):
+    """[B, 4, seqlen] attributions of packed_x [B, W] against packed_y [S, Wy]."""
+    B, W = packed_x.shape
+    S_c, Wy = packed_y.shape
+    result = np.zeros((B, 4, seqlen), dtype=np.float64)
+    for b in prange(B):
+        for s in range(S_c):
+            ec = eff_coef[b, s]
+            for i in range(W):
+                bx_val = packed_x[b, i]
+                for j in range(Wy):
+                    by_val = packed_y[s, j]
+                    mm = _packed_mismatches(bx_val, by_val)
+                    if l - mm < min_matches:
+                        continue
+                    av = ec * table_a[mm]
+                    bv = ec * table_b[mm]
+                    for k in range(l):
+                        bx_k = int((bx_val >> np.uint32(2 * k)) & np.uint32(3))
+                        by_k = int((by_val >> np.uint32(2 * k)) & np.uint32(3))
+                        pos = k + i
+                        if not perturbation:
+                            result[b, by_k, pos] += av if bx_k == by_k else bv
+                        elif bx_k == by_k:
+                            for h in range(4):
+                                if h != by_k:
+                                    result[b, h, pos] += av
+                        else:
+                            result[b, by_k, pos] += bv
+    return result
 
-    Accumulates weighted contributions directly into ``result_view`` via
-    atomicAdd, eliminating the [B, 4, seqlen, S_c] intermediate array.
-    Forward and RC SV windows should already be concatenated along Wy.
+
+@njit(parallel=True, cache=True)
+def _impact_cpu(k_both, diag_r, diag_sv, norm, coef, gamma):
+    """[n] mutation impact from raw K [ref rows; alt rows] against the SVs.
+
+    With norm, both K(ref) and dK are divided by sqrt(K(ref, ref) K(sv, sv)).
+    gamma (not NaN) applies the RBF redistribution of mutation_impact().
     """
-    alpha_gpu = xp.asarray(alpha_table, dtype=xp.float64)
-    kappa_gpu = xp.asarray(kappa_table, dtype=xp.float64)
-    eff_coef_gpu = xp.ascontiguousarray(eff_coef.astype(xp.float64))
-
-    total = B * S_c
-    block = 256
-    grid = (total + block - 1) // block
-
-    alpha_bytes = (l + 2) * 8
-    kappa_bytes = (l + 2) * 8
-    bx_bytes = Wx * 4
-    shared = alpha_bytes + kappa_bytes + bx_bytes
-
-    _get_explain_kernel()(
-        (grid,), (block,),
-        (packed_x, packed_y_t, alpha_gpu, kappa_gpu, eff_coef_gpu,
-         result_view,
-         np.int32(total), np.int32(S_c), np.int32(Wx), np.int32(Wy),
-         np.int32(l), np.int32(min_matches), np.int32(seqlen)),
-        shared_mem=shared,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Numba-accelerated CPU kernel (packed-only, bit extraction)
-# ---------------------------------------------------------------------------
-
-
-@njit(parallel=True, cache=True, fastmath=True)
-def _fused_explain_reduced(
-    packed_x, packed_y, alpha_table, kappa_table, eff_coef,
-    l, min_matches, B, S_c, W, Wy, seqlen,
-):
-    result = np.zeros((B, 4, seqlen), dtype=np.float64)
-    for b in prange(B):
-        for s in range(S_c):
-            ec = eff_coef[b, s]
-            for i in range(W):
-                bx_val = packed_x[b, i]
-                for j in range(Wy):
-                    by_val = packed_y[s, j]
-                    mm = _packed_mismatches(bx_val, by_val)
-                    if l - mm >= min_matches:
-                        a_val = alpha_table[mm]
-                        k_val = kappa_table[mm]
-                        for k in range(l):
-                            bx_k = int((bx_val >> np.uint32(2 * k)) & np.uint32(3))
-                            by_k = int((by_val >> np.uint32(2 * k)) & np.uint32(3))
-                            if bx_k == by_k:
-                                weight = a_val
-                            else:
-                                weight = k_val
-                            result[b, by_k, k + i] += ec * weight
-    return result
-
-
-@njit(parallel=True, cache=True, fastmath=True)
-def _fused_perturbation_reduced(
-    packed_x, packed_y, gamma_table, kappa_table, eff_coef,
-    l, min_matches, B, S_c, W, Wy, seqlen,
-):
-    """Perturbation effect kernel: discrete kernel-value deltas per mutation."""
-    result = np.zeros((B, 4, seqlen), dtype=np.float64)
-    for b in prange(B):
-        for s in range(S_c):
-            ec = eff_coef[b, s]
-            for i in range(W):
-                bx_val = packed_x[b, i]
-                for j in range(Wy):
-                    by_val = packed_y[s, j]
-                    mm = _packed_mismatches(bx_val, by_val)
-                    if l - mm >= min_matches:
-                        g_val = gamma_table[mm]
-                        k_val = kappa_table[mm]
-                        for k in range(l):
-                            bx_k = int((bx_val >> np.uint32(2 * k)) & np.uint32(3))
-                            by_k = int((by_val >> np.uint32(2 * k)) & np.uint32(3))
-                            pos = k + i
-                            if bx_k == by_k:
-                                w = ec * g_val
-                                for h in range(4):
-                                    if h != by_k:
-                                        result[b, h, pos] += w
-                            else:
-                                result[b, by_k, pos] += ec * k_val
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Dense path (fallback for kernels without min-matches skip)
-# ---------------------------------------------------------------------------
-
-
-def _explain_windows_dense(
-    wx, wy_4l, alpha_table, kappa_table,
-    l, B, W, seqlen, S_c, xp,
-):
-    wy = wy_4l.reshape(S_c, -1, 4 * l)
-    matches = xp.einsum("bif,sjf->bsij", wx, wy)
-    m = xp.clip(xp.rint(l - matches).astype(np.int64), 0, l + 1)
-    alpha = alpha_table[m]
-    kappa = kappa_table[m]
-
-    wx_4l = wx.reshape(B, W, 4, l)
-    persv = xp.zeros((B, 4, seqlen, S_c), dtype=np.float64)
-
-    dt = persv.dtype
-    wx_4l = wx_4l.astype(dt)
-    wy_4l = wy_4l.astype(dt)
-    for k in range(l):
-        qk = wx_4l[:, :, :, k]
-        sk = wy_4l[:, :, :, k]
-        pm_k = xp.einsum("bwc,sjc->bswj", qk, sk)
-        total_weight = alpha * pm_k + kappa * (1 - pm_k)
-        contrib = xp.einsum("bswj,sjh->bhws", total_weight, sk)
-        persv[:, :, k : k + W, :] += contrib
-
-    return persv
-
-
-def _explain_windows_dense_perturbation(
-    wx, wy_4l, gamma_table, kappa_table,
-    l, B, W, seqlen, S_c, xp,
-):
-    """Dense perturbation-effect fallback (no min-matches skip)."""
-    wy = wy_4l.reshape(S_c, -1, 4 * l)
-    matches = xp.einsum("bif,sjf->bsij", wx, wy)
-    m = xp.clip(xp.rint(l - matches).astype(np.int64), 0, l + 1)
-    gamma_m = gamma_table[m]
-    kappa_m = kappa_table[m]
-
-    wx_4l = wx.reshape(B, W, 4, l)
-    persv = xp.zeros((B, 4, seqlen, S_c), dtype=np.float64)
-
-    dt = persv.dtype
-    wx_4l = wx_4l.astype(dt)
-    wy_4l = wy_4l.astype(dt)
-    for k in range(l):
-        qk = wx_4l[:, :, :, k]
-        sk = wy_4l[:, :, :, k]
-        pm_k = xp.einsum("bwc,sjc->bswj", qk, sk)
-
-        uniform = gamma_m * pm_k
-        correction_weight = kappa_m * (1 - pm_k) - gamma_m * pm_k
-        contrib_selective = xp.einsum("bswj,sjh->bhws", correction_weight, sk)
-
-        contrib_uniform = uniform.sum(axis=-1).transpose(0, 2, 1)[:, None, :, :]
-        persv[:, :, k : k + W, :] += contrib_uniform + contrib_selective
-
-    return persv
+    n = k_both.shape[0] // 2
+    S = k_both.shape[1]
+    rbf = not np.isnan(gamma)
+    floor = np.exp(-gamma) if rbf else 0.0
+    out = np.zeros(n)
+    for b in prange(n):
+        acc = 0.0
+        for s in range(S):
+            k = k_both[b, s]
+            dk = k_both[n + b, s] - k
+            if norm:
+                z = max(np.sqrt(diag_r[b] * diag_sv[s]), 1e-10)
+                k /= z
+                dk /= z
+            if rbf:
+                if k <= 0:
+                    continue
+                dk *= (np.exp(gamma * (k - 1.0)) - floor) / k
+            acc += coef[s] * dk
+        out[b] = acc
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -559,149 +338,58 @@ def gkmexplain(
             )
         )
 
-    xp = get_array_module(x)
-    B, C, seqlen = x.shape
     kernel = model.kernel
+    if getattr(kernel, "_mismatch_table", None) is None:
+        raise ValueError(
+            f"GkmExplain attribution supports -t 0/1/2 kernels, not {model.kernel_type!r}; "
+            "use mutation_impact() or ism()"
+        )
+    xp = get_array_module(x)
+    B, _, seqlen = x.shape
     l = kernel.l
     d = getattr(kernel, "d", l)
-    W = seqlen - l + 1
-
-    sv = model.support_sequences
-    S = sv.shape[0]
-    coefs = model.coefficients
-    do_norm = kernel.normalize
-    do_rc = kernel.include_rc
-
     if is_perturbation:
-        table_a_cpu, table_b_cpu = _build_perturbation_tables(
-            kernel._mismatch_table, l, d,
-        )
+        table_a, table_b = _build_perturbation_tables(kernel._mismatch_table, l, d)
     else:
-        table_a_cpu = _build_alpha_table(kernel._mismatch_table, l, d)
-        table_b_cpu = _build_kappa_table(kernel._mismatch_table, l, d)
-    min_matches = _explain_min_matches(table_a_cpu, table_b_cpu, l)
+        table_a = _build_alpha_table(kernel._mismatch_table, l, d)
+        table_b = _build_kappa_table(kernel._mismatch_table, l, d)
+    min_matches = _explain_min_matches(table_a, table_b, l)
 
-    table_a = xp.asarray(table_a_cpu)
-    table_b = xp.asarray(table_b_cpu)
-
+    S = model.num_support_vectors
+    coefs = model.coefficients
+    diag_sv = model._sv_diag() if kernel.normalize else None
+    sv_fwd, sv_rc = model._sv_packed()
+    packed_sv = sv_fwd if sv_rc is None else xp.concatenate([sv_fwd, sv_rc], axis=1)
+    if xp is not np:
+        packed_sv = xp.ascontiguousarray(packed_sv.T)  # [Wy, S] for coalesced reads
     cs = model.sv_chunk_size if model.sv_chunk_size is not None else min(S, 2000)
-    use_packed = min_matches > 0
-    use_gpu = xp is not np
-
-    if do_norm:
-        diag_sv = model._sv_diag()
-    if use_packed:
-        sv_fwd, sv_rc = model._sv_packed()
-
-    # --- SV chunks: packed fwd + RC windows side by side ---
-    sv_chunks = []
-    for sv_start in range(0, S, cs):
-        sv_end = min(sv_start + cs, S)
-        chunk_info = {
-            "sv_start": sv_start, "sv_end": sv_end, "S_c": sv_end - sv_start,
-            "coefs_c": coefs[sv_start:sv_end],
-        }
-        if use_packed:
-            packed_y = sv_fwd[sv_start:sv_end]
-            if do_rc:
-                packed_y = xp.concatenate([packed_y, sv_rc[sv_start:sv_end]], axis=1)
-            chunk_info["Wy_total"] = packed_y.shape[1]
-            if use_gpu:
-                chunk_info["packed_y_t"] = xp.ascontiguousarray(packed_y.T)
-            else:
-                chunk_info["packed_y"] = np.ascontiguousarray(packed_y)
-        sv_chunks.append(chunk_info)
 
     result = xp.zeros((B, 4, seqlen), dtype=np.float64)
-
-    # --- Main loop: input-outer, SV-inner ---
-    seq_iter = range(0, B, batch_size)
+    starts = range(0, B, batch_size)
     if verbose:
         from tqdm import tqdm
-        seq_iter = tqdm(
-            seq_iter, desc="GkmExplain",
-            total=(B + batch_size - 1) // batch_size,
-        )
+        starts = tqdm(starts, desc="GkmExplain", total=(B + batch_size - 1) // batch_size)
 
-    for b_start in seq_iter:
-        b_end = min(b_start + batch_size, B)
-        x_b = x[b_start:b_end]
-        Bb = b_end - b_start
-
-        if do_norm:
-            diag_x_b = kernel._raw_diagonal(x_b)
-
-        if use_packed:
-            packed_x = xp.ascontiguousarray(kernel.pack(x_b))
-        else:
-            wx_b = kernel.flat_windows(x_b)
-
-        for ci in sv_chunks:
-            sv_start = ci["sv_start"]
-            sv_end = ci["sv_end"]
-            S_c = ci["S_c"]
-            coefs_c = ci["coefs_c"]
-
-            if do_norm:
-                norm = xp.clip(
-                    xp.sqrt(
-                        diag_x_b[:, None]
-                        * diag_sv[sv_start:sv_end][None, :]
-                    ),
-                    1e-10,
-                    None,
-                )
-                eff_coef = coefs_c[None, :] / norm
+    for b0 in starts:
+        x_b = x[b0:b0 + batch_size]
+        packed_x, packed_x_rc = kernel.pack_both(x_b)
+        packed_x = xp.ascontiguousarray(packed_x)
+        diag_x = kernel.raw_diag_packed(packed_x, packed_x_rc) if kernel.normalize else None
+        for s0 in range(0, S, cs):
+            s1 = min(s0 + cs, S)
+            eff_coef = xp.broadcast_to(coefs[None, s0:s1], (x_b.shape[0], s1 - s0))
+            if diag_x is not None:
+                norm = xp.sqrt(diag_x[:, None] * diag_sv[None, s0:s1])
+                eff_coef = eff_coef / xp.clip(norm, 1e-10, None)
+            if xp is np:
+                result[b0:b0 + batch_size] += _explain_cpu(
+                    packed_x, np.ascontiguousarray(packed_sv[s0:s1]), table_a, table_b,
+                    np.ascontiguousarray(eff_coef, dtype=np.float64), l, min_matches,
+                    seqlen, is_perturbation)
             else:
-                eff_coef = xp.broadcast_to(
-                    coefs_c[None, :], (Bb, S_c),
-                )
-
-            if use_packed and use_gpu:
-                gpu_fn = (
-                    _perturbation_gpu_fused_reduced if is_perturbation
-                    else _explain_gpu_fused_reduced
-                )
-                gpu_fn(
-                    packed_x, ci["packed_y_t"],
-                    table_a, table_b,
-                    xp.ascontiguousarray(eff_coef),
-                    result[b_start:b_end],
-                    Bb, S_c, W, ci["Wy_total"],
-                    l, min_matches, seqlen, xp,
-                )
-            elif use_packed:
-                cpu_fn = (
-                    _fused_perturbation_reduced if is_perturbation
-                    else _fused_explain_reduced
-                )
-                result[b_start:b_end] += cpu_fn(
-                    packed_x, ci["packed_y"], table_a, table_b,
-                    np.ascontiguousarray(eff_coef.astype(np.float64)),
-                    l, min_matches, Bb, S_c, W, ci["Wy_total"], seqlen,
-                )
-            else:
-                sv_c = sv[sv_start:sv_end]
-                wy = kernel.flat_windows(sv_c)
-                wy_4l = wy.reshape(S_c, -1, 4, l)
-                dense_fn = (
-                    _explain_windows_dense_perturbation if is_perturbation
-                    else _explain_windows_dense
-                )
-                persv = dense_fn(
-                    wx_b, wy_4l, table_a, table_b,
-                    l, Bb, W, seqlen, S_c, xp,
-                )
-                if do_rc:
-                    wy_rc = kernel.flat_windows(reverse_complement(sv_c))
-                    wy_rc_4l = wy_rc.reshape(S_c, -1, 4, l)
-                    persv = persv + dense_fn(
-                        wx_b, wy_rc_4l, table_a, table_b,
-                        l, Bb, W, seqlen, S_c, xp,
-                    )
-                if do_norm:
-                    persv = persv / norm[:, None, None, :]
-                result[b_start:b_end] += (persv * coefs_c).sum(axis=-1)
+                _explain_gpu(packed_x, xp.ascontiguousarray(packed_sv[:, s0:s1]),
+                             table_a, table_b, eff_coef, result[b0:b0 + batch_size],
+                             s1 - s0, packed_sv.shape[0], l, min_matches, is_perturbation)
 
     return result.astype(x.dtype)
 
@@ -771,16 +459,24 @@ def mutation_impact(
         else:
             k_both = base._raw_pairwise(both, model.support_sequences)
             diag_r = base._raw_diagonal(r)
+        gamma = kernel.gamma if base is not kernel else np.nan  # RBF
+        if xp is np:
+            parts.append(_impact_cpu(
+                np.ascontiguousarray(k_both, dtype=np.float64),
+                diag_r.astype(np.float64) if base.normalize else np.ones(n),
+                model._sv_diag().astype(np.float64) if base.normalize else np.ones(1),
+                base.normalize, coef.astype(np.float64), float(gamma))[:, None])
+            continue
         k_ref = k_both[:n]
         dk = k_both[n:] - k_ref
         if base.normalize:
             norm = xp.clip(xp.sqrt(diag_r[:, None] * model._sv_diag()[None, :]), 1e-10, None)
             k_ref = k_ref / norm
             dk = dk / norm
-        if base is not kernel:  # RBF
+        if not np.isnan(gamma):
             pos = k_ref > 0
             safe_k = xp.where(pos, k_ref, 1.0)
-            scale = (kernel.finish(k_ref) - np.exp(-kernel.gamma)) / safe_k
+            scale = (kernel.finish(k_ref) - np.exp(-gamma)) / safe_k
             dk = xp.where(pos, dk * scale, 0.0)
         parts.append(to_cpu((dk * coef).sum(axis=1, keepdims=True)))
 

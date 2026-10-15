@@ -8,7 +8,9 @@ Two sub-formats:
     plus ``_svseq.fa`` (FASTA of support vector sequences).
 
 Bias convention: score = ... + rho (kernlab convention, opposite from
-LS-GKM's score = ... - rho).
+LS-GKM's score = ... - rho). The kernel is ``gkm_esttrunc`` unless a
+``#kernel_type`` header says otherwise; ``#L``/``#k``/``#d`` default to
+11/7/3.
 
 Use ``load_classic_model()`` for the C gkmSVM / LS-GKM-style format
 (LIBSVM headers with ``key value`` pairs and ``SV`` marker).
@@ -20,8 +22,8 @@ from pathlib import Path
 
 import numpy as np
 
-from gkmsvm.codec import one_hot_encode
 from gkmsvm.fasta import read_fasta
+from gkmsvm.importers import build_model, parse_header_value
 from gkmsvm.svm import GkmSVM
 
 
@@ -46,7 +48,7 @@ def load_r_gkmsvm_model(
             If *path* ends with ``_svalpha.out`` and this is not given,
             the loader looks for a sibling ``_svseq.fa``.
         dtype: Array dtype for model weights.
-        sv_chunk_size: Optional chunk size for batched SV inference.
+        sv_chunk_size: ``sv_chunk_size`` of the model (SV chunks in GkmExplain).
         device: ``"cpu"`` (default), ``"cuda"``, ``"mlx"``, or ``"auto"``.
 
     Returns:
@@ -87,7 +89,7 @@ def _load_gkmmodel(
             if line.startswith("#"):
                 parts = line[1:].split(None, 1)
                 if len(parts) == 2:
-                    _parse_header(header, parts[0], parts[1])
+                    parse_header_value(header, parts[0], parts[1])
                 continue
 
             if line.startswith(">"):
@@ -129,7 +131,7 @@ def _load_twofile(
             if line.startswith("#"):
                 parts = line[1:].split(None, 1)
                 if len(parts) == 2:
-                    _parse_header(header, parts[0], parts[1])
+                    parse_header_value(header, parts[0], parts[1])
                 continue
             parts = line.split("\t")
             if len(parts) >= 2:
@@ -146,74 +148,12 @@ def _load_twofile(
     return _build_model(header, coefficients, sequences, dtype, sv_chunk_size, device)
 
 
-def _parse_header(header: dict, key: str, value: str) -> None:
-    if key == "rho":
-        header["rho"] = float(value)
-    elif key in ("nsv", "npos", "nneg", "L", "k", "d", "M"):
-        header[key] = int(value)
-    elif key in ("gamma", "H"):
-        header[key] = float(value)
-    elif key == "kernel_type":
-        header["kernel_type"] = int(value) if value.isdigit() else value
-
-
-def _build_model(
-    header: dict,
-    coefficients: list[float],
-    sequences: list[str],
-    dtype,
-    sv_chunk_size,
-    device="cpu",
-) -> GkmSVM:
-    if not sequences:
-        raise ValueError("No support vector sequences found")
-    if len(coefficients) != len(sequences):
-        raise ValueError(
-            f"Number of coefficients ({len(coefficients)}) does not match "
-            f"number of sequences ({len(sequences)})"
-        )
-
-    nsv = header.get("nsv")
-    if nsv is not None and len(sequences) != nsv:
-        raise ValueError(
-            f"Expected {nsv} support vectors, got {len(sequences)}"
-        )
-
-    encoded = [one_hot_encode(seq, dtype=dtype) for seq in sequences]
-    lengths = {t.shape[1] for t in encoded}
-    if len(lengths) > 1:
-        raise ValueError(
-            f"All support vector sequences must have the same length, "
-            f"got lengths: {sorted(lengths)}"
-        )
-
-    support_sequences = np.stack(encoded)
-    coef_array = np.array(coefficients, dtype=dtype)
-
-    rho = header.get("rho")
-    if rho is None:
+def _build_model(header, coefficients, sequences, dtype, sv_chunk_size, device) -> GkmSVM:
+    if header.get("rho") is None:
         raise ValueError("Model file missing #rho header")
-    bias = rho
-
-    l = header.get("L", 11)
-    k = header.get("k", 7)
-    d = header.get("d", 3)
-
-    kernel_type = "gkm_esttrunc"
-    kernel_params = {"L": l, "k": k, "d": d, "include_rc": True}
-    if "gamma" in header:
-        kernel_params["gamma"] = header["gamma"]
-    if "M" in header:
-        kernel_params["M"] = header["M"]
-    if "H" in header:
-        kernel_params["H"] = header["H"]
-
-    return GkmSVM(
-        support_sequences=support_sequences,
-        coefficients=coef_array,
-        bias=bias,
-        kernel_type=kernel_type,
-        kernel_params=kernel_params,
-        sv_chunk_size=sv_chunk_size,
-        device=device,
+    header = {"L": 11, "k": 7, "d": 3, **header}
+    return build_model(
+        header, coefficients, sequences, bias=header["rho"][0],
+        n_expected=header.get("nsv"), default_kernel="gkm_esttrunc", dtype=dtype,
+        sv_chunk_size=sv_chunk_size, device=device,
     )

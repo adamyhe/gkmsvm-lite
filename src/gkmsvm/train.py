@@ -4,10 +4,17 @@ from __future__ import annotations
 
 import numpy as np
 
-from gkmsvm.backend import HAS_CUPY, HAS_MLX, get_array_module, is_mlx, to_cpu, to_gpu, to_mlx
+from gkmsvm.backend import (
+    HAS_CUPY,
+    HAS_MLX,
+    get_array_module,
+    is_mlx,
+    to_cpu,
+    to_gpu,
+    to_mlx,
+)
 from gkmsvm.codec import one_hot_encode
 from gkmsvm.svm import KERNEL_BUILDERS, GkmSVM, resolve_kernel_type
-
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -52,23 +59,23 @@ def train_gkmsvm(
         M: Center-weight window size (for -t 4, -t 5).
         H: Center-weight decay (for -t 4, -t 5).
         include_rc: Include reverse complement in kernel.
-        solver: ``"auto"`` (precomputed Gram if it fits in device memory;
-            on GPU, falls back to GPU-compute + CPU-solve if it fits in
-            system RAM; else column-cached SMO), ``"nystrom"``
-            (Nyström low-rank approximation — faster but approximate),
-            ``"smo"`` (column-cached SMO), or ``"libsvm"`` (precomputed
-            Gram + sklearn solver).
+        solver: ``"auto"`` (``"libsvm"`` when the N x N Gram fits in 75%
+            of available RAM and under ``max_gram_gb``, else ``"smo"``),
+            ``"libsvm"`` (precomputed Gram in host RAM, tiles computed on
+            ``device``, solved by sklearn's LIBSVM), ``"smo"`` (column-cached
+            SMO, O(cache_size x N) memory), or ``"nystrom"`` (Nyström
+            low-rank approximation: fewer kernel evaluations, approximate).
         n_components: Number of landmark points for Nyström approximation.
             Defaults to ``min(N, max(1000, int(sqrt(N) * 10)))``.
         cache_size: Number of kernel columns to cache (SMO only); None sizes
             it from available RAM.
         tol: KKT violation tolerance (SMO only).
         max_iter: Maximum SMO iterations.
-        max_gram_gb: Hard cap on Gram matrix size in GB. On shared compute,
-            set this to your allocation limit to avoid OOM. ``None`` uses
-            automatic memory detection.
-        sv_chunk_size: Chunk size for inference on the returned model.
-        gram_chunk_size: Tile size for Gram matrix computation (libsvm only).
+        max_gram_gb: Largest Gram matrix (GB) ``solver="auto"`` may allocate.
+            On shared compute, set this to your allocation limit. ``None``
+            uses automatic memory detection.
+        sv_chunk_size: ``sv_chunk_size`` of the returned model (GkmExplain).
+        gram_chunk_size: Tile size for Gram matrix computation (libsvm, nystrom).
         device: Where to train: ``"auto"`` (CUDA, else MLX, if available),
             ``"cuda"``, ``"mlx"``, or ``"cpu"``. The returned model is on
             CPU; move it with ``model.cuda()`` or ``model.mlx()``.
@@ -79,93 +86,29 @@ def train_gkmsvm(
     """
     X_pos = _to_onehot(pos_seqs)
     X_neg = _to_onehot(neg_seqs)
-    X = np.concatenate([X_pos, X_neg], axis=0)
-    X = _move_to_device(X, device, verbose)
+    X = _move_to_device(np.concatenate([X_pos, X_neg], axis=0), device, verbose)
     y = np.array([1] * X_pos.shape[0] + [-1] * X_neg.shape[0])
-
-    kernel, kernel_type, kernel_params = _build_kernel(
-        kernel_type, l, k, d, gamma, M, H, include_rc,
-    )
-
-    xp = get_array_module(X)
-    N = X.shape[0]
-    gram_gb = N * N * 8 / 1024**3
-
-    if max_gram_gb is not None and gram_gb > max_gram_gb:
-        gram_capped = True
-    else:
-        gram_capped = False
-
-    if solver == "nystrom":
-        return _fit_nystrom(
-            kernel, X, y, C, kernel_type, kernel_params,
-            n_components=n_components,
-            gram_chunk_size=gram_chunk_size,
-            sv_chunk_size=sv_chunk_size, verbose=verbose,
-        )
-
+    if solver not in ("auto", "libsvm", "nystrom", "smo"):
+        raise ValueError(f"Unknown solver {solver!r}. Use 'auto', 'libsvm', 'nystrom', or 'smo'.")
     if solver == "auto":
-        if not gram_capped and _gram_fits_in_memory(N, xp):
-            use_smo = False
-            gpu_gram_cpu_solve = False
-        elif not gram_capped and xp is not np and _gram_fits_on_cpu(N):
-            use_smo = False
-            gpu_gram_cpu_solve = True
+        N = X.shape[0]
+        gram_gb = N * N * 8 / 1024**3
+        capped = max_gram_gb is not None and gram_gb > max_gram_gb
+        solver = "libsvm" if not capped and _gram_fits_on_cpu(N) else "smo"
+        if solver == "smo":
             import warnings
-            warnings.warn(
-                f"Gram matrix ({gram_gb:.1f} GB) exceeds GPU memory — "
-                f"computing on GPU and solving on CPU. This may be slow "
-                f"for large N. Consider solver='nystrom' for faster "
-                f"approximate training.",
-                stacklevel=2,
-            )
-            if verbose:
-                print(
-                    f"Gram matrix ({gram_gb:.1f} GB) exceeds GPU memory "
-                    f"— computing on GPU, solving on CPU"
-                )
-        else:
-            use_smo = True
-            gpu_gram_cpu_solve = False
-            import warnings
-            warnings.warn(
-                f"Gram matrix ({gram_gb:.1f} GB) does not fit in memory — "
-                f"falling back to column-cached SMO solver. This will be "
-                f"significantly slower than precomputed Gram. Consider "
-                f"downsampling training sequences or using "
-                f"solver='nystrom' for faster approximate training.",
-                stacklevel=2,
-            )
-    elif solver == "smo":
-        use_smo = True
-        gpu_gram_cpu_solve = False
-    elif solver == "libsvm":
-        use_smo = False
-        gpu_gram_cpu_solve = False
-    else:
-        raise ValueError(
-            f"Unknown solver {solver!r}. "
-            f"Use 'auto', 'libsvm', 'nystrom', or 'smo'."
-        )
 
-    if use_smo:
-        return _train_smo(
-            kernel, X, y, C, kernel_type, kernel_params,
-            cache_size=cache_size, tol=tol, max_iter=max_iter,
-            sv_chunk_size=sv_chunk_size, device=device, verbose=verbose,
-        )
-    if gpu_gram_cpu_solve:
-        return _fit_libsvm_gpu_gram(
-            kernel, X, y, C,
-            kernel_type, kernel_params,
-            gram_chunk_size=gram_chunk_size,
-            sv_chunk_size=sv_chunk_size, verbose=verbose,
-        )
-    return _fit_libsvm(
-        kernel, X, y, C,
-        kernel_type, kernel_params,
-        gram_chunk_size=gram_chunk_size,
-        sv_chunk_size=sv_chunk_size, device=device, verbose=verbose,
+            warnings.warn(
+                f"Gram matrix ({gram_gb:.1f} GB) does not fit in memory — falling back to "
+                f"column-cached SMO, which is slower than a precomputed Gram. Consider "
+                f"downsampling or solver='nystrom' for faster approximate training.",
+                stacklevel=2,
+            )
+    return _fit(
+        X, y, solver, C=C, kernel_type=kernel_type, l=l, k=k, d=d, gamma=gamma, M=M,
+        H=H, include_rc=include_rc, n_components=n_components,
+        gram_chunk_size=gram_chunk_size, sv_chunk_size=sv_chunk_size, verbose=verbose,
+        smo_args={"cache_size": cache_size, "tol": tol, "max_iter": max_iter},
     )
 
 
@@ -212,7 +155,7 @@ def train_gkmsvr(
             (Nyström low-rank approximation — faster but approximate),
             or ``"libsvm"`` (precomputed Gram + sklearn solver).
         n_components: Number of landmark points for Nyström approximation.
-        sv_chunk_size: Chunk size for inference on the returned model.
+        sv_chunk_size: ``sv_chunk_size`` of the returned model (GkmExplain).
         gram_chunk_size: Tile size for Gram matrix computation.
         device: Where to train: ``"auto"`` (CUDA, else MLX, if available),
             ``"cuda"``, ``"mlx"``, or ``"cpu"``. The returned model is on
@@ -226,47 +169,18 @@ def train_gkmsvr(
         raise ValueError(
             f"solver must be 'auto', 'libsvm' or 'nystrom' for SVR, got {solver!r}"
         )
-    X = _to_onehot(sequences)
-    X = _move_to_device(X, device, verbose)
+    X = _move_to_device(_to_onehot(sequences), device, verbose)
     y = np.asarray(labels, dtype=np.float64)
     if y.shape[0] != X.shape[0]:
         raise ValueError(
             f"Number of labels ({y.shape[0]}) must match "
             f"number of sequences ({X.shape[0]})"
         )
-
-    kernel, kernel_type, kernel_params = _build_kernel(
-        kernel_type, l, k, d, gamma, M, H, include_rc,
-    )
-
-    if solver == "nystrom":
-        return _fit_nystrom(
-            kernel, X, y, C, kernel_type, kernel_params,
-            epsilon=epsilon, n_components=n_components,
-            gram_chunk_size=gram_chunk_size,
-            sv_chunk_size=sv_chunk_size, verbose=verbose,
-        )
-
-    xp = get_array_module(X)
-    N = X.shape[0]
-    if solver == "auto" and xp is not np and not _gram_fits_in_memory(N, xp) and _gram_fits_on_cpu(N):
-        if verbose:
-            gram_gb = N * N * 8 / 1024**3
-            print(
-                f"Gram matrix ({gram_gb:.1f} GB) exceeds GPU memory "
-                f"— computing on GPU, solving on CPU"
-            )
-        return _fit_libsvm_gpu_gram(
-            kernel, X, y, C,
-            kernel_type, kernel_params,
-            epsilon=epsilon, gram_chunk_size=gram_chunk_size,
-            sv_chunk_size=sv_chunk_size, verbose=verbose,
-        )
-    return _fit_libsvm(
-        kernel, X, y, C,
-        kernel_type, kernel_params,
-        epsilon=epsilon, gram_chunk_size=gram_chunk_size,
-        sv_chunk_size=sv_chunk_size, device=device, verbose=verbose,
+    return _fit(
+        X, y, "nystrom" if solver == "nystrom" else "libsvm", C=C, epsilon=epsilon,
+        kernel_type=kernel_type, l=l, k=k, d=d, gamma=gamma, M=M, H=H,
+        include_rc=include_rc, n_components=n_components,
+        gram_chunk_size=gram_chunk_size, sv_chunk_size=sv_chunk_size, verbose=verbose,
     )
 
 
@@ -341,75 +255,45 @@ def _build_kernel(kernel_type, l, k, d, gamma, M, H, include_rc):
     return kernel, kernel_type, kernel_params
 
 
-def _fit_libsvm_gpu_gram(
-    kernel, X, y, C, kernel_type, kernel_params, *,
-    epsilon=None, gram_chunk_size, sv_chunk_size, verbose=False,
-) -> GkmSVM:
-    """Compute Gram on GPU in tiles, accumulate on CPU, solve with sklearn."""
-    from gkmsvm.gram import compute_gram
-
-    N = X.shape[0]
-    gram = np.empty((N, N), dtype=np.float64)
-    if verbose:
-        print(f"Computing {N}x{N} Gram matrix on GPU, storing on CPU...")
-    compute_gram(kernel, X, chunk_size=gram_chunk_size, verbose=verbose,
-                 out=gram)
-
-    y_cpu = to_cpu(y) if not isinstance(y, np.ndarray) else y
-    clf = _fit_sklearn(gram, y_cpu, C, epsilon=epsilon, verbose=verbose)
-
-    sv_indices = clf.support_
-    sv_seqs = to_cpu(X)[sv_indices]
-    coefficients = clf.dual_coef_[0].astype(sv_seqs.dtype)
-    bias = float(clf.intercept_[0])
-
-    if verbose:
-        print(f"Training complete: {len(sv_indices)} support vectors")
-
-    return GkmSVM(
-        support_sequences=sv_seqs,
-        coefficients=coefficients,
-        bias=bias,
-        kernel_type=kernel_type,
-        kernel_params=kernel_params,
-        sv_chunk_size=sv_chunk_size,
+def _fit(X, y, solver, *, C, kernel_type, l, k, d, gamma, M, H, include_rc,
+         n_components, gram_chunk_size, sv_chunk_size, verbose, epsilon=None,
+         smo_args=None) -> GkmSVM:
+    """Train with `solver` ("libsvm", "nystrom" or "smo") and build the model."""
+    kernel, kernel_type, kernel_params = _build_kernel(
+        kernel_type, l, k, d, gamma, M, H, include_rc,
     )
+    if solver == "smo":
+        from gkmsvm.solver import smo_solve
 
-
-def _fit_libsvm(
-    kernel, X, y, C, kernel_type, kernel_params, *,
-    epsilon=None, gram_chunk_size, sv_chunk_size, device="cpu", verbose=False,
-) -> GkmSVM:
-    """Compute Gram matrix and fit with sklearn's LIBSVM-backed solver."""
-    from gkmsvm.gram import compute_gram
-
-    N = X.shape[0]
-    gram = np.empty((N, N), dtype=np.float64)
-    if verbose:
-        print(f"Computing {N}x{N} Gram matrix ({N * N:,} kernel evaluations)...")
-    compute_gram(kernel, X, chunk_size=gram_chunk_size, verbose=verbose,
-                 out=gram)
-
-    y_fit = to_cpu(y) if not isinstance(y, np.ndarray) else y
-    clf = _fit_sklearn(gram, y_fit, C, epsilon=epsilon, verbose=verbose)
-
-    sv_indices = clf.support_
-    if is_mlx(X):
-        sv_seqs = to_cpu(X)[sv_indices]
+        if verbose:
+            print(f"Training with SMO solver (N={X.shape[0]}, "
+                  f"cache={smo_args['cache_size']})...")
+        coefs, bias = smo_solve(kernel, X, y, C=C, verbose=verbose, **smo_args)
+        sv_idx = np.flatnonzero(np.abs(coefs) > 1e-10)
+        coefs = coefs[sv_idx]
     else:
-        sv_seqs = to_cpu(X[sv_indices])
-    coefficients = clf.dual_coef_[0].astype(sv_seqs.dtype)
-    bias = float(clf.intercept_[0])
+        if solver == "nystrom":
+            gram = _nystrom_gram(kernel, X, n_components, gram_chunk_size, verbose)
+        else:
+            from gkmsvm.gram import compute_gram
 
+            N = X.shape[0]
+            gram = np.empty((N, N), dtype=np.float64)  # host RAM; tiles on X's device
+            if verbose:
+                print(f"Computing {N}x{N} Gram matrix ({N * N:,} kernel evaluations)...")
+            compute_gram(kernel, X, chunk_size=gram_chunk_size, verbose=verbose, out=gram)
+        clf = _fit_sklearn(gram, y, C, epsilon=epsilon, verbose=verbose)
+        del gram
+        sv_idx, coefs, bias = clf.support_, clf.dual_coef_[0], float(clf.intercept_[0])
+
+    sv_seqs = to_cpu(X)[sv_idx]
+    coefs = np.asarray(coefs).astype(sv_seqs.dtype)
     if verbose:
-        print(f"Training complete: {len(sv_indices)} support vectors")
-
+        print(f"Training complete: {len(sv_idx)} support vectors "
+              f"({int((coefs > 0).sum())} positive coefficients)")
     return GkmSVM(
-        support_sequences=sv_seqs,
-        coefficients=coefficients,
-        bias=bias,
-        kernel_type=kernel_type,
-        kernel_params=kernel_params,
+        support_sequences=sv_seqs, coefficients=coefs, bias=bias,
+        kernel_type=kernel_type, kernel_params=kernel_params,
         sv_chunk_size=sv_chunk_size,
     )
 
@@ -420,31 +304,21 @@ def _fit_sklearn(gram, y, C, *, epsilon=None, verbose=False):
 
     if epsilon is not None:
         clf = SVR(C=C, epsilon=epsilon, kernel="precomputed")
-        if verbose:
-            print("Fitting SVR with sklearn...")
     else:
         clf = SVC(C=C, kernel="precomputed")
-        if verbose:
-            print("Fitting SVC with sklearn...")
+    if verbose:
+        print(f"Fitting {type(clf).__name__} with sklearn...")
     clf.fit(gram, y)
     return clf
 
 
-def _fit_nystrom(
-    kernel, X, y, C, kernel_type, kernel_params, *,
-    epsilon=None, n_components=None, gram_chunk_size, sv_chunk_size,
-    verbose=False,
-) -> GkmSVM:
-    """Train SVM using Nyström low-rank kernel approximation.
+def _nystrom_gram(kernel, X, n_components, chunk_size, verbose) -> np.ndarray:
+    """N x N Nystrom approximation of the Gram matrix from m landmarks.
 
-    Samples m landmark points, computes K_mm (m×m) and K_nm (N×m),
-    builds a low-rank approximation of the full Gram matrix, and fits
-    sklearn SVC on the approximated kernel. The kernel computation
-    cost is O(N·m) instead of O(N²).
-
-    The returned model uses the SVC-selected support vectors with
-    exact kernel evaluation at inference time — the approximation
-    only affects training.
+    Computes K_mm (m x m) and K_nm (N x m) exactly, then K ~ K_nm K_mm^+ K_mn,
+    so kernel evaluations cost O(N m) instead of O(N^2). The solver still
+    sees a dense N x N matrix. The trained model scores with the exact
+    kernel; the approximation only affects training.
     """
     from gkmsvm.gram import compute_gram
 
@@ -452,125 +326,35 @@ def _fit_nystrom(
     if n_components is None:
         n_components = min(N, max(1000, int(np.sqrt(N) * 10)))
     m = min(n_components, N)
-
     if verbose:
         print(f"Nyström approximation: {m} landmarks from {N} samples")
 
-    rng = np.random.RandomState(42)
-    landmark_idx = rng.choice(N, size=m, replace=False)
-    landmark_idx.sort()
-
+    landmark_idx = np.sort(np.random.RandomState(42).choice(N, size=m, replace=False))
     X_cpu = to_cpu(X)
-    xp = get_array_module(X)
-    if xp is not np:
-        X_landmarks = xp.asarray(X_cpu[landmark_idx])
+    if is_mlx(X):
+        X_landmarks = to_mlx(X_cpu[landmark_idx])
+    elif get_array_module(X) is not np:
+        X_landmarks = to_gpu(X_cpu[landmark_idx])
     else:
         X_landmarks = X_cpu[landmark_idx]
 
-    # K_mm: m×m kernel matrix between landmarks
     K_mm = np.empty((m, m), dtype=np.float64)
-    if verbose:
-        print(f"Computing K_mm ({m}×{m})...")
-    compute_gram(kernel, X_landmarks, chunk_size=gram_chunk_size,
-                 verbose=verbose, out=K_mm)
-
-    # K_nm: N×m kernel matrix between all samples and landmarks
+    compute_gram(kernel, X_landmarks, chunk_size=chunk_size, verbose=verbose, out=K_mm)
     K_nm = np.empty((N, m), dtype=np.float64)
-    if verbose:
-        print(f"Computing K_nm ({N}×{m})...")
-    compute_gram(kernel, X, X_landmarks, chunk_size=gram_chunk_size,
-                 verbose=verbose, out=K_nm)
+    compute_gram(kernel, X, X_landmarks, chunk_size=chunk_size, verbose=verbose, out=K_nm)
 
-    # Eigendecompose K_mm = U Λ U^T
+    # Features phi = K_nm U L^-1/2 over the well-conditioned eigenpairs of K_mm
     eigenvalues, U = np.linalg.eigh(K_mm)
-
-    # Discard near-zero or negative eigenvalues for numerical stability
-    threshold = max(1e-10, eigenvalues.max() * 1e-8)
-    valid = eigenvalues > threshold
-    eigenvalues = eigenvalues[valid]
-    U = U[:, valid]
-    m_eff = len(eigenvalues)
-
+    valid = eigenvalues > max(1e-10, eigenvalues.max() * 1e-8)
     if verbose:
-        print(f"Effective rank: {m_eff}/{m} "
-              f"(smallest λ={eigenvalues.min():.2e})")
+        print(f"Effective rank: {int(valid.sum())}/{m}")
+    features = (K_nm @ U[:, valid]) / np.sqrt(eigenvalues[valid])[None, :]
+    del K_nm, K_mm, U
 
-    # Nyström features: Φ = K_nm @ U @ Λ^{-1/2}  →  [N, m_eff]
-    inv_sqrt_lambda = 1.0 / np.sqrt(eigenvalues)
-    features = (K_nm @ U) * inv_sqrt_lambda[None, :]
-    del K_nm, K_mm, U, eigenvalues
-
-    # Approximated Gram: Φ @ Φ^T  →  [N, N], computed in row chunks
-    approx_gram_gb = N * N * 8 / 1024**3
-    if verbose:
-        print(f"Building approximated Gram ({N}×{N}, {approx_gram_gb:.1f} GB)...")
-    gram_approx = np.empty((N, N), dtype=np.float64)
-    for i in range(0, N, gram_chunk_size):
-        end = min(i + gram_chunk_size, N)
-        gram_approx[i:end] = features[i:end] @ features.T
-    del features
-
-    clf = _fit_sklearn(gram_approx, y, C, epsilon=epsilon, verbose=verbose)
-
-    sv_indices = clf.support_
-    if is_mlx(X):
-        sv_seqs = X_cpu[sv_indices]
-    else:
-        sv_seqs = to_cpu(X[sv_indices]) if xp is not np else X[sv_indices]
-    coefficients = clf.dual_coef_[0].astype(sv_seqs.dtype)
-    bias = float(clf.intercept_[0])
-
-    if verbose:
-        print(f"Training complete: {len(sv_indices)} support vectors")
-
-    return GkmSVM(
-        support_sequences=sv_seqs,
-        coefficients=coefficients,
-        bias=bias,
-        kernel_type=kernel_type,
-        kernel_params=kernel_params,
-        sv_chunk_size=sv_chunk_size,
-    )
-
-
-def _train_smo(
-    kernel, X, y, C, kernel_type, kernel_params, *,
-    cache_size, tol, max_iter, sv_chunk_size, device="cpu", verbose=False,
-) -> GkmSVM:
-    from gkmsvm.solver import smo_solve
-
-    if verbose:
-        print(f"Training with SMO solver (N={X.shape[0]}, cache={cache_size})...")
-
-    coefficients, bias = smo_solve(
-        kernel, X, y, C=C, tol=tol, max_iter=max_iter,
-        cache_size=cache_size, verbose=verbose,
-    )
-
-    sv_mask = np.abs(to_cpu(coefficients)) > 1e-10
-    if is_mlx(X):
-        X_cpu = to_cpu(X)
-        support_sequences = X_cpu[sv_mask]
-    else:
-        support_sequences = to_cpu(X[sv_mask])
-    sv_coefficients = to_cpu(coefficients)[sv_mask].astype(support_sequences.dtype)
-
-    if verbose:
-        n_pos = int((sv_coefficients > 0).sum())
-        n_neg = int((sv_coefficients <= 0).sum())
-        print(
-            f"Training complete: {sv_mask.sum()} support vectors "
-            f"({n_pos} pos, {n_neg} neg)"
-        )
-
-    return GkmSVM(
-        support_sequences=support_sequences,
-        coefficients=sv_coefficients,
-        bias=bias,
-        kernel_type=kernel_type,
-        kernel_params=kernel_params,
-        sv_chunk_size=sv_chunk_size,
-    )
+    gram = np.empty((N, N), dtype=np.float64)
+    for i in range(0, N, chunk_size):
+        gram[i:i + chunk_size] = features[i:i + chunk_size] @ features.T
+    return gram
 
 
 def _available_memory(xp) -> int:
@@ -600,15 +384,9 @@ def _available_memory(xp) -> int:
     return 8 * 1024**3
 
 
-def _gram_fits_in_memory(N: int, xp) -> bool:
-    """Check if Gram matrix fits in available device memory."""
-    gram_bytes = N * N * 8
-    available = _available_memory(xp)
-    return gram_bytes < available * 0.75
-
-
 def _gram_fits_on_cpu(N: int) -> bool:
-    """Check if Gram matrix fits in CPU RAM."""
+    """Whether an N x N float64 Gram fits in 75% of available RAM (it is
+    always held in host memory, whatever the training device)."""
     gram_bytes = N * N * 8
     available = _available_memory(np)
     return gram_bytes < available * 0.75

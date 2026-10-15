@@ -31,6 +31,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+
 from _common import (
     LSGKM_THREADS,
     RESULTS,
@@ -41,6 +42,7 @@ from _common import (
     lsgkm_version,
     set_cpu_threads,
     write_header,
+    write_seqs,
 )
 
 DATA = SEQ_DIR
@@ -115,12 +117,6 @@ def load_dsqtl_seqs() -> tuple[list[str], list[str]]:
     pos = [seq for _, seq in read_fasta(str(DATA / "gm12878_shared.fa"))]
     neg = [seq for _, seq in read_fasta(str(DATA / "nullseqs_gm12878_shared.1.1.fa"))]
     return pos, neg
-
-
-def write_fasta(seqs: list[str], path: Path, prefix: str = "s") -> None:
-    with open(path, "w") as f:
-        for i, seq in enumerate(seqs):
-            f.write(f">{prefix}{i}\n{seq}\n")
 
 
 def subsample(seqs: list[str], n: int, rng) -> list[str]:
@@ -443,7 +439,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="gkmsvm_bench_") as tmpdir:
         tmpdir = Path(tmpdir)
         test_fa = tmpdir / "test.fa"
-        write_fasta(test_seqs, test_fa, prefix="test")
+        write_seqs(test_fa, test_seqs, "test")
 
         # Compile Numba/CUDA kernels before the first timed fit
         warm = (all_pos[:10], all_neg[:10])
@@ -471,8 +467,8 @@ def main():
 
             pos_fa = tmpdir / f"pos_{N}.fa"
             neg_fa = tmpdir / f"neg_{N}.fa"
-            write_fasta(pos_sub, pos_fa, prefix="pos")
-            write_fasta(neg_sub, neg_fa, prefix="neg")
+            write_seqs(pos_fa, pos_sub, "pos")
+            write_seqs(neg_fa, neg_sub, "neg")
 
             # ── Training ──────────────────────────────────────────
 
@@ -491,7 +487,7 @@ def main():
                 mem_str = f", {mem_c:.0f} MB" if mem_c else ""
                 print(f"    {t_train_c:.1f}s  ({n_sv_c} SVs{mem_str})")
 
-            print(f"  Training gkmsvm-lite (CPU)...")
+            print("  Training gkmsvm-lite (CPU)...")
             model_lite_cpu, t_train_cpu, mem_cpu = train_lite(
                 pos_sub, neg_sub, args.l, args.k, args.d, "cpu",
             )

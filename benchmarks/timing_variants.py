@@ -40,6 +40,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+
 from _common import (
     LSGKM_THREADS,
     RESULTS,
@@ -53,6 +54,7 @@ from _common import (
     run_measured,
     set_cpu_threads,
     worker_result,
+    write_seqs,
     write_tsv,
 )
 
@@ -71,11 +73,6 @@ def _decode(X: np.ndarray) -> list[str]:
     idx[X.sum(axis=1) == 0] = 4
     lut = np.array(list("ACGTN"))
     return ["".join(row) for row in lut[idx]]
-
-
-def _write_fasta(path: Path, seqs: list[str], prefix: str) -> None:
-    with open(path, "w") as f:
-        f.writelines(f">{prefix}{i}\n{s}\n" for i, s in enumerate(seqs))
 
 
 def _nonredundant_lmers(l: int = L) -> np.ndarray:
@@ -109,12 +106,12 @@ def _prepare(args, work: Path) -> dict:
     model_path = bench.MODEL_DIR / f"gkmsvm_{tag}_negset{args.negset}.model.txt"
 
     np.savez(work / "variants.npz", ref=ref, alt=alt)
-    _write_fasta(work / "ref.fa", _decode(ref), "v")
-    _write_fasta(work / "alt.fa", _decode(alt), "v")
+    write_seqs(work / "ref.fa", _decode(ref), "v")
+    write_seqs(work / "alt.fa", _decode(alt), "v")
     nr = _nonredundant_lmers()
     np.save(work / "lmers.npy", nr)
     if "deltaSVM" in args.methods:
-        _write_fasta(work / "lmers.fa", _lmer_strings(nr), "k")
+        write_seqs(work / "lmers.fa", _lmer_strings(nr), "k")
     center = ref.shape[2] // 2
     alt_base = alt[:, :, center].argmax(axis=1)
     return {"model": str(model_path), "n_variants": len(ref), "alt_base": alt_base}

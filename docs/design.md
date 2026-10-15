@@ -14,7 +14,7 @@ Ship an LS-GKM model importer and predictor before building training. Match `gkm
 
 `-t 3` (`gkmrbf`) wraps the normalized `-t 2` kernel with an RBF transform: `K_rbf(x,y) = exp(gamma * (K_norm(x,y) - 1))`, matching lsgkm. This equals `exp(-gamma/2 * ||phi(x) - phi(y)||^2)` on unit-norm features. Self-similarity is always 1.
 
-`-t 4` (`wgkm`) uses center-weighted position importance. Positions near the l-mer center get weight 1.0; edges decay as `2^(-d/H)`. Uses per-position match computation with an elementary symmetric polynomial DP — exact position weighting, not a mismatch-count average.
+`-t 4` (`wgkm`) uses center-weighted position importance. Positions near the l-mer center get weight 1.0; edges decay as `2^(-d/H)`. A window pair contributes the elementary symmetric polynomial e_k of the weights at agreeing positions: exact position weighting, not a mismatch-count average. It runs as a masked join with one level per size-k mask (coefficient = product of its weights); inputs with N use a per-position match path with an e_k DP.
 
 `-t 5` (`wgkmrbf`) applies the same RBF transform to the normalized center-weighted kernel.
 
@@ -40,25 +40,18 @@ Each kernel mode has three identifiers: LS-GKM `-t N` integer, an internal name 
 
 ## Kernel computation
 
-Two computation paths, selected automatically:
+Every kernel computes on packed windows: each l-mer is a uint32 (2 bits per base), and a window pair's mismatch count is an XOR + popcount (see "Packed uint32 comparison" below). The interface is `PackedGkmKernel` (`kernels/packed.py`): `pack(x)`, `raw_packed(bx, by, by_rc)` with the reverse-complement block in the same call, and `raw_diag_packed(bx, bx_rc)`. RBF kernels expose their base kernel as `kernel.base` and apply `kernel.finish(k_norm) = exp(γ(k_norm - 1))` last, so Gram tiles, SMO columns, scoring, ISM and mutation impact share one code path for all six kernel types. `raw_packed` dispatches to:
 
-**Packed uint32 path** (default forward pass, ISM): Each l-mer window is packed into a uint32 (2 bits per base). Match counting uses XOR + popcount on the packed representation instead of per-base comparisons. See "Packed uint32 comparison" below for details.
+- **Masked join** (`kernels/masked.py`) when both sides have 16+ sequences: h(m) as a signed sum of C(l-m, j) terms, each an exact-match join on masked l-mer keys. See [design/mask-join-kernel.md](design/mask-join-kernel.md).
+- **Brute force** below that: every window pair, skipping pairs below `min_matches`. CPU: Numba `@njit(parallel=True, fastmath=True)`. NVIDIA: CuPy RawKernel with coalesced SV reads and shared-memory caching of the table and query windows. Apple: Metal kernels via `mx.fast.metal_kernel` (pairwise, and cross-diagonal for self-kernels against [x, rc(x)]).
 
-**Float one-hot path** (weighted kernels): Window match counts via matmul on flattened one-hot windows (`[B, W, 4*l]`). Both NumPy and CuPy use the same code path since CuPy mirrors NumPy's fancy indexing.
+Scoring against a model's SVs adds two faster paths for fixed SVs: the exact l-mer weight table (`lmer_table.py`, `-t 0/1/2/4`, l <= 12) and the cached l-mer index (`kernels/lmer_index.py`, `-t 1/2/3` with a small d-neighborhood).
 
-**GkmExplain sparse path**: Uses packed uint32 pre-filtering to identify the ~0.12% of window pairs with ≤ d mismatches (same min-matches skip as the forward pass), then decomposes only those pairs per-position. Per-position base identity is extracted directly from packed uint32 via bit shifts (`(packed >> 2k) & 3`), eliminating all float intermediate arrays. Mode 0 is computed as `mode_1 * one_hot_input` — only mode 1 has a dedicated kernel. The inner loop fuses normalization, coefficient multiplication, and SV-dimension reduction, accumulating directly into a `[B, 4, L]` result array (no per-SV intermediate). Forward and RC SV windows are concatenated along the Wy axis for a single kernel launch per chunk. CPU: fused Numba `@njit(parallel=True)` kernel with `prange(B)` — each thread owns its `[4, L]` result slice (L1-resident, ~6.4 KB). GPU: fused CuPy RawKernel with one thread per (b, s) pair — coalesced SV reads via transposed `[Wy, S]` layout, shared-memory caching of weight tables and query packed windows, float64 `atomicAdd` into the result array (CC >= 6.0). Falls back to the dense float path for kernels without a min-matches threshold (weighted kernels).
-
-## Fused pairwise kernels
-
-CPU: Numba `@njit(parallel=True, fastmath=True)` fuses match-count + table-lookup + sum into a single parallel kernel, avoiding materialization of the full `[B, S, W, W]` match tensor.
-
-NVIDIA GPU: CuPy RawKernel with coalesced memory access. Uses `--use_fast_math` and shared-memory caching of both the mismatch weight table and query packed windows.
-
-Apple GPU: Custom Metal shaders via `mx.fast.metal_kernel`. Each thread handles one (batch, SV) pair, looping over all window pairs with XOR+popcount and `min_matches` early exit. Two kernel variants: pairwise and cross-diagonal (each row against a second window set; the self-kernel is the cross-diagonal against [x, rc(x)]). Kernels are lazily compiled on first use.
+**GkmExplain** (`-t 0/1/2`): the same packed comparison selects the ~0.1% of window pairs within the mismatch cutoff, and only those are decomposed per position, with base identities read from the packed words (`(packed >> 2k) & 3`). Importance is `hypothetical * one_hot_input`; only hypothetical and perturbation have kernels (one kernel with a mode flag per device). The inner loop multiplies by the normalized coefficient and reduces over SVs, accumulating into the `[B, 4, L]` result: CPU Numba with `prange` over the batch; CUDA one thread per (sequence, SV) pair with float64 `atomicAdd` (CC >= 6.0). MLX falls back to CPU.
 
 ## Memory in scoring
 
-Kernel scoring holds [rows, S] kernel values, so `GkmSVM.__call__` processes inputs in row blocks of at most `_MAX_SCORE_BYTES` (512 MB of float64), whatever `batch_size` says; for the 72,145-SV ENCODE model ENCFF579AOX that is ~930 rows per block. The model also caches packed SV windows (4 bytes per window and strand) and, for d-cutoff kernels, the l-mer index (8·4^l bytes of offsets plus 4 bytes per SV window and strand: ~110 MB at l=11 for 32k SVs). `GkmSVM(sv_chunk_size=N)` now only chunks SVs inside GkmExplain.
+Kernel scoring holds [rows, S] kernel values, so `GkmSVM.__call__` processes inputs in row blocks of at most `_MAX_SCORE_BYTES` (512 MB of float64), whatever `batch_size` says; for the 72,145-SV ENCODE model ENCFF579AOX that is ~930 rows per block. The model also caches packed SV windows (4 bytes per window and strand) and, for d-cutoff kernels, the l-mer index (8·4^l bytes of offsets plus 4 bytes per SV window and strand: ~110 MB at l=11 for 32k SVs). `GkmSVM(sv_chunk_size=N)` only chunks SVs inside GkmExplain.
 
 ## Training
 
@@ -66,17 +59,17 @@ Two solver backends, selected automatically based on available memory:
 
 **Precomputed Gram + sklearn** (`solver="libsvm"`, default for small N): Computes the full N×N kernel matrix via tiled Gram computation, then calls scikit-learn's LIBSVM-backed `SVC(kernel='precomputed')` / `SVR(kernel='precomputed')`. Supports both C-SVC (`train_gkmsvm`, `-s 0`) and epsilon-SVR (`train_gkmsvr`, `-s 3`). Fast — LIBSVM's SMO is highly optimized — but requires O(N²) memory.
 
-**Column-cached SMO** (`solver="smo"`, large N): WSS3 working set selection (Fan et al. 2005) with shrinking and cached kernel columns. Memory is O(cache_size × N) instead of O(N²). Currently supports C-SVC only. A C extension (`_csmo`) handles the optimization loop and the column cache; kernel columns come from `KernelColumnCache` on the training device (Numba CPU, CuPy GPU, or MLX): one query row of an l-mer index over the training set when it applies (`-t 1/2/3`), else batches through the masked join, prefetched into free cache slots. Installs still succeed if the extension fails to compile, but `solver="smo"` then raises.
+**Column-cached SMO** (`solver="smo"`, large N): WSS3 working set selection (Fan et al. 2005) with shrinking and cached kernel columns. Memory is O(cache_size × N) instead of O(N²). Currently supports C-SVC only. A C extension (`_csmo`) handles the optimization loop and the column cache; kernel columns come from `KernelColumnCache` on the training device (Numba CPU, CuPy GPU, or MLX): one query row of an l-mer index over the training set when it applies (`-t 1/2/3`), else batches through the masked join; misses prefetch likely next working-set columns into free cache slots. Installs still succeed if the extension fails to compile, but `solver="smo"` then raises.
 
-**Nyström approximation** (`solver="nystrom"`): Low-rank kernel approximation using landmark points. Faster than both Gram and SMO for large datasets, but produces an approximate solution. Useful when exact training is too slow and approximate is acceptable.
+**Nyström approximation** (`solver="nystrom"`): kernel values against m landmarks (O(N m) evaluations), a low-rank N×N approximation, then sklearn. Saves kernel evaluations, not memory; the solution is approximate.
 
-`solver="auto"` estimates whether N²×8 bytes fits in 75% of available RAM (CPU) or VRAM (GPU). Falls back to SMO when it doesn't.
+`solver="auto"` uses the precomputed Gram when N²×8 bytes fits in 75% of available RAM (and under `max_gram_gb`); the Gram is always held in host RAM, whatever the training device. Otherwise it falls back to SMO.
 
 The scoring formula `Σ coef_i × K(x, sv_i) + bias` is identical for SVC and SVR — only the dual coefficients differ (α_i × y_i for SVC, α_i* − α_i for SVR). The `GkmSVM` model class is shared.
 
 ## No dense Gram matrix at scale
 
-LS-GKM exists because the full N×N kernel matrix doesn't fit in memory at scale (50k examples ≈ 10 GB, 90k ≈ 32 GB). Use block/column evaluation with chunked SV inference.
+LS-GKM exists because the full N×N kernel matrix doesn't fit in memory at scale (50k examples ≈ 19 GB, 90k ≈ 60 GB of float64). Training then uses column-cached SMO, and scoring computes [rows, S] blocks capped at `_MAX_SCORE_BYTES`.
 
 ## The `d` parameter
 
@@ -99,9 +92,9 @@ R gkmSVM package (Ghandi et al. 2016, kernlab-based) uses `#`-prefixed headers (
 
 Same bias convention as C gkmSVM: `bias = +rho`. Load via `load_r_gkmsvm_model(path, svseq_path=...)`. Auto-detects `_svseq.fa` companion file when loading `_svalpha.out`.
 
-## SV diagonal cache
+## SV cache
 
-The SVM caches the support-vector self-kernel diagonal (`_raw_diagonal(sv)`) after first computation, avoiding a chunked recomputation on every call.
+The model caches, per device, the packed SV windows, their base-kernel self-kernels and the l-mer index (`GkmSVM._sv_cache`, built on first use and cleared by `cuda()`/`mlx()`/`cpu()`), plus the l-mer weight table.
 
 ## NumPy + CuPy + MLX (no PyTorch)
 
@@ -109,13 +102,13 @@ gkm-SVMs are not differentiable — autograd provides no value. The array operat
 
 CPU: NumPy arrays + Numba `@njit(parallel=True)` fused pairwise kernels.
 NVIDIA GPU: CuPy arrays (optional `[gpu]` extra) + CuPy RawKernel CUDA code. `model.cuda()` moves data to GPU.
-Apple GPU: MLX arrays (optional `[mlx]` extra) + custom Metal shaders via `mx.fast.metal_kernel`. `model.mlx()` moves data to Apple Silicon GPU. MLX arrays lack `.strides`, `.copy()`, and NumPy-style fancy indexing — an `_MlxShim` wrapper and `get_strides()` helper provide compatibility. Packing uses CPU (via `to_cpu()` round-trip) since Numba isn't available on Apple GPU; the Metal kernel handles the expensive pairwise computation.
+Apple GPU: MLX arrays (optional `[mlx]` extra) + custom Metal shaders via `mx.fast.metal_kernel`. `model.mlx()` moves data to Apple Silicon GPU. MLX arrays lack `.strides`, `.copy()`, and NumPy-style fancy indexing — an `_MlxShim` wrapper and `get_strides()` helper provide compatibility. Packing runs on the CPU and the packed windows move to the device; the Metal kernels do the pairwise work. Metal has no float64, so the masked join and the l-mer index count matches in int32 and combine them in float64 on the CPU.
 
 tangermeme interop is vendored — only `extract_loci` (pyfaidx) and FASTA I/O are needed. ledidi requires differentiable models and does not work with gkm-SVMs.
 
 ## Packed uint32 comparison
 
-Each l-mer window is packed into a uint32 (2 bits per base, 22 bits for l=11). Match counting uses XOR + popcount on 2-bit fields instead of l individual byte comparisons. This replaces 11 strided memory reads with a single contiguous uint32 read per window pair. On GPU, the SV array goes from `[l, Wy, S]` int8 (229MB for 72K SVs at 300bp) to `[Wy, S]` uint32 (84MB) — 2.8x memory reduction plus drastically better cache locality. On CPU, ~3x faster than the int8 loop. SV packed windows are cached on the model for both CPU and GPU, avoiding redundant packing on repeated calls.
+Each l-mer window is packed into a uint32 (2 bits per base, 22 bits for l=11). Match counting uses XOR + popcount on 2-bit fields instead of l individual byte comparisons. This replaces 11 strided memory reads with a single contiguous uint32 read per window pair. On GPU, the SV array goes from `[l, Wy, S]` int8 (229MB for 72K SVs at 300bp) to `[Wy, S]` uint32 (84MB) — 2.8x memory reduction plus drastically better cache locality. On CPU, ~3x faster than the int8 loop.
 
 ## Mismatch table sparsity
 
