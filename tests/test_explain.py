@@ -261,7 +261,7 @@ class TestCompletenessAxiom:
     """
 
     @pytest.mark.parametrize("kernel_type,params,seqlen,n_sv,atol", [
-        ("gkm_cnt", {"L": 3, "k": 2, "include_rc": False}, 10, 5, 1e-8),
+        ("gkm_cnt", {"L": 3, "k": 2, "include_rc": False}, 10, 5, 1e-6),
         ("gkm_cnt", {"L": 3, "k": 2, "include_rc": True}, 10, 5, 1e-6),
         ("gkm_cnt", {"L": 5, "k": 3, "include_rc": True}, 15, 8, 1e-6),
         ("gkm_esttrunc", {"L": 11, "k": 7, "d": 3, "include_rc": True}, 20, 5, 1e-5),

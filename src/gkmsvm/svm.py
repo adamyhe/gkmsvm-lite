@@ -1,17 +1,40 @@
 from __future__ import annotations
 
 import numpy as np
+from numba import njit, prange
 
 from gkmsvm.backend import get_array_module, is_gpu, is_mlx, to_cpu, to_gpu, to_mlx
 from gkmsvm.kernels.base import GkmKernel
 from gkmsvm.kernels.direct import DirectGkmKernel
 from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
 from gkmsvm.kernels.packed import PackedGkmKernel
-from gkmsvm.kernels.rbf import RbfGkmKernel
+from gkmsvm.kernels.rbf import RbfGkmKernel, RbfKernel
 from gkmsvm.kernels.weighted import (
     CenterWeightedGkmKernel,
     CenterWeightedRbfGkmKernel,
 )
+
+
+@njit(parallel=True, cache=True)
+def _normalized_dot(raw, diag_x, diag_sv, norm, coef, gamma):
+    """[B]: sum_s coef_s f(k), k = raw[b, s] / sqrt(diag_x[b] diag_sv[s]) if norm.
+
+    f(k) = exp(gamma (k - 1)) when gamma is not NaN (RBF), else k.
+    """
+    B, S = raw.shape
+    rbf = not np.isnan(gamma)
+    out = np.zeros(B)
+    for b in prange(B):
+        acc = 0.0
+        for s in range(S):
+            k = raw[b, s]
+            if norm:
+                k /= max(np.sqrt(diag_x[b] * diag_sv[s]), 1e-10)
+            if rbf:
+                k = np.exp(gamma * (k - 1.0))
+            acc += coef[s] * k
+        out[b] = acc
+    return out
 
 # Kernel modes:
 #   -t 0  gkm_cnt       / direct          Exact gapped k-mer count
@@ -325,19 +348,32 @@ class GkmSVM:
             return index.pairwise(bx)
         return self.kernel.base.raw_packed(bx, *self._sv_packed())
 
-    def _sv_kernel(self, x):
-        """Kernel values [B, S] of one-hot x (on the model's device) against the SVs."""
+    def _sv_scores(self, x):
+        """sum_s coef_s K(x, sv_s) [B, 1] of one-hot x (on the model's device)."""
         kernel = self.kernel
         base = kernel.base
         if self._sv_packed() is None or not base.packs(x):
-            return kernel.pairwise(x, self.support_sequences)
+            return (kernel.pairwise(x, self.support_sequences)
+                    * self.coefficients).sum(axis=1, keepdims=True)
         xp = get_array_module(x)
         bx, bx_rc = base.pack_both(x)
-        k = self._sv_raw(bx).astype(x.dtype)
-        if base.normalize:
-            diag_x = base.raw_diag_packed(bx, bx_rc).astype(x.dtype)
-            k = k / xp.clip(xp.sqrt(diag_x[:, None] * self._sv_diag()[None, :]), 1e-10, None)
-        return kernel.finish(k)
+        raw = self._sv_raw(bx)
+        diag_x = base.raw_diag_packed(bx, bx_rc) if base.normalize else None
+        if xp is np:
+            # Normalize, finish and reduce in one parallel pass, no [B, S] temporaries
+            norm = diag_x is not None
+            gamma = kernel.gamma if isinstance(kernel, RbfKernel) else np.nan
+            out = _normalized_dot(
+                np.ascontiguousarray(raw, dtype=np.float64),
+                diag_x.astype(np.float64) if norm else np.ones(1),
+                self._sv_diag().astype(np.float64) if norm else np.ones(1),
+                norm, self.coefficients.astype(np.float64), float(gamma))
+            return out.astype(x.dtype)[:, None]
+        k = raw.astype(x.dtype)
+        if diag_x is not None:
+            k = k / xp.clip(xp.sqrt(diag_x.astype(x.dtype)[:, None] * self._sv_diag()[None, :]),
+                            1e-10, None)
+        return (kernel.finish(k) * self.coefficients).sum(axis=1, keepdims=True)
 
     def __call__(
         self, x: np.ndarray, *,
@@ -456,8 +492,7 @@ class GkmSVM:
         if table is not None and self.kernel.packs(x):
             return self._score_lmer_table(x, table)
         rows = max(1, self._MAX_SCORE_BYTES // (8 * self.num_support_vectors))
-        parts = [(self._sv_kernel(x[s:s + rows]) * self.coefficients).sum(axis=1, keepdims=True)
-                 for s in range(0, x.shape[0], rows)]
+        parts = [self._sv_scores(x[s:s + rows]) for s in range(0, x.shape[0], rows)]
         scores = parts[0] if len(parts) == 1 else xp.concatenate(parts, axis=0)
         return scores + self.bias
 
