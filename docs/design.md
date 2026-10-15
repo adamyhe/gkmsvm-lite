@@ -77,7 +77,7 @@ LS-GKM exists because the full N×N kernel matrix doesn't fit in memory at scale
 
 ## LS-GKM model format
 
-Header key-value pairs until `SV` marker, then `<signed_coef> <DNA_sequence>` per line. Key fields: `svm_type`, `kernel_type`, `L`, `k`, `d`, `norc`, `rho`, `nr_class`, `total_sv`. Auto-detects gzip. Binary classification only (nr_class=2).
+Header key-value pairs until `SV` marker, then `<signed_coef> <DNA_sequence>` per line. Key fields: `svm_type`, `kernel_type`, `L`, `k`, `d`, `norc`, `rho`, `nr_class`, `total_sv`. Auto-detects gzip. Binary classification only (nr_class=2). `norc` is optional (missing = RC on); some builds (kundajelab lsgkm) reject the key, so `save_lsgkm` writes it only for RC-off models.
 
 ## Classic gkmSVM format (C)
 
