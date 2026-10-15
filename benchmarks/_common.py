@@ -353,3 +353,55 @@ def gpu_pool_mb() -> float | None:
     except ImportError:
         return None
     return cp.get_default_memory_pool().total_bytes() / 1024**2
+
+
+def _jit_workload(device: str) -> None:
+    """Small calls through the training, scoring and attribution kernels on device."""
+    import numpy as np
+    from gkmsvm import gkmexplain, ism, one_hot_encode, train_gkmsvm
+    from gkmsvm.backend import to_cpu
+
+    rng = np.random.default_rng(0)
+    seqs = ["".join(rng.choice(list("ACGT"), 60)) for _ in range(80)]
+    X = np.stack([one_hot_encode(s) for s in seqs])
+    alt = X.copy()
+    alt[:, :, 30] = np.roll(X[:, :, 30], 1, axis=1)
+    for kernel in ("estimated", "rbf"):
+        for solver in ("libsvm", "smo", "nystrom"):
+            model = train_gkmsvm(seqs[:40], seqs[40:], kernel_type=kernel, l=6, k=4, d=2,
+                                 solver=solver, device=device, verbose=False)
+        if device == "cuda":
+            model.cuda()
+        for table, index in ((True, True), (False, True), (False, False)):
+            model.use_lmer_table, model.use_lmer_index = table, index
+            to_cpu(model(X))
+        for method in ("kernel", "gkmexplain"):
+            to_cpu(model.score_variants(X, alt, method=method))
+        to_cpu(ism(model, X[:4]))
+        if kernel == "estimated":
+            to_cpu(gkmexplain(model, X[:4]))
+        dsvm = model.to_deltasvm(query_norm=True)
+        if device == "cuda":
+            dsvm.cuda()
+        to_cpu(dsvm.score_variants(X, alt))
+    gpu_sync()
+
+
+def warm_jit_cache(device: str) -> None:
+    """Fill the on-disk kernel caches before timed runs, untimed.
+
+    Numba (cache=True) and CuPy keep compiled kernels on disk. After an
+    install or a kernel edit the first process to use a kernel compiles it,
+    which would land in whichever timed run comes first. device "cuda" warms
+    CPU and CUDA kernels.
+    """
+    t0 = time.perf_counter()
+    for dev in ["cpu", "cuda"] if device == "cuda" else ["cpu"]:
+        m = run_measured([sys.executable, str(Path(__file__).resolve()), "--warm-jit", dev])
+        if m.status != "ok":
+            print(f"JIT warm-up on {dev} {m.status}: {m.stderr[-500:]}")
+    print(f"JIT cache warm-up: {time.perf_counter() - t0:.0f}s")
+
+
+if __name__ == "__main__" and sys.argv[1:2] == ["--warm-jit"]:
+    _jit_workload(sys.argv[2])

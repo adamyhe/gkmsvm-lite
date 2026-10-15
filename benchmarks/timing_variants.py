@@ -66,6 +66,7 @@ from _common import (
     lsgkm_version,
     run_measured,
     set_cpu_threads,
+    warm_jit_cache,
     worker_result,
     write_seqs,
     write_tsv,
@@ -272,6 +273,9 @@ def main():
                         choices=LSGKM_THREADS,
                         help="LS-GKM -T where supported, and gkmsvm-lite CPU threads")
     parser.add_argument("--no-lsgkm", action="store_true", help="Skip LS-GKM runs")
+    parser.add_argument("--no-warm-jit", action="store_true",
+                        help="Skip compiling kernels before the timed runs (for smoke tests; "
+                        "the first run of each kernel then includes compiling it)")
     parser.add_argument("--timeout", type=float, default=6 * 3600,
                         help="Per-run timeout in seconds (default: 6 h)")
     parser.add_argument("--keep-work", action="store_true",
@@ -285,6 +289,8 @@ def main():
         return
     # Workers inherit this through the environment
     lite_threads = set_cpu_threads(args.threads)
+    if not args.no_warm_jit:
+        warm_jit_cache(args.device)
 
     args.methods = args.methods.split(",")
     bad = [m for m in args.methods if m not in METHODS]
