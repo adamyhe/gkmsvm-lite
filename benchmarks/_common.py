@@ -175,11 +175,18 @@ def lsgkm_default_threads() -> int:
 
 
 def lsgkm_binary(name: str, conda_env: str = "lsgkm", bin_dir: str | None = None) -> str | None:
-    """Path to an LS-GKM binary: ``bin_dir/name`` if given, else from ``conda_env``."""
-    if bin_dir:
-        path = Path(bin_dir) / name
-        return str(path) if path.exists() else None
-    return _run(["conda", "run", "-n", conda_env, "which", name])
+    """Path to an LS-GKM binary: from ``conda_env`` if it has one, else ``bin_dir/name``.
+
+    The conda build comes first because its gkmpredict takes -T; ``bin_dir``
+    supplies binaries the env lacks (gkmexplain, from a kundajelab source
+    build whose gkmpredict is single-threaded).
+    """
+    path = _run(["conda", "run", "-n", conda_env, "which", name])
+    if path:
+        return path
+    if bin_dir and (Path(bin_dir) / name).exists():
+        return str(Path(bin_dir) / name)
+    return None
 
 
 def lsgkm_has_option(binary: str, option: str) -> bool:

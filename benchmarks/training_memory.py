@@ -111,7 +111,7 @@ def main():
                         help="SMO kernel-column cache (columns)")
     parser.add_argument("--conda-env", default="lsgkm")
     parser.add_argument("--lsgkm-bin", default=None,
-                        help="Directory with LS-GKM binaries (overrides --conda-env)")
+                        help="Directory with LS-GKM binaries the conda env lacks")
     parser.add_argument("--threads", type=int, default=lsgkm_default_threads(),
                         choices=LSGKM_THREADS,
                         help="LS-GKM -T and gkmsvm-lite CPU threads")

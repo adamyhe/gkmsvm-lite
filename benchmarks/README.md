@@ -18,7 +18,7 @@ Per-host settings go in `benchmarks/local.mk`, which make reads if it exists and
 LSGKM_BIN = /path/to/lsgkm/bin
 ```
 
-Panel 1C needs LS-GKM's `gkmexplain`, which some `ls-gkm` conda builds lack; with `LSGKM_BIN` set, 1C takes `gkmexplain` from there and `gkmpredict` from the conda env (which supports `-T`), and also times gkmsvm-lite's CPU at 1 thread, so every LS-GKM bar has a gkmsvm-lite CPU bar at its thread count. The other targets use the `lsgkm` conda env (`LSGKM_ENV`). See [Building LS-GKM with gkmexplain](#building-ls-gkm-with-gkmexplain).
+Panel 1C needs LS-GKM's `gkmexplain`, which some `ls-gkm` conda builds lack. Every script takes each LS-GKM binary from the `lsgkm` conda env (`LSGKM_ENV`) when the env has it, and from `LSGKM_BIN` otherwise: the kundajelab source build's `gkmpredict` has no `-T`, so it would run single-threaded. 1C also times gkmsvm-lite's CPU at 1 thread, so every LS-GKM bar has a gkmsvm-lite CPU bar at its thread count. See [Building LS-GKM with gkmexplain](#building-ls-gkm-with-gkmexplain).
 
 Timed runs each execute in their own process, so the reported peak memory is that run's alone. LS-GKM's `-T` accepts only 1, 4 or 16; scripts default to the largest the process has usable cores for (16 on a 16+ core server; override with `THREADS=`), run gkmsvm-lite's CPU code on the same number of threads, and record both.
 

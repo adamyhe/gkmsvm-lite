@@ -27,9 +27,8 @@ with LS-GKM's output from the same run set.
 
 LS-GKM's gkmexplain is not in every ls-gkm build. If the conda env lacks it,
 build lsgkm from source and pass --lsgkm-bin <dir with gkmexplain>. Each
-binary comes from the conda env when it has it, else from --lsgkm-bin
-(--gkmpredict-bin overrides gkmpredict's), so gkmpredict can run with -T while
-gkmexplain comes from a build without it. gkmsvm-lite's CPU runs repeat at
+binary comes from the conda env when it has it, else from --lsgkm-bin, so
+gkmpredict can run with -T while gkmexplain comes from a build without it. gkmsvm-lite's CPU runs repeat at
 each --lite-cpu-threads count (default: --threads and 1), so every LS-GKM
 time has a gkmsvm-lite CPU time at the same thread count.
 
@@ -266,9 +265,6 @@ def main():
     parser.add_argument("--conda-env", default="lsgkm")
     parser.add_argument("--lsgkm-bin", default=None,
                         help="Directory with LS-GKM binaries the conda env lacks (gkmexplain)")
-    parser.add_argument("--gkmpredict-bin", default=None,
-                        help="Directory with the gkmpredict to use (default: conda env, "
-                        "else --lsgkm-bin)")
     parser.add_argument("--lite-cpu-threads", default=None,
                         help="Comma-separated gkmsvm-lite CPU thread counts "
                         "(default: --threads,1)")
@@ -298,10 +294,7 @@ def main():
     bins, threads = {}, {}
     if not args.no_lsgkm:
         for name in ("gkmpredict", "gkmexplain"):
-            override = args.gkmpredict_bin if name == "gkmpredict" else None
-            bins[name] = (lsgkm_binary(name, bin_dir=override) if override else
-                          lsgkm_binary(name, args.conda_env)
-                          or (args.lsgkm_bin and lsgkm_binary(name, bin_dir=args.lsgkm_bin)))
+            bins[name] = lsgkm_binary(name, args.conda_env, args.lsgkm_bin)
             threads[name] = (args.threads if bins[name] and lsgkm_has_option(bins[name], "-T")
                              else None)
         need = {"gkmpredict"} | ({"gkmexplain"} if "GkmExplain" in args.methods else set())
@@ -320,8 +313,8 @@ def main():
     cpu_threads = ([int(t) for t in args.lite_cpu_threads.split(",")] if args.lite_cpu_threads
                    else list(dict.fromkeys([lite_threads, 1])))
     # (device, CPU threads) for each gkmsvm-lite run
-    runs = [("cpu", t) for t in cpu_threads] + ([("cuda", lite_threads)]
-                                                 if args.device == "cuda" else [])
+    lite_runs = [("cpu", t) for t in cpu_threads] + ([("cuda", lite_threads)]
+                                                      if args.device == "cuda" else [])
     n_items = {"ISM": info["n_variants"], "GkmExplain": info["n_variants"],
                "deltaSVM": 4**L, "deltaSVM scoring": info["n_variants"]}
     rows = []
@@ -352,7 +345,7 @@ def main():
             print(f"  LS-GKM ({threads[binary] or 1} threads): {wall:.1f}s  "
                   f"peak {peak:.0f} MB  [{status}]")
 
-        for device, n_thr in runs:
+        for device, n_thr in lite_runs:
             spec = {"method": method, "device": device, "model": info["model"],
                     "work": str(work), "batch_size": args.batch_size, "threads": n_thr}
             m = run_measured([sys.executable, __file__, "--worker", json.dumps(spec)],

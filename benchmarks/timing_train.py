@@ -365,7 +365,7 @@ def main():
     parser.add_argument("--conda-env", default="lsgkm",
                         help="Conda env containing ls-gkm (default: lsgkm)")
     parser.add_argument("--lsgkm-bin", default=None,
-                        help="Directory with LS-GKM binaries (overrides --conda-env)")
+                        help="Directory with LS-GKM binaries the conda env lacks")
     parser.add_argument("--setup", action="store_true",
                         help="Create the conda env before benchmarking")
     parser.add_argument("--device", default="cpu", choices=["cpu", "cuda", "mlx"],

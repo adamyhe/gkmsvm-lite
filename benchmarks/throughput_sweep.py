@@ -121,7 +121,7 @@ def main():
     parser.add_argument("--batch-size", type=int, default=1000)
     parser.add_argument("--conda-env", default="lsgkm")
     parser.add_argument("--lsgkm-bin", default=None,
-                        help="Directory with gkmpredict (default: from --conda-env)")
+                        help="Directory with LS-GKM binaries the conda env lacks")
     parser.add_argument("--threads", type=int, default=lsgkm_default_threads(),
                         choices=LSGKM_THREADS,
                         help="LS-GKM -T and gkmsvm-lite CPU threads")
