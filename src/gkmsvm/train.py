@@ -222,6 +222,10 @@ def train_gkmsvr(
     Returns:
         A trained GkmSVM model. Scores are predicted continuous values.
     """
+    if solver not in ("auto", "libsvm", "nystrom"):
+        raise ValueError(
+            f"solver must be 'auto', 'libsvm' or 'nystrom' for SVR, got {solver!r}"
+        )
     X = _to_onehot(sequences)
     X = _move_to_device(X, device, verbose)
     y = np.asarray(labels, dtype=np.float64)

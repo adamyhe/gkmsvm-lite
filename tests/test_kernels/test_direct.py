@@ -113,23 +113,25 @@ class TestDirectGkmKernelRC:
         assert float(k[0, 0]) == pytest.approx(1.0)
 
 
-class TestApplyTableDispatch:
-    """Verify _apply_table gives correct results."""
+def _table_oracle(kernel, x, y):
+    """K_raw from one-hot window match counts and the mismatch table."""
+    matches = np.einsum("bif,sjf->bsij", kernel.flat_windows(x), kernel.flat_windows(y))
+    mism = np.clip(np.rint(kernel.l - matches).astype(np.int64), 0, kernel.l)
+    return np.asarray(kernel._mismatch_table)[mism].sum(axis=(-2, -1))
 
-    def test_apply_table_consistency(self):
+
+class TestTableOracle:
+    """The packed path matches a one-hot match-count + table oracle."""
+
+    def test_direct(self):
         kernel = DirectGkmKernel(l=5, k=3, normalize=False, include_rc=False)
         x = np.stack([one_hot_encode(s) for s in ["ACGTACGT", "TGCATGCA", "AAACCCGG"]])
         y = np.stack([one_hot_encode(s) for s in ["CCCCGGGG", "ACGTACGT"]])
-        wx = kernel.flat_windows(x)
-        wy = kernel.flat_windows(y)
-        matches = np.einsum("bif,sjf->bsij", wx, wy)
-
-        result = kernel._apply_table(matches)
-        # Verify against direct pairwise
+        result = _table_oracle(kernel, x, y)
         direct = kernel._raw_pairwise(x, y)
         np.testing.assert_allclose(result, direct, atol=1e-10)
 
-    def test_apply_table_esttrunc(self):
+    def test_esttrunc(self):
         from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
         kernel = EstTruncGkmKernel(11, 7, d=3, normalize=False, include_rc=False)
         import random
@@ -137,11 +139,7 @@ class TestApplyTableDispatch:
         seqs = ["".join(rng.choice("ACGT") for _ in range(30)) for _ in range(10)]
         x = np.stack([one_hot_encode(s) for s in seqs[:4]])
         y = np.stack([one_hot_encode(s) for s in seqs[4:]])
-        wx = kernel.flat_windows(x)
-        wy = kernel.flat_windows(y)
-        matches = np.einsum("bif,sjf->bsij", wx, wy)
-
-        result = kernel._apply_table(matches)
+        result = _table_oracle(kernel, x, y)
         direct = kernel._raw_pairwise(x, y)
         np.testing.assert_allclose(result, direct, atol=1e-10)
 

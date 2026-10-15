@@ -2,10 +2,8 @@
 
 ## Kernel paths
 
-Two kernel computation paths, selected automatically:
-
-- **Packed uint32 path** (`pairwise_from_indices`): Base indices packed to uint32 (2 bits/base), match counting via XOR + popcount. Used by default forward pass, ISM, and GkmExplain. ~3x faster than int8 on CPU.
-- **Float path** (`pairwise_from_windows`): Flattened one-hot dot products. Used by weighted kernels (`-t 4`/`-t 5`). GkmExplain falls back to this path for weighted kernels.
+- **Packed uint32 path** (`pairwise_from_indices`): Base indices packed to uint32 (2 bits/base), match counting via XOR + popcount. Used by the forward pass, ISM, and GkmExplain. ~3x faster than int8 on CPU. With 16+ sequences on both sides it uses the masked join (`kernels/masked.py`) instead of comparing every window pair.
+- **Weighted kernels** (`-t 4`/`-t 5`): the masked join with per-mask weights; inputs with N positions use a per-position match path.
 
 ## CPU backend
 

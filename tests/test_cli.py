@@ -74,6 +74,17 @@ class TestTrain:
         model = load_npz(model_path)
         assert model.num_support_vectors > 0
 
+    def test_trainsvr(self, tmp_fasta, tmp_path):
+        seqs = tmp_fasta("seqs.fa", 30)
+        labels = tmp_path / "labels.txt"
+        labels.write_text("\n".join(str(0.1 * i) for i in range(30)) + "\n")
+        model_path = str(tmp_path / "svr.npz")
+
+        main(["trainsvr", "-i", seqs, "--labels", str(labels), "-o", model_path,
+              "-l", "5", "-k", "3", "-t", "direct", "--device", "cpu"])
+
+        assert Path(model_path).exists()
+
     def test_train_lsgkm_format(self, tmp_fasta, tmp_path):
         pos = tmp_fasta("pos.fa", 20)
         neg = tmp_fasta("neg.fa", 20)

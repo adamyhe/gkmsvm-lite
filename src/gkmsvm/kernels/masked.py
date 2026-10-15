@@ -1,4 +1,4 @@
-"""Masked-join pairwise kernel for tables with a mismatch cutoff (CPU).
+"""Masked-join pairwise kernel for tables with a mismatch cutoff (CPU, CUDA, Metal).
 
 The packed kernels compare every window pair: K_raw(x, y) = sum_{i,j}
 h(m(x_i, y_j)), with h(m) = 0 for m > dmax. Writing
@@ -18,7 +18,6 @@ summation order.
 
 from __future__ import annotations
 
-import time
 from functools import cache
 from itertools import combinations
 from math import comb
@@ -279,16 +278,14 @@ extern "C" __global__ void masked_scatter(
 // One block per query sequence b. Counts matches per column sequence in
 // shared memory (exact int32), then result[b, :] += coef * counts. Only this
 // block writes row b, so the final update needs no atomics.
-// Lane groups of `lanes` threads share each bucket scan (contiguous reads).
-// window_outer = 1: a group takes one query window, loads it once and loops
-// over the masks; 0: a group takes one (mask, window) item. The chunk's runs
-// sit in shared memory after the counters.
+// Lane groups of `lanes` threads share each bucket scan (contiguous reads);
+// a group takes one (mask, window) item. The chunk's runs sit in shared
+// memory after the counters.
 extern "C" __global__ void masked_join(
     const unsigned int* __restrict__ bx, int Wx,
     const unsigned int* __restrict__ runs, int R, int M, long long K,
     const int* __restrict__ offsets, const unsigned short* __restrict__ colseq,
-    long long n_win, int S, double coef, double* __restrict__ result, int lanes,
-    int window_outer)
+    long long n_win, int S, double coef, double* __restrict__ result, int lanes)
 {
     extern __shared__ int smem[];
     int* counts = smem;
@@ -299,19 +296,13 @@ extern "C" __global__ void masked_join(
     __syncthreads();
     int group = threadIdx.x / lanes, lane = threadIdx.x % lanes;
     int n_groups = blockDim.x / lanes;
-    int items = window_outer ? Wx : M * Wx;
-    for (int it = group; it < items; it += n_groups) {
-        int i = window_outer ? it : it % Wx;
-        int m0 = window_outer ? 0 : it / Wx;
-        int m1 = window_outer ? M : m0 + 1;
-        unsigned int w = bx[(long long)b * Wx + i];
-        for (int m = m0; m < m1; m++) {
-            unsigned int key = masked_key(w, s_runs + m * R * 3, R);
-            const int* off = offsets + m * (K + 1);
-            const unsigned short* cs = colseq + m * n_win;
-            int hi = off[key + 1];
-            for (int t = off[key] + lane; t < hi; t += lanes) atomicAdd(&counts[cs[t]], 1);
-        }
+    for (int it = group; it < M * Wx; it += n_groups) {
+        int m = it / Wx, i = it % Wx;
+        unsigned int key = masked_key(bx[(long long)b * Wx + i], s_runs + m * R * 3, R);
+        const int* off = offsets + m * (K + 1);
+        const unsigned short* cs = colseq + m * n_win;
+        int hi = off[key + 1];
+        for (int t = off[key] + lane; t < hi; t += lanes) atomicAdd(&counts[cs[t]], 1);
     }
     __syncthreads();
     for (int s = threadIdx.x; s < S; s += blockDim.x) {
@@ -326,25 +317,10 @@ _cuda_module = None
 _GPU_COL_TILE = 8192
 # Masks per index build: bounds index memory (offsets + one id per window per mask)
 _GPU_MASK_CHUNK = 32
-# Set to a dict to accumulate per-stage seconds (synchronizes between stages)
-GPU_PROFILE: dict | None = None
 # Threads that share one bucket scan in the join (power of two <= 32)
-GPU_JOIN_LANES = 16  # best on a Titan Xp (sweep 1-32: 16 > 8 > 4 > 32 > 1)
-# 0: one (mask, window) item per lane group; 1: each group loads a query
-# window once and loops over the masks (slower on a Titan Xp and an M4)
-GPU_JOIN_WINDOW_OUTER = 0  # Titan Xp N=5000 Gram: item 1.60 s, window 1.85 s
-
-
-def _stage(name, t0):
-    """Add the time since t0 to GPU_PROFILE[name]; returns the new start time."""
-    import cupy as cp
-
-    if GPU_PROFILE is None:
-        return t0
-    cp.cuda.get_current_stream().synchronize()
-    now = time.perf_counter()
-    GPU_PROFILE[name] = GPU_PROFILE.get(name, 0.0) + now - t0
-    return now
+_GPU_JOIN_LANES = 16  # best on a Titan Xp (sweep 1-32: 16 > 8 > 4 > 32 > 1)
+# One (mask, window) item per lane group beat one query window looping over
+# the masks (Titan Xp N=5000 Gram: 1.60 s vs 1.85 s; also slower on an M4)
 
 
 def _cuda_kernels():
@@ -384,7 +360,6 @@ def masked_pairwise_gpu(bx_packed, by_packed, plan, by_rc_packed=None):
         for j, coef, positions in plan:
             K = 1 << (2 * j)
             for m0 in range(0, len(positions), _GPU_MASK_CHUNK):
-                t0 = time.perf_counter()
                 runs_np = mask_runs(positions[m0 : m0 + _GPU_MASK_CHUNK])
                 M, R = runs_np.shape[0], runs_np.shape[1]
                 runs = cp.asarray(runs_np.ravel())
@@ -400,13 +375,11 @@ def masked_pairwise_gpu(bx_packed, by_packed, plan, by_rc_packed=None):
                 scatter((grid,), (block,),
                         (by, np.int64(n_win), np.int32(Wy), seq_of_row, runs, np.int32(R),
                          np.int32(M), np.int64(K), fill, colseq))
-                t0 = _stage(f"index j={j}", t0)
                 join((B,), (block,),
                      (bx, np.int32(Wx), runs, np.int32(R), np.int32(M), np.int64(K),
                       offsets, colseq, np.int64(n_win), np.int32(S), np.float64(coef),
-                      res_tile, np.int32(GPU_JOIN_LANES), np.int32(GPU_JOIN_WINDOW_OUTER)),
+                      res_tile, np.int32(_GPU_JOIN_LANES)),
                      shared_mem=(S + M * R * 3) * 4)
-                _stage(f"join j={j}", t0)
         result[:, c0:c1] = res_tile
     return result
 
@@ -562,8 +535,6 @@ _METAL_SCATTER = """
 
 _metal_hist = None
 _metal_scatter = None
-# Build the column index on the GPU (True) or with Numba on the CPU (False)
-METAL_INDEX = True
 
 
 def _metal_index(by_mx, seq_of_row_mx, chunk, j, Wy):
@@ -622,8 +593,7 @@ def _get_metal_join():
 
 
 def masked_pairwise_mlx(bx_packed, by_packed, plan, by_rc_packed=None) -> np.ndarray:
-    """Metal version of masked_pairwise(); the index is built in Metal too
-    unless METAL_INDEX is False (then with Numba on the CPU).
+    """Metal version of masked_pairwise(); the column index is built in Metal too.
 
     Inputs may be NumPy or MLX uint32 arrays. Returns [B, S] float64 NumPy,
     combined exactly from per-level integer counts.
@@ -646,18 +616,13 @@ def masked_pairwise_mlx(bx_packed, by_packed, plan, by_rc_packed=None) -> np.nda
         by = np.ascontiguousarray(np.concatenate(rows))
         seq_of_row = np.tile(np.arange(S, dtype=np.int32), len(rows))
         n_win = by.shape[0] * Wy
-        if METAL_INDEX:
-            by_mx, seq_mx = mx.array(by.ravel()), mx.array(seq_of_row)
+        by_mx, seq_mx = mx.array(by.ravel()), mx.array(seq_of_row)
         for j, coef, positions in plan:
             K1 = (1 << (2 * j)) + 1
             level = None
             for m0 in range(0, len(positions), _MASK_CHUNK):
                 chunk = positions[m0 : m0 + _MASK_CHUNK]
-                if METAL_INDEX:
-                    offsets, colseq = _metal_index(by_mx, seq_mx, chunk, j, Wy)
-                else:
-                    offsets, colseq = _build_column_index(by, seq_of_row, mask_runs(chunk), j)
-                    offsets, colseq = mx.array(offsets.ravel()), mx.array(colseq.ravel())
+                offsets, colseq = _metal_index(by_mx, seq_mx, chunk, j, Wy)
                 runs_np = mask_runs(chunk)
                 params = mx.array([Wx, runs_np.shape[0], runs_np.shape[1], S, _METAL_LANES,
                                    K1, n_win], dtype=mx.int32)

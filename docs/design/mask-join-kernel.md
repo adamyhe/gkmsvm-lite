@@ -19,7 +19,7 @@ LS-GKM computes the same kernel with a k-mer tree that abandons a branch beyond 
 | 2,000 | 22.3 s | 56.8 s | 1.8 s | 12× |
 | 5,000 | 75.4 s | 353 s | 8.9 s | 8.5× |
 
-Fitted time ∝ N^b between 2k and 5k: LS-GKM b = 1.33, lite GPU b = 1.74 (heading to 2), lite CPU b = 1.99. Extrapolated to the full GM12878 set (~45k), the GPU's lead falls to 2–3.5×, and the CPU is ~10× slower than LS-GKM. Diagonal-tile symmetry (already on `main`) and a pigeonhole filter (`benchmarks/dev/pigeonhole_gram.py`, 1.5–2.2×) shift the curve but don't change its slope.
+Fitted time ∝ N^b between 2k and 5k: LS-GKM b = 1.33, lite GPU b = 1.74 (heading to 2), lite CPU b = 1.99. Extrapolated to the full GM12878 set (~45k), the GPU's lead falls to 2–3.5×, and the CPU is ~10× slower than LS-GKM. Diagonal-tile symmetry (already on `main`) and a pigeonhole filter (1.5–2.2×; the prototype script is in git history) shift the curve but don't change its slope.
 
 ## The identity
 
@@ -47,7 +47,7 @@ The math is derived here, not taken from LS-GKM's source. Keep it that way: LS-G
 
 ## Measured on real sequences
 
-`benchmarks/dev/mask_join_proto.py` implements the identity with scipy.sparse (one sparse product per mask) and compares it with the brute-force kernel. 200 GM12878 sequences (100 DHS, 100 null set 1), 300 bp, with RC:
+A scipy.sparse prototype (since removed; see git history) implemented the identity (one sparse product per mask) and compared it with the brute-force kernel. 200 GM12878 sequences (100 DHS, 100 null set 1), 300 bp, with RC:
 
 | Setting | max \|ΔK\| / max \|K\| | Brute-force window pairs | Join hits | Ratio |
 |---|---|---|---|---|
@@ -117,7 +117,7 @@ This is the simplest, largest win in this doc. Do it before the masked join's ph
 | Gram tiles (`_fast_pairwise_tile`, `_fit_libsvm`, `_fit_libsvm_gpu_gram`, Nyström) | `gram.py`, `train.py` | 1 |
 | Prediction, `-t 0`/`-t 1`/`-t 2` (`GkmSVM.__call__`) | `svm.py`, `deltasvm.py` (l-mer table) | 1b |
 | Prediction, `-t 3` | `svm.py` (`pairwise_from_indices` calls) | 2 |
-| SMO kernel columns (`KernelColumnCache._compute_column`) | `solver.py` | 3 |
+| SMO kernel columns (`KernelColumnCache.compute_columns`) | `solver.py` | 3 |
 | ISM, GkmExplain, deltaSVM tables | `ism.py`, `explain.py`, `deltasvm.py` | Out of scope |
 
 - **Phase 1:** a new method beside `pairwise_from_indices`, e.g. `pairwise_masked(bx, by, by_rc)`, used by `compute_gram` when the kernel has a finite `dmax` and the mask count is reasonable. Keep the brute-force path as the fallback and the test oracle.
@@ -126,7 +126,7 @@ This is the simplest, largest win in this doc. Do it before the masked join's ph
 - **Phase 3:** SMO columns are one query sequence against all N. The per-call sort cost dominates unless the column-side index persists, which is the same memory problem. Revisit after phases 1 and 2.
 - ISM and GkmExplain rely on per-window kernel structure (window-delta ISM, per-position attribution); a masked version is a separate design.
 
-Out of scope: `-t 4`/`-t 5` weighted kernels (per-position DP, no packed path), and any table without a finite `dmax`.
+Out of scope: any table without a finite `dmax`. (`-t 4`/`-t 5` were originally out of scope too; they now use the join through `weighted_mask_plan`, with the per-position path kept for inputs with N.)
 
 ## MLX (Apple GPU) plan
 
@@ -150,7 +150,7 @@ Steps, cheapest first:
 3. **Move the index build to Metal**, if profiling shows it matters. Histogram and scatter use atomic outputs with `atomic_fetch_add_explicit`, and the prefix sum uses `mx.cumsum`.
 4. **Self-kernel diagonals.** Keep them on CPU (`masked_self_kernel` for `-t 4`, the packed diagonal for `-t 0`–`-t 2`); they're O(B·W log W) per call.
 
-Validation: `tests/test_mlx.py` patterns plus exactness against the CPU masked join (integer counts make bitwise equality achievable). Benchmark: `masked_gpu_check.py` adapted for MLX on an M-series Mac, against the CPU masked path on the same machine. The CPU path is already fast there (1,000-sequence Gram in 1.3 s on an M4), so ship the Metal join only if it is clearly faster.
+Validation: `tests/test_mlx.py` patterns plus exactness against the CPU masked join (integer counts make bitwise equality achievable). Benchmark: a dev check script (since removed) run on an M-series Mac, against the CPU masked path on the same machine. The CPU path is already fast there (1,000-sequence Gram in 1.3 s on an M4), so ship the Metal join only if it is clearly faster.
 
 Testing needs `mlx` installed (`uv pip install -e ".[mlx]"`); it isn't in the current dev environment.
 
@@ -169,7 +169,6 @@ Testing needs `mlx` installed (`uv pip install -e ".[mlx]"`); it isn't in the cu
 
 ## Benchmarks and success criteria
 
-- `benchmarks/dev/mask_join_proto.py --n N`: correctness and hit counts.
 - `python benchmarks/timing_train.py --device cuda --sizes 1000,2000,5000,10000,20000`: compare against the table above, on the same server and thread count.
 - `make -B s3`: solver sweep up to the full dataset.
 
@@ -188,8 +187,6 @@ Targets:
 
 ## Files
 
-- `benchmarks/dev/mask_join_proto.py`: scipy reference implementation and hit counter.
-- `benchmarks/dev/pigeonhole_gram.py`: pigeonhole filter on the brute-force loop (negative result: 1.5–2.2×).
 - `src/gkmsvm/kernels/direct.py`: packing (`_pack_windows_cpu`), brute-force kernels (`_fused_pairwise_packed_numba`, `_fused_pairwise_packed_sym_numba`), `pairwise_from_indices`, `_min_matches`.
 - `src/gkmsvm/kernels/esttrunc.py`: `_build_estlmer_table` (h(m) for `-t 1`/`-t 2`).
 - `src/gkmsvm/gram.py`: tiling, symmetry, normalization, `-t 3` handling.

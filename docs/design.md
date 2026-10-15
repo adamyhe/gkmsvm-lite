@@ -72,7 +72,7 @@ Two solver backends, selected automatically based on available memory:
 
 **Precomputed Gram + sklearn** (`solver="libsvm"`, default for small N): Computes the full N×N kernel matrix via tiled Gram computation, then calls scikit-learn's LIBSVM-backed `SVC(kernel='precomputed')` / `SVR(kernel='precomputed')`. Supports both C-SVC (`train_gkmsvm`, `-s 0`) and epsilon-SVR (`train_gkmsvr`, `-s 3`). Fast — LIBSVM's SMO is highly optimized — but requires O(N²) memory.
 
-**Column-cached SMO** (`solver="smo"`, large N): WSS3 working set selection (Fan et al. 2005) with shrinking and LRU-cached kernel columns. Memory is O(cache_size × N) instead of O(N²). Currently supports C-SVC only. A C extension (`_csmo`) handles the optimization loop; kernel columns are computed by `KernelColumnCache` using the fastest available backend (Numba CPU, CuPy GPU, or MLX). Falls back to a pure-Python serial solver when the C extension is unavailable.
+**Column-cached SMO** (`solver="smo"`, large N): WSS3 working set selection (Fan et al. 2005) with shrinking and cached kernel columns. Memory is O(cache_size × N) instead of O(N²). Currently supports C-SVC only. A C extension (`_csmo`) handles the optimization loop and the column cache; kernel columns are computed in batches by `KernelColumnCache` using the fastest available backend (Numba CPU, CuPy GPU, or MLX). Installs still succeed if the extension fails to compile, but `solver="smo"` then raises.
 
 **Nyström approximation** (`solver="nystrom"`): Low-rank kernel approximation using landmark points. Faster than both Gram and SMO for large datasets, but produces an approximate solution. Useful when exact training is too slow and approximate is acceptable.
 

@@ -32,90 +32,17 @@ def _biased_seqs(n, length, rng, bias_base=0):
 
 
 class TestKernelColumnCache:
-    def test_column_matches_pairwise(self):
+    @pytest.mark.parametrize("kernel", [
+        DirectGkmKernel(l=7, k=5, normalize=True, include_rc=True),
+        EstTruncGkmKernel(l=7, k=5, d=3, normalize=True, include_rc=True),
+    ])
+    def test_column_matches_pairwise(self, kernel):
         rng = np.random.default_rng(42)
         X = _random_seqs(20, 20, rng)
-        kernel = DirectGkmKernel(l=7, k=5, normalize=True, include_rc=True)
-
-        cache = KernelColumnCache(kernel, X, max_columns=10)
+        cache = KernelColumnCache(kernel, X)
         expected = kernel.pairwise(X, X)
-
         for i in range(X.shape[0]):
-            col = cache.get_column(i)
-            np.testing.assert_allclose(col, expected[i], atol=1e-10)
-
-    def test_column_matches_esttrunc(self):
-        rng = np.random.default_rng(42)
-        X = _random_seqs(15, 20, rng)
-        kernel = EstTruncGkmKernel(
-            l=7, k=5, d=3, normalize=True, include_rc=True
-        )
-
-        cache = KernelColumnCache(kernel, X, max_columns=10)
-        expected = kernel.pairwise(X, X)
-
-        for i in range(X.shape[0]):
-            col = cache.get_column(i)
-            np.testing.assert_allclose(col, expected[i], atol=1e-10)
-
-    def test_cache_hit_returns_same(self):
-        rng = np.random.default_rng(42)
-        X = _random_seqs(10, 20, rng)
-        kernel = DirectGkmKernel(l=7, k=5, normalize=True, include_rc=True)
-
-        cache = KernelColumnCache(kernel, X, max_columns=5)
-        col1 = cache.get_column(3)
-        col2 = cache.get_column(3)
-
-        assert col1 is col2
-        assert cache.hits == 1
-        assert cache.misses == 1
-
-    def test_lru_eviction(self):
-        rng = np.random.default_rng(42)
-        X = _random_seqs(10, 20, rng)
-        kernel = DirectGkmKernel(l=7, k=5, normalize=True, include_rc=True)
-
-        cache = KernelColumnCache(kernel, X, max_columns=3)
-
-        cache.get_column(0)
-        cache.get_column(1)
-        cache.get_column(2)
-        assert len(cache._cache) == 3
-
-        cache.get_column(3)
-        assert len(cache._cache) == 3
-        assert 0 not in cache._cache
-        assert 3 in cache._cache
-
-    def test_lru_touch_prevents_eviction(self):
-        rng = np.random.default_rng(42)
-        X = _random_seqs(10, 20, rng)
-        kernel = DirectGkmKernel(l=7, k=5, normalize=True, include_rc=True)
-
-        cache = KernelColumnCache(kernel, X, max_columns=3)
-
-        cache.get_column(0)
-        cache.get_column(1)
-        cache.get_column(2)
-        cache.get_column(0)  # touch 0, making 1 the oldest
-        cache.get_column(3)  # evicts 1, not 0
-
-        assert 0 in cache._cache
-        assert 1 not in cache._cache
-
-    def test_column_symmetry(self):
-        rng = np.random.default_rng(42)
-        X = _random_seqs(15, 20, rng)
-        kernel = DirectGkmKernel(l=7, k=5, normalize=True, include_rc=True)
-
-        cache = KernelColumnCache(kernel, X, max_columns=15)
-
-        for i in range(5):
-            for j in range(i + 1, 5):
-                col_i = cache.get_column(i)
-                col_j = cache.get_column(j)
-                assert col_i[j] == pytest.approx(col_j[i], abs=1e-10)
+            np.testing.assert_allclose(cache.compute_columns([i])[i], expected[i], atol=1e-10)
 
 
 class TestSmoSolve:
@@ -387,17 +314,23 @@ class TestTrainGkmsvr:
 
 
 class TestSmoPrefetch:
-    def test_get_columns_matches_get_column(self):
+    def test_batched_columns_match_single(self):
         rng = np.random.default_rng(7)
         X = _random_seqs(40, 30, rng)
         kernel = EstTruncGkmKernel(l=7, k=5, d=3, normalize=True, include_rc=True)
-        batch = KernelColumnCache(kernel, X, max_columns=64)
-        single = KernelColumnCache(kernel, X, max_columns=64)
+        cache = KernelColumnCache(kernel, X)
         idx = list(range(3, 40, 2))  # >= 16 columns: masked-join path
-        batch.get_columns(idx)
+        batch = cache.compute_columns(idx)
         for i in idx:
-            np.testing.assert_allclose(batch.get_column(i), single.get_column(i),
+            np.testing.assert_allclose(batch[i], cache.compute_columns([i])[i],
                                        rtol=1e-12, atol=1e-14)
+
+    def test_unnormalized_kernel_raises(self):
+        rng = np.random.default_rng(0)
+        X = _random_seqs(10, 20, rng)
+        kernel = DirectGkmKernel(l=7, k=5, normalize=False, include_rc=True)
+        with pytest.raises(ValueError, match="normalized"):
+            smo_solve(kernel, X, np.array([1.0, -1.0] * 5))
 
     def test_prefetch_does_not_change_solution(self, monkeypatch):
         import gkmsvm.solver as solver

@@ -16,7 +16,7 @@ offset loads.
 Usage (GPU server):
   python benchmarks/dev/masked_gpu_ablation.py --rows 5000 --cols 1000
   nsys profile --stats=true -o masked_gram \\
-      python benchmarks/dev/masked_gpu_check.py --sizes 5000
+      python benchmarks/timing_train.py --device cuda --sizes 5000
 """
 
 from __future__ import annotations
