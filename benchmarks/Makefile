@@ -57,7 +57,7 @@ endif
 
 COMMON := _common.py
 THR    := $(if $(THREADS),--threads $(THREADS))
-# gkmexplain may be missing from conda's ls-gkm; point LSGKM_BIN at a source build
+# gkmexplain is not in conda's ls-gkm: point LSGKM_BIN at a kundajelab/lsgkm source build
 LSGKM  := --conda-env $(LSGKM_ENV) $(if $(LSGKM_BIN),--lsgkm-bin $(LSGKM_BIN))
 DSQTL  := dsqtl_auprc.py $(COMMON)
 

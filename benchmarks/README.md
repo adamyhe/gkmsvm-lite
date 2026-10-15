@@ -18,7 +18,7 @@ Per-host settings go in `benchmarks/local.mk`, which make reads if it exists and
 LSGKM_BIN = /path/to/lsgkm/bin
 ```
 
-Panel 1C needs LS-GKM's `gkmexplain`, which some `ls-gkm` conda builds lack. Every script takes each LS-GKM binary from the `lsgkm` conda env (`LSGKM_ENV`) when the env has it, and from `LSGKM_BIN` otherwise: the kundajelab source build's `gkmpredict` has no `-T`, so it would run single-threaded. 1C also times gkmsvm-lite's CPU at 1 thread, so every LS-GKM bar has a gkmsvm-lite CPU bar at its thread count. See [Building LS-GKM with gkmexplain](#building-ls-gkm-with-gkmexplain).
+Panel 1C needs LS-GKM's `gkmexplain`, which the Beer lab's LS-GKM and the bioconda `ls-gkm` package don't have; the kundajelab fork does. Every script takes each LS-GKM binary from the `lsgkm` conda env (`LSGKM_ENV`) when the env has it, and from `LSGKM_BIN` otherwise: the kundajelab source build's `gkmpredict` has no `-T`, so it would run single-threaded. 1C times both implementations' CPU code at `THREADS` and at 1 thread (LS-GKM binaries without `-T` at 1 only), so every LS-GKM bar has a gkmsvm-lite CPU bar at its thread count. LS-GKM's `-T` splits each sequence's kernel sum across threads, so it slows down the deltaSVM build (524,800 10-mers): on one 16-core server, 3,773 s at `-T 16` against 684 s at `-T 1`. See [Building LS-GKM with gkmexplain](#building-ls-gkm-with-gkmexplain).
 
 Timed runs each execute in their own process, so the reported peak memory is that run's alone. LS-GKM's `-T` accepts only 1, 4 or 16; scripts default to the largest the process has usable cores for (16 on a 16+ core server; override with `THREADS=`), run gkmsvm-lite's CPU code on the same number of threads, and record both.
 

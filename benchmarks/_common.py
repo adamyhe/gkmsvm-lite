@@ -178,8 +178,8 @@ def lsgkm_binary(name: str, conda_env: str = "lsgkm", bin_dir: str | None = None
     """Path to an LS-GKM binary: from ``conda_env`` if it has one, else ``bin_dir/name``.
 
     The conda build comes first because its gkmpredict takes -T; ``bin_dir``
-    supplies binaries the env lacks (gkmexplain, from a kundajelab source
-    build whose gkmpredict is single-threaded).
+    supplies binaries the env lacks (gkmexplain, which the kundajelab fork
+    has; its gkmpredict is single-threaded).
     """
     path = _run(["conda", "run", "-n", conda_env, "which", name])
     if path:
