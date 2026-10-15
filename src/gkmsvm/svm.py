@@ -352,12 +352,14 @@ class GkmSVM:
             x: [B, 4, L] one-hot encoded DNA sequences.
             batch_size: Process inputs in batches of this size.  ``None``
                 means process all at once.  When set, ``verbose`` shows
-                progress over input batches instead of SV chunks.
+                progress over input batches instead of SV chunks.  Raised
+                to at least ``_min_batch_size()``.
             verbose: Show tqdm progress bar.
 
         Returns:
             [B, 1] uncalibrated decision values.
         """
+        batch_size = self._min_batch_size(batch_size)
         if batch_size is not None and x.shape[0] > batch_size:
             chunks = range(0, x.shape[0], batch_size)
             if verbose:
@@ -378,6 +380,16 @@ class GkmSVM:
 
     # "auto" builds the l-mer table only for models at least this large
     _LMER_TABLE_MIN_SVS = 500
+
+    # Each kernel call pays a fixed per-SV cost (the masked join indexes every
+    # SV window: ~6 s for 32k SVs on CPU), so batches fill at least this many
+    # bytes of [batch, S] float64
+    _MIN_BATCH_BYTES = 256 * 2**20
+
+    def _min_batch_size(self, batch_size: int | None) -> int | None:
+        if batch_size is None:
+            return None
+        return max(batch_size, self._MIN_BATCH_BYTES // (8 * self.num_support_vectors))
 
     def _build_lmer_table(self) -> np.ndarray | None:
         """Exact table w(u) = sum_sv c_sv K_raw(u, sv) over packed l-mers (cached).
@@ -580,8 +592,11 @@ class GkmSVM:
             [B, 1] score differences.
         """
         if method == "kernel":
-            return (self(alt, batch_size=batch_size, verbose=verbose)
-                    - self(ref, batch_size=batch_size, verbose=verbose))
+            # Both alleles in the same calls share the per-call SV cost
+            n = ref.shape[0]
+            scores = self(get_array_module(ref).concatenate([alt, ref]),
+                          batch_size=batch_size, verbose=verbose)
+            return scores[:n] - scores[n:]
 
         if method == "gkmexplain":
             from gkmsvm.explain import mutation_impact
