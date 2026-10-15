@@ -72,12 +72,16 @@ def _counting_sort(keys, ids, offsets):
 
 
 @njit(parallel=True, cache=True)
-def _query_cpu(bx, offsets, ids, masks, weights, n_lmers, S):
+def _query_cpu(bx, offsets, ids, masks, weights, n_lmers, S, n_split):
+    """Each row's windows in n_split chunks (so few rows still use every
+    thread), each accumulating into its own row of partial sums."""
     B, W = bx.shape
-    out = np.zeros((B, S), dtype=np.float64)
-    for b in prange(B):
-        acc = out[b]
-        for i in range(W):
+    part = np.zeros((B * n_split, S), dtype=np.float64)
+    step = (W + n_split - 1) // n_split
+    for task in prange(B * n_split):
+        b, c = task // n_split, task % n_split
+        acc = part[task]
+        for i in range(c * step, min(W, (c + 1) * step)):
             w = bx[b, i]
             for t in range(masks.shape[0]):
                 v = np.int64(w ^ masks[t])
@@ -86,7 +90,9 @@ def _query_cpu(bx, offsets, ids, masks, weights, n_lmers, S):
                 wt = weights[t]
                 for e in range(offsets[v], offsets[v + 1]):
                     acc[ids[e]] += wt
-    return out
+    if n_split == 1:
+        return part
+    return part.reshape(B, n_split, S).sum(axis=1)
 
 
 _CUDA_SRC = r"""
@@ -165,8 +171,12 @@ class LmerIndex:
 
         dev = device_of(bx)
         if dev == "cpu":
-            return _query_cpu(np.ascontiguousarray(bx), self.offsets, self.ids, self.masks,
-                              self.weights, self.n_lmers, self.S)
+            import numba
+
+            bx = np.ascontiguousarray(bx)
+            n_split = min(bx.shape[1], -(-numba.get_num_threads() // bx.shape[0]))
+            return _query_cpu(bx, self.offsets, self.ids, self.masks, self.weights,
+                              self.n_lmers, self.S, max(1, n_split))
         if dev == "cuda":
             return self._pairwise_cuda(bx)
         return self._pairwise_mlx(bx)

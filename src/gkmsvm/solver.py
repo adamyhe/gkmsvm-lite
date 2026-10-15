@@ -14,7 +14,10 @@ class KernelColumnCache:
 
     Packs all training sequences once (through the base kernel for -t 3/-t 5)
     and computes columns on request. The solver keeps the columns in its own
-    cache.
+    cache. When the l-mer index applies (kernels/lmer_index.py), it indexes
+    all training sequences once, so one column costs one query row; else
+    columns go through raw_packed, which needs batches to amortize the
+    masked join.
     """
 
     def __init__(self, kernel: GkmKernel, X: np.ndarray):
@@ -28,8 +31,13 @@ class KernelColumnCache:
             self._packed, self._packed_rc = base.pack_both(X)
             self._X = None
             diag = base.raw_diag_packed(self._packed, self._packed_rc).astype(X.dtype)
+            from gkmsvm.kernels import lmer_index
+
+            self._index = (lmer_index.LmerIndex(base, self._packed, self._packed_rc)
+                           if lmer_index.applies(base) else None)
         else:
             self._X = X
+            self._index = None
             diag = base._raw_diagonal(X)
         self._diag = to_cpu(diag).astype(np.float64)
         # The diagonal where the columns are normalized (CuPy: on the GPU)
@@ -60,8 +68,11 @@ class KernelColumnCache:
             sel = mx.array(idx.astype(np.int32))
         else:
             sel = xp.asarray(idx)
-        rc = None if self._packed_rc is None else self._packed_rc[sel]
-        raw = base.raw_packed(self._packed, self._packed[sel], rc)  # [N, B]
+        if self._index is not None:
+            raw = self._index.pairwise(self._packed[sel]).T  # K symmetric
+        else:
+            rc = None if self._packed_rc is None else self._packed_rc[sel]
+            raw = base.raw_packed(self._packed, self._packed[sel], rc)  # [N, B]
         if self._mlx:
             raw = to_cpu(raw)
             xp = np
@@ -221,7 +232,10 @@ def _smo_csolver(kernel, X, y, C, tol, max_iter, cache_size, verbose):
     # 1.0 in state[2N:] for columns in its cache
     state = np.zeros(3 * N, dtype=np.float64)
     in_cache = state[2 * N:]
-    max_batch = max(1, _SMO_PREFETCH) if cache._use_fast else 1
+    # Batches only pay off for the masked join; with the l-mer index a column
+    # costs one query row, and unrequested prefetches would displace columns
+    batched = cache._use_fast and cache._index is None
+    max_batch = max(1, _SMO_PREFETCH) if batched else 1
     lib.csmo_cache_room.restype = _ct.c_int
     lib.csmo_cache_room.argtypes = [_ct.c_void_p]
     lib.csmo_cache_insert.restype = _ct.c_int
