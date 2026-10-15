@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from collections import OrderedDict
-
 import numpy as np
 
 from gkmsvm.backend import get_array_module, is_mlx, to_cpu
@@ -12,16 +10,14 @@ from gkmsvm.kernels.base import GkmKernel
 
 
 class KernelColumnCache:
-    """LRU cache for normalized kernel columns K(i, :).
+    """Normalized kernel columns K(i, :) for the C SMO solver.
 
     Pre-computes packed uint32 window representations for all training
-    sequences once. Individual kernel columns are computed on demand
-    and cached with LRU eviction.
-
-    Memory per column: N x 8 bytes. For N=80K and 256 columns = ~160 MB.
+    sequences once and computes columns on request. The solver keeps the
+    columns in its own cache.
     """
 
-    def __init__(self, kernel: GkmKernel, X: np.ndarray, max_columns: int = 256):
+    def __init__(self, kernel: GkmKernel, X: np.ndarray):
         xp = get_array_module(X)
         self._kernel = kernel
         self._xp = xp
@@ -80,33 +76,6 @@ class KernelColumnCache:
         if self._mlx:
             diag = to_cpu(diag)
         self._diag = diag.astype(np.float64)
-        self._cache: OrderedDict[int, np.ndarray] = OrderedDict()
-        self._max = max_columns
-        self.hits = 0
-        self.misses = 0
-
-    def get_column(self, i: int) -> np.ndarray:
-        """Return normalized kernel column K(i, :). Compute on cache miss."""
-        if i in self._cache:
-            self._cache.move_to_end(i)
-            self.hits += 1
-            return self._cache[i]
-
-        col = self._compute_column(i)
-        self._cache[i] = col
-        self.misses += 1
-        if len(self._cache) > self._max:
-            self._cache.popitem(last=False)
-        return col
-
-    def get_columns(self, indices) -> None:
-        """Compute and cache the columns for `indices` in one kernel call."""
-        todo = [int(i) for i in indices if int(i) not in self._cache]
-        for i, col in self.compute_columns(todo).items():
-            self._cache[i] = col
-            self.misses += 1
-            if len(self._cache) > self._max:
-                self._cache.popitem(last=False)
 
     def compute_columns(self, indices) -> dict:
         """Normalized columns {i: K(i, :)} for `indices`, in one kernel call (uncached).
@@ -193,8 +162,8 @@ def smo_solve(
     Uses a C implementation of LIBSVM-style serial WSS3 SMO (Fan et al.
     2005) with shrinking.  Kernel columns are computed by
     KernelColumnCache using the fastest available backend (Numba CPU,
-    CuPy GPU, or MLX).  Falls back to a pure-Python serial solver when
-    the C extension is not available or the kernel is not normalized.
+    CuPy GPU, or MLX).  Needs the ``_csmo`` C extension and a normalized
+    kernel (the solver assumes K(i, i) = 1).
 
     Args:
         kernel: GkmKernel instance.
@@ -211,178 +180,16 @@ def smo_solve(
         coefficients: [N] signed dual coefficients (alpha_i * y_i).
         bias: Decision boundary offset (score = K*coef + bias).
     """
+    if not kernel.normalize:
+        raise ValueError("smo_solve needs a normalized kernel")
+    if _get_csmo() is None:
+        raise RuntimeError(
+            "The C SMO extension (gkmsvm._csmo) is not built; reinstall with a C "
+            "compiler, or train with solver='libsvm'"
+        )
     if cache_size is None:
         cache_size = auto_cache_columns(X.shape[0])
-    if _get_csmo() is not None and kernel.normalize:
-        return _smo_csolver(
-            kernel, X, y, C, tol, max_iter, cache_size, verbose,
-        )
-
-    mlx_input = is_mlx(X)
-    xp = np if mlx_input else get_array_module(X)
-    return _smo_serial(
-        kernel, X, y, C, tol, max_iter, cache_size, verbose, xp, mlx_input,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Serial SMO (CPU / MLX / fallback when C extension unavailable)
-# ---------------------------------------------------------------------------
-
-
-def _smo_serial(kernel, X, y, C, tol, max_iter, cache_size, verbose, xp,
-                mlx_input):
-    """Serial WSS2 SMO with shrinking."""
-    N = X.shape[0]
-    y = xp.asarray(to_cpu(y) if mlx_input else y, dtype=np.float64)
-
-    cache = KernelColumnCache(kernel, X, max_columns=cache_size)
-
-    alpha = xp.zeros(N, dtype=np.float64)
-    G = -xp.ones(N, dtype=np.float64)
-
-    Q_diag = (
-        xp.ones(N, dtype=np.float64)
-        if kernel.normalize
-        else cache._diag.copy()
-    )
-
-    import time as _time
-
-    active = xp.ones(N, dtype=bool)
-    n_active = N
-    shrink_interval = max(N, 1000)
-    unshrink_needed = False
-
-    gap = float("inf")
-    m_val = float("inf")
-    M_val = float("-inf")
-    t_start = _time.monotonic()
-
-    for iteration in range(max_iter):
-        I_up = active & (((y > 0) & (alpha < C)) | ((y < 0) & (alpha > 0)))
-        I_low = active & (((y > 0) & (alpha > 0)) | ((y < 0) & (alpha < C)))
-
-        neg_yG = -y * G
-
-        if not xp.any(I_up) or not xp.any(I_low):
-            if unshrink_needed:
-                active[:] = True
-                n_active = N
-                unshrink_needed = False
-                continue
-            break
-
-        up_vals = xp.where(I_up, neg_yG, -np.inf)
-        low_vals = xp.where(I_low, neg_yG, np.inf)
-
-        i = int(xp.argmax(up_vals))
-        m_val = float(neg_yG[i])
-        M_val = float(xp.min(low_vals))
-        gap = m_val - M_val
-
-        if verbose and iteration % 1000 == 0:
-            n_sv = int(xp.sum(alpha > 1e-10))
-            total = cache.hits + cache.misses
-            hr = cache.hits / max(1, total) * 100
-            elapsed = _time.monotonic() - t_start
-            print(
-                f"  iter {iteration:>8d}  gap={gap:.4e}  "
-                f"SVs={n_sv}  active={n_active}/{N}  "
-                f"cache hit={hr:.0f}%  {elapsed:.1f}s"
-            )
-
-        if gap < tol:
-            if unshrink_needed:
-                active[:] = True
-                n_active = N
-                unshrink_needed = False
-                continue
-            break
-
-        # Shrinking
-        if iteration > 0 and iteration % shrink_interval == 0:
-            shrunk = _shrink(alpha, neg_yG, active, y, C, m_val, M_val, xp)
-            if shrunk > 0:
-                n_active = int(xp.sum(active))
-                unshrink_needed = True
-                if verbose:
-                    print(f"  shrink: removed {shrunk}, active={n_active}/{N}")
-                continue
-
-        # WSS2: select j using second-order information
-        K_col_i = cache.get_column(i)
-
-        candidates = I_low & (neg_yG < m_val)
-        b_sq = (m_val - neg_yG) ** 2
-        a_wss = Q_diag[i] + Q_diag - 2.0 * K_col_i
-        a_wss = xp.maximum(a_wss, 1e-12)
-        gain = xp.where(candidates, b_sq / a_wss, -np.inf)
-        j = int(xp.argmax(gain))
-
-        K_col_j = cache.get_column(j)
-
-        K_ij = float(K_col_i[j])
-        a = float(Q_diag[i]) + float(Q_diag[j]) - 2.0 * K_ij
-        if a <= 0:
-            a = 1e-12
-
-        s = float(y[i] * y[j])
-        b = -s * float(G[i]) + float(G[j])
-        d_j = -b / a
-
-        alpha_i = float(alpha[i])
-        alpha_j = float(alpha[j])
-
-        if s > 0:
-            lo = max(-alpha_j, alpha_i - C)
-            hi = min(C - alpha_j, alpha_i)
-        else:
-            lo = max(-alpha_j, -alpha_i)
-            hi = min(C - alpha_j, C - alpha_i)
-
-        d_j = max(lo, min(hi, d_j))
-        d_i = -s * d_j
-
-        alpha[i] += d_i
-        alpha[j] += d_j
-
-        G += d_i * y[i] * y * K_col_i + d_j * y[j] * y * K_col_j
-
-    if verbose:
-        n_sv = int(xp.sum(alpha > 1e-10))
-        total = cache.hits + cache.misses
-        hr = cache.hits / max(1, total) * 100
-        elapsed = _time.monotonic() - t_start
-        print(
-            f"  SMO done: {iteration + 1} iters, {n_sv} SVs, "
-            f"gap={gap:.2e}, cache hit={hr:.1f}%, {elapsed:.1f}s"
-        )
-
-    free = (alpha > 1e-10) & (alpha < C - 1e-10)
-    if xp.any(free):
-        rho = float(xp.mean(y[free] * G[free]))
-    else:
-        rho = -(m_val + M_val) / 2.0
-
-    return (alpha * y).astype(np.float64), float(-rho)
-
-
-def _shrink(alpha, neg_yG, active, y, C, m_val, M_val, xp):
-    """Remove bounded variables unlikely to change from the active set."""
-    at_zero = alpha < 1e-10
-    at_C = alpha > C - 1e-10
-
-    shrink_zero_pos = at_zero & (y > 0) & (neg_yG < M_val) & active
-    shrink_zero_neg = at_zero & (y < 0) & (neg_yG > m_val) & active
-    shrink_C_pos = at_C & (y > 0) & (neg_yG > m_val) & active
-    shrink_C_neg = at_C & (y < 0) & (neg_yG < M_val) & active
-
-    to_shrink = shrink_zero_pos | shrink_zero_neg | shrink_C_pos | shrink_C_neg
-    n_shrunk = int(xp.sum(to_shrink))
-    if n_shrunk > 0:
-        active[to_shrink] = False
-    return n_shrunk
+    return _smo_csolver(kernel, X, y, C, tol, max_iter, cache_size, verbose)
 
 
 # ---------------------------------------------------------------------------
@@ -472,17 +279,12 @@ def _smo_csolver(kernel, X, y, C, tol, max_iter, cache_size, verbose):
     (Numba CPU or CuPy GPU).
     """
     lib = _get_csmo()
-    if lib is None:
-        raise RuntimeError("C SMO solver not available")
-
     N = X.shape[0]
     xp = get_array_module(X)
     mlx_input = is_mlx(X)
 
-    if cache_size is None:
-        cache_size = auto_cache_columns(N)
     # Columns live in the C solver's cache; this object only computes them
-    cache = KernelColumnCache(kernel, X, max_columns=1)
+    cache = KernelColumnCache(kernel, X)
 
     y_np = to_cpu(y).astype(np.float64) if mlx_input else np.asarray(
         to_cpu(y) if xp is not np else y, dtype=np.float64
