@@ -91,4 +91,4 @@ The benchmarks only execute LS-GKM binaries as separate processes and never link
 
 ## `dev/`
 
-Experiments that don't feed a figure: earlier solver comparisons (`solver_bench.py`, `bench_smo_vs_gram.py`, `bench_tiled_gram_vs_smo.py`), the Nyström landmark sweep, the Nanog replication, and SVR and caQTL training. Run them from the repo root, e.g. `python benchmarks/dev/solver_bench.py`.
+Experiments that don't feed a figure: the CUDA masked-join ablation, the Nanog replication, and SVR and caQTL training. Finished experiments are deleted once their result is recorded (the earlier solver comparisons, the Nyström landmark sweep and the mask-join prototypes are in git history). Run them from the repo root, e.g. `python benchmarks/dev/replicate_nanog.py`.

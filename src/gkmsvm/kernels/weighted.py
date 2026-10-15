@@ -137,6 +137,9 @@ class CenterWeightedGkmKernel(GkmKernel):
         wx = xp.ascontiguousarray(wx.transpose(0, 2, 3, 1))  # [B, W, l, 4]
         return xp.einsum("bplc,bqlc->bpql", wx, wx)
 
+    # Per-call cap on the per-position match tensor
+    _MATCH_BYTES = 256 * 2**20
+
     # Use the masked-join kernel (kernels/masked.py) when the inputs have no N
     # positions; set False to force the per-position path
     use_masked = True
@@ -220,15 +223,21 @@ class CenterWeightedGkmKernel(GkmKernel):
         if masked is not None:
             return masked.astype(x.dtype)
         pw = xp.asarray(self._pos_weights).astype(x.dtype)
-        matches = self._per_position_matches(x, y)
-        result = _weighted_kernel_from_matches(matches, pw, self.k)
-
-        if self.include_rc:
-            y_rc = reverse_complement(y)
-            matches_rc = self._per_position_matches(x, y_rc)
-            result = result + _weighted_kernel_from_matches(matches_rc, pw, self.k)
-
-        return result
+        y_rc = reverse_complement(y) if self.include_rc else None
+        # The [B, S, Wx, Wy, l] match tensor is chunked over S to fit
+        # _MATCH_BYTES (one SMO column against 10k sequences would be ~74 GB)
+        Wx, Wy = x.shape[2] - self.l + 1, y.shape[2] - self.l + 1
+        per_col = x.shape[0] * Wx * Wy * self.l * x.dtype.itemsize
+        step = max(1, self._MATCH_BYTES // max(per_col, 1))
+        parts = []
+        for s in range(0, y.shape[0], step):
+            part = _weighted_kernel_from_matches(
+                self._per_position_matches(x, y[s:s + step]), pw, self.k)
+            if y_rc is not None:
+                part = part + _weighted_kernel_from_matches(
+                    self._per_position_matches(x, y_rc[s:s + step]), pw, self.k)
+            parts.append(part)
+        return parts[0] if len(parts) == 1 else xp.concatenate(parts, axis=1)
 
     def _raw_diagonal(
         self, x: np.ndarray, *, chunk_size: int | None = None

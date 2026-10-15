@@ -139,7 +139,6 @@ def cmd_trainsvr(args: argparse.Namespace) -> None:
     )
     if hasattr(args, "solver"):
         svr_kwargs["solver"] = args.solver
-        svr_kwargs["cache_size"] = args.cache_size
     model = train_gkmsvr(seqs, labels, **svr_kwargs)
 
     output = Path(args.output)
@@ -377,10 +376,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-C", type=float, default=1.0, help="Regularization (default: 1.0).")
     p.add_argument("--epsilon", type=float, default=0.1, help="SVR epsilon (default: 0.1).")
     p.add_argument(
-        "--solver", default="auto", choices=["auto", "smo", "libsvm"],
+        "--solver", default="auto", choices=["auto", "libsvm", "nystrom"],
         help="Solver (default: auto).",
     )
-    p.add_argument("--cache-size", type=int, default=256, help="SMO cache columns (default: 256).")
     _add_kernel_args(p)
     _add_device_arg(p)
 

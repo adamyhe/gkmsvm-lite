@@ -34,7 +34,7 @@ class OptionalBuildExt(build_ext):
     def _warn_failed(name="C SMO extension"):
         print(
             f"WARNING: Failed to build {name}. "
-            "The SMO solver will fall back to the Python implementation.",
+            "Training with solver='smo' will be unavailable.",
             file=sys.stderr,
         )
 

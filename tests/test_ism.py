@@ -148,3 +148,28 @@ class TestISMChunked:
         model.sv_chunk_size = 3
         chunked = ism(model, x)
         np.testing.assert_allclose(full, chunked, atol=1e-5)
+
+
+@pytest.mark.parametrize("kernel_type, params", [
+    ("gkmrbf", {"L": 6, "k": 4, "d": 2, "gamma": 2.0}),
+    ("wgkm", {"L": 6, "k": 4, "M": 3, "H": 2.0}),
+    ("wgkmrbf", {"L": 6, "k": 4, "M": 3, "H": 2.0, "gamma": 2.0}),
+])
+def test_ism_scores_mutants_without_index_path(kernel_type, params):
+    """-t 3/4/5 ISM equals score(mutant) - score(ref)."""
+    from gkmsvm.svm import GkmSVM
+
+    rng = np.random.default_rng(3)
+    X = np.eye(4)[rng.integers(0, 4, (12, 20))].transpose(0, 2, 1)
+    model = GkmSVM(X, rng.normal(size=12), 0.1, kernel_type, params)
+    d = ism(model, X[:2])
+    assert d.shape == (2, 4, 20)
+    for b, p in [(0, 0), (1, 9), (1, 19)]:
+        ref_base = X[b, :, p].argmax()
+        assert d[b, ref_base, p] == 0
+        v = (ref_base + 1) % 4
+        mut = X[b].copy()
+        mut[:, p] = 0
+        mut[v, p] = 1
+        expected = model(mut[None]) - model(X[b:b + 1])
+        np.testing.assert_allclose(d[b, v, p], expected[0, 0], rtol=1e-9, atol=1e-12)

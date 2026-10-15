@@ -112,3 +112,16 @@ class TestWeighted:
         X[0, :, 7] = 0  # an N
         fast, ref = self._pair(True)
         np.testing.assert_allclose(fast.pairwise(X, Y), ref.pairwise(X, Y), rtol=1e-12)
+
+
+def test_weighted_per_position_chunks_over_columns():
+    """The per-position path splits the columns to cap its match tensor."""
+    from gkmsvm.kernels.weighted import CenterWeightedGkmKernel
+
+    rng = np.random.default_rng(6)
+    X, Y = _onehot(3, 40, rng), _onehot(30, 40, rng)
+    kernel = CenterWeightedGkmKernel(8, 5, M=3, H=2.0)
+    kernel.use_masked = False
+    ref = kernel.pairwise(X, Y)
+    kernel._MATCH_BYTES = 1  # one column per chunk
+    np.testing.assert_allclose(kernel.pairwise(X, Y), ref, rtol=1e-12)
