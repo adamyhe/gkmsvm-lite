@@ -9,10 +9,15 @@ and the 28,309 dsQTL variants, timing the three scoring methods of Fig. 1D:
               impact of all three substitutions at the center base; the one
               matching the alt allele is the variant score.
               gkmsvm-lite: score_variants(method="gkmexplain"), alt allele only
-  deltaSVM    Building the 10-mer weight table.
+  deltaSVM    Building the 10-mer weight table, once per model.
               LS-GKM: gkmpredict on the 524,800 non-redundant 10-mers (as the
               paper's pipeline does with nrkmers.py)
               gkmsvm-lite: to_deltasvm(query_norm=True), all 4^10 10-mers
+  deltaSVM scoring
+              Scoring the variants with that table (19bp sequences):
+              gkmsvm-lite DeltaSVM.score_variants. The paper's pipeline does
+              this with the Beer lab's deltasvm.pl, not an LS-GKM binary, so
+              there is no LS-GKM row. Uses the table from the deltaSVM run.
 
 Every run is a separate process. wall_s includes model loading and, for
 gkmsvm-lite, JIT compilation; compute_s excludes both (for LS-GKM it equals
@@ -58,7 +63,7 @@ from _common import (
     write_tsv,
 )
 
-METHODS = ("ISM", "GkmExplain", "deltaSVM")
+METHODS = ("ISM", "GkmExplain", "deltaSVM", "deltaSVM scoring")
 PAPER_TAGS = {"t2": "t2_l10_k6_d3_t16", "t3": "t3_l10_k6_d3_c10_g2_t16"}
 L = 10
 WARMUP = 16
@@ -97,15 +102,16 @@ def _prepare(args, work: Path) -> dict:
     import dsqtl_auprc as bench
 
     bench.download_data()
-    _, X51, _, _ = bench.load_test_variants()
-    ref, alt = X51
+    X19, X51, _, _ = bench.load_test_variants()
+    (ref, alt), (ref19, alt19) = X51, X19
     if args.n_variants:
         ref, alt = ref[: args.n_variants], alt[: args.n_variants]
+        ref19, alt19 = ref19[: args.n_variants], alt19[: args.n_variants]
     tag = PAPER_TAGS[args.tag]
     bench._load_paper_model(tag, args.negset)  # downloads the model file
     model_path = bench.MODEL_DIR / f"gkmsvm_{tag}_negset{args.negset}.model.txt"
 
-    np.savez(work / "variants.npz", ref=ref, alt=alt)
+    np.savez(work / "variants.npz", ref=ref, alt=alt, ref19=ref19, alt19=alt19)
     write_seqs(work / "ref.fa", _decode(ref), "v")
     write_seqs(work / "alt.fa", _decode(alt), "v")
     nr = _nonredundant_lmers()
@@ -120,10 +126,42 @@ def _prepare(args, work: Path) -> dict:
 # ── gkmsvm-lite worker (runs in a child process) ───────────────────
 
 
+def _score_deltasvm(spec: dict) -> None:
+    """Time DeltaSVM.score_variants with the table the deltaSVM run built."""
+    from gkmsvm import DeltaSVM
+    from gkmsvm.backend import to_cpu
+    from gkmsvm.importers.lsgkm import load_lsgkm_model
+
+    work = Path(spec["work"])
+    t0 = time.perf_counter()
+    table = work / "lite_deltaSVM_cpu.npy"
+    if table.exists():  # gkmpredict scale: weight + bias
+        weights = np.load(table) - float(load_lsgkm_model(spec["model"]).bias)
+    else:
+        weights = np.asarray(load_lsgkm_model(spec["model"], dtype=np.float64)
+                             .to_deltasvm(query_norm=True).weights)
+    dsvm = DeltaSVM(weights.astype(np.float32), L, L, include_rc=False, device=spec["device"])
+    data = np.load(work / "variants.npz")
+    ref, alt = data["ref19"], data["alt19"]
+    _ = dsvm.score_variants(ref[:WARMUP], alt[:WARMUP])  # JIT
+    gpu_sync()
+    load_s = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    out = to_cpu(dsvm.score_variants(ref, alt)).ravel()
+    gpu_sync()
+    compute_s = time.perf_counter() - t0
+    np.save(work / f"lite_deltaSVM scoring_{spec['device']}.npy", out)
+    emit_result(load_s=load_s, compute_s=compute_s, gpu_pool_mb=gpu_pool_mb())
+
+
 def _worker(spec: dict) -> None:
     from gkmsvm.backend import to_cpu
     from gkmsvm.importers.lsgkm import load_lsgkm_model
 
+    if spec["method"] == "deltaSVM scoring":
+        _score_deltasvm(spec)
+        return
     t0 = time.perf_counter()
     model = load_lsgkm_model(spec["model"], dtype=np.float64)
     if spec["device"] == "cuda":
@@ -260,12 +298,12 @@ def main():
 
     devices = ["cpu", "cuda"] if args.device == "cuda" else ["cpu"]
     n_items = {"ISM": info["n_variants"], "GkmExplain": info["n_variants"],
-               "deltaSVM": 4**L}
+               "deltaSVM": 4**L, "deltaSVM scoring": info["n_variants"]}
     rows = []
     for method in args.methods:
         print(f"\n── {method} ──")
         ref_scores = None
-        if not args.no_lsgkm:
+        if not args.no_lsgkm and method != "deltaSVM scoring":
             runs = _lsgkm_runs(method, bins, threads, work, info["model"])
             wall, peak, status = 0.0, 0.0, "ok"
             for cmd, _ in runs:

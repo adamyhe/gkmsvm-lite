@@ -28,7 +28,7 @@ Timed runs each execute in their own process, so the reported peak memory is tha
 |---|---|---|---|---|
 | 1A | Per-variant agreement with LS-GKM (ISM, GkmExplain, deltaSVM.pl) | `fig1a` | `agreement_lsgkm.py` | `agreement_dsqtl.tsv`, `agreement_checks.tsv` |
 | 1B | Training time vs N with each tool's default solver, both at `THREADS` and at 1 thread | `fig1b` | `timing_train.py` | `timing_train.tsv`, `timing_train_T1.tsv` |
-| 1C | Time and memory to score the 28,309 dsQTL variants (ISM, GkmExplain, deltaSVM table) | `fig1c` | `timing_variants.py` | `timing_variants.tsv` |
+| 1C | Time and memory to score the 28,309 dsQTL variants: ISM and GkmExplain per variant; deltaSVM as a one-time 10-mer table build, then scoring with the table | `fig1c` | `timing_variants.py` | `timing_variants.tsv` |
 | 1D | dsQTL AUPRC with the paper's models | `fig1d` | `dsqtl_auprc.py` | `dsqtl_summed.tsv`, `dsqtl_per_model.tsv` |
 | S1 | Models trained with gkmsvm-lite vs the paper's LS-GKM models | `s1` | `dsqtl_auprc.py` | `dsqtl_retrained_*.tsv` |
 | S2 | Prediction throughput vs number of SVs (`-t 2` l-mer table, `-t 3` l-mer index, masked join, LS-GKM) | `s2` | `throughput_sweep.py` | `throughput.tsv` |
