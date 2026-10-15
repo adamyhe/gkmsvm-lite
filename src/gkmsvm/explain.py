@@ -812,7 +812,8 @@ def mutation_impact(
         model: Trained GkmSVM.
         ref: [B, 4, L] reference sequences.
         alt: [B, 4, L] alternate sequences.
-        batch_size: Process inputs in batches of this size.
+        batch_size: Process inputs in batches of this size, raised as in
+            ``GkmSVM.__call__``.
         verbose: Show tqdm progress bar over input batches.
 
     Returns:
@@ -831,7 +832,7 @@ def mutation_impact(
         sv_diag = base._raw_diagonal(sv, chunk_size=cs)
 
     B = ref.shape[0]
-    bs = B if batch_size is None else batch_size
+    bs = B if batch_size is None else model._min_batch_size(batch_size)
     starts = range(0, B, bs)
     if verbose:
         from tqdm import tqdm
@@ -842,8 +843,10 @@ def mutation_impact(
         r = model._match_device(ref[s:s + bs])
         a = model._match_device(alt[s:s + bs])
         xp = get_array_module(r)
-        k_ref = _base_raw_vs_sv(base, r, sv, sv_windows)
-        dk = _base_raw_vs_sv(base, a, sv, sv_windows) - k_ref
+        # Both alleles in one call share the per-call SV cost
+        k_both = _base_raw_vs_sv(base, xp.concatenate([r, a]), sv, sv_windows)
+        k_ref = k_both[:r.shape[0]]
+        dk = k_both[r.shape[0]:] - k_ref
         if base.normalize:
             norm = xp.sqrt(base._raw_diagonal(r)[:, None] * sv_diag[None, :])
             norm = xp.clip(norm, 1e-10, None)

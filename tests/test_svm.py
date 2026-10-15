@@ -149,6 +149,20 @@ class TestGkmSVMVariants:
         expected = small_model(alt) - small_model(ref)
         np.testing.assert_allclose(delta, expected)
 
+    def test_batched_matches_unbatched(self, small_model):
+        rng = np.random.default_rng(0)
+        seqs = ["".join(rng.choice(list("ACGT"), 6)) for _ in range(9)]
+        ref = np.stack([one_hot_encode(s) for s in seqs])
+        alt = ref[::-1].copy()
+        small_model._MIN_BATCH_BYTES = 0  # keep batch_size=2 as given
+        np.testing.assert_allclose(
+            small_model.score_variants(ref, alt, batch_size=2),
+            small_model(alt) - small_model(ref), rtol=1e-6)
+
+    def test_min_batch_size(self, small_model):
+        assert small_model._min_batch_size(None) is None
+        assert small_model._min_batch_size(2) == GkmSVM._MIN_BATCH_BYTES // (8 * 3)
+
     def test_same_variant_is_zero(self, small_model):
         seq = one_hot_encode("ACGT")[np.newaxis]
         delta = small_model.score_variants(seq, seq)
