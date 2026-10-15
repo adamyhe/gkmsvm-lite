@@ -122,7 +122,7 @@ Measured against the masked join on that model (M4 CPU, one call):
 | 64 | 0.10 s vs 4.6 s | 0.72 s vs 5.0 s |
 | 1024 | 1.6 s vs 5.7 s | 10.7 s vs 13.7 s |
 
-It applies to count-table kernels with at most `MAX_NEIGHBORS` (8,192) neighbors and l <= 12. `-t 0` and the weighted kernels have no d cutoff below l - k (about 20k–32k neighbors at l = 10–11) and keep the masked join. CPU accumulates float64 directly; CUDA and Metal count hits per mismatch level in int32 (integer atomics are much faster than float64 ones on consumer GPUs, and Metal has no float64) and combine levels in float64.
+It applies to count-table kernels with at most `MAX_NEIGHBORS` (8,192) neighbors and l <= 12. `-t 0` and the weighted kernels have no d cutoff below l - k (about 20k–32k neighbors at l = 10–11) and keep the masked join. CPU and CUDA accumulate float64 directly; Metal counts hits per mismatch level in int32 (it has no float64) and combines levels in float64 on the CPU. Per-level int32 counting on CUDA measured slower on a Titan Xp (48.7 s vs 43.7 s for `to_deltasvm` on the 32,715-SV `-t 3` model, with a larger GPU pool): the cost is the ~7×10¹⁰ scattered atomics, whatever their type. A faster CUDA query would need shared-memory accumulation over SV tiles.
 
 SMO columns use the same index built over the training set: a column K(i, :) is one query row, so a cache smaller than N no longer degrades to single brute-force columns.
 

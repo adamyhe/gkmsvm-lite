@@ -15,7 +15,7 @@ Every kernel works on windows packed 2 bits per base into uint32 (`PackedGkmKern
 
 The model caches packed SV windows, their self-kernels, the l-mer table and the l-mer index per device (`GkmSVM._sv_cache`); the first call pays for building them (0.55 s and 81 MB for the l-mer index over 32,715 SVs at l=10).
 
-CPU kernels are Numba `@njit(parallel=True)`; the threading layer is pinned to `workqueue` on import. On CPU, kernel scoring normalizes, applies the RBF and reduces over SVs in one parallel pass (`svm._normalized_dot`, and `explain._impact_cpu` for mutation impact), so the only [rows, S] array is the raw kernel. CUDA kernels are CuPy RawKernels; Metal kernels use `mx.fast.metal_kernel`. Both GPU index queries count hits per mismatch level in int32 and combine levels in float64, so they are exact; Metal results are returned as float32.
+CPU kernels are Numba `@njit(parallel=True)`; the threading layer is pinned to `workqueue` on import. On CPU, kernel scoring normalizes, applies the RBF and reduces over SVs in one parallel pass (`svm._normalized_dot`, and `explain._impact_cpu` for mutation impact), so the only [rows, S] array is the raw kernel. CUDA kernels are CuPy RawKernels; Metal kernels use `mx.fast.metal_kernel`. The CUDA index query accumulates float64 with `atomicAdd`; Metal has no float64, so it counts hits per mismatch level in int32 and combines levels in float64 on the CPU (exact; results are returned as float32). On CUDA the cost is the scattered atomics themselves (about 7×10¹⁰ for `to_deltasvm` on the model below), and int32 counting measured no faster.
 
 ## Measurements
 
