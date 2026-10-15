@@ -98,3 +98,19 @@ def test_to_deltasvm_rbf_weights_are_lmer_scores(query_norm):
     lmers = np.eye(4)[(idx[:, None] // 4 ** np.arange(5, -1, -1)) % 4].transpose(0, 2, 1)
     expected = np.asarray(model(np.ascontiguousarray(lmers))).ravel() - model.bias
     np.testing.assert_allclose(weights[idx], expected, rtol=1e-6, atol=1e-7)
+
+
+def test_clear_caches_rebuilds():
+    rng = np.random.default_rng(5)
+    model = _model("t2", True, rng)
+    X = _onehot(6, 50, rng)
+    model.use_lmer_table = False
+    kernel_scores = np.asarray(model(X))  # fills _sv_cache
+    model.use_lmer_table = True
+    table_scores = np.asarray(model(X))  # builds the table
+    assert model._lmer_table is not None and model._sv_cache
+    model.clear_caches()
+    assert model._lmer_table is None and not model._sv_cache
+    np.testing.assert_array_equal(np.asarray(model(X)), table_scores)
+    model.use_lmer_table = False
+    np.testing.assert_array_equal(np.asarray(model(X)), kernel_scores)

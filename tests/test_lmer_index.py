@@ -82,8 +82,7 @@ def test_model_scores_match_pairwise(kernel_type, params):
     x = _onehot(20, 40, rng)
     expected = model.kernel.pairwise(x, model.support_sequences) @ model.coefficients + model.bias
     np.testing.assert_allclose(model(x).ravel(), expected, rtol=1e-10, atol=1e-12)
-    model.use_lmer_index = False
-    model._sv_cache = {}
+    model.use_lmer_index = False  # takes effect without clearing caches
     np.testing.assert_allclose(model(x).ravel(), expected, rtol=1e-10, atol=1e-12)
 
 
@@ -95,8 +94,7 @@ def test_mutation_impact_index_vs_join(kernel_type, params):
     alt = ref.copy()
     alt[:, :, 20] = np.eye(4)[(ref[:, :, 20].argmax(1) + 1) % 4]
     got = model.score_variants(ref, alt, method="gkmexplain")
-    model.use_lmer_index = False
-    model._sv_cache = {}
+    model.use_lmer_index = False  # takes effect without clearing caches
     np.testing.assert_allclose(got, model.score_variants(ref, alt, method="gkmexplain"),
                                rtol=1e-10, atol=1e-12)
 

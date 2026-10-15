@@ -207,6 +207,16 @@ class GkmSVM(DeviceModel):
     def kernel_params(self) -> dict:
         return dict(self._kernel_params)
 
+    def clear_caches(self) -> None:
+        """Drop the packed SVs, self-kernels, l-mer index and l-mer table.
+
+        They are rebuilt on the next call. Frees their memory, and lets a
+        timing include building them.
+        """
+        self._sv_cache = {}
+        self._lmer_table = None
+        self._lmer_table_dev = None
+
     def _on_device_move(self) -> None:
         """Drop device caches and free the old device's memory pool."""
         self._sv_cache = {}
@@ -280,14 +290,17 @@ class GkmSVM(DeviceModel):
         return c["diag"]
 
     def _sv_index(self):
-        """Cached l-mer index over the SVs, or None when it doesn't apply."""
+        """Cached l-mer index over the SVs, or None when it doesn't apply or
+        ``use_lmer_index`` is off (checked on every call)."""
+        if not self.use_lmer_index:
+            return None
         c = self._sv_cache
         if "index" not in c:
             from gkmsvm.kernels import lmer_index
 
             packed = self._sv_packed()
             base = self.kernel.base
-            use = self.use_lmer_index and packed is not None and lmer_index.applies(base)
+            use = packed is not None and lmer_index.applies(base)
             c["index"] = lmer_index.LmerIndex(base, *packed) if use else None
         return c["index"]
 

@@ -6,7 +6,9 @@ Both implementations use the same kernel (-t 2 gkm_esttrunc, l=11 k=7 d=3)
 and their default solvers: LS-GKM's SMO with on-demand kernel rows, and
 gkmsvm-lite's solver="auto" (precomputed Gram while it fits). --smo adds
 gkmsvm-lite SMO runs; the solver comparison itself is Fig. S3
-(training_memory.py).
+(training_memory.py). gkmsvm-lite prediction time includes building the
+model's caches (the exact l-mer table for -t 2), as gkmpredict's includes
+loading its model; JIT compilation is excluded.
 
 Setup:
     conda create -n lsgkm -c bioconda -c conda-forge ls-gkm -y
@@ -252,6 +254,9 @@ def predict_lite(
 
     X = model._match_device(X_test)
     _ = model(X[:1])  # warmup (JIT / GPU transfer)
+    # Time building the l-mer table / index too, as gkmpredict's time includes
+    # loading its model
+    model.clear_caches()
 
     t0 = time.perf_counter()
     scores = to_cpu(model(X).flatten())

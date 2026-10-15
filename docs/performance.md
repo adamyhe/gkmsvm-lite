@@ -59,5 +59,5 @@ Comparisons with LS-GKM are the paper figures in `benchmarks/` (`make -C benchma
 ```bash
 python benchmarks/timing_variants.py --device cuda --no-lsgkm --n-variants 500
 python benchmarks/training_memory.py --device cuda --no-lsgkm --sizes 1000,2000,5000,10000
-make -C benchmarks s2      # throughput sweep, benchmarks/results/throughput.tsv
+make -C benchmarks s2      # throughput vs number of SVs, benchmarks/results/throughput.tsv
 ```

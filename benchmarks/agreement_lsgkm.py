@@ -8,6 +8,7 @@ to the outputs in github.com/kundajelab/gkmexplain (dsQTL/.../dsqtl_analysis):
 deltaSVM is computed four ways to localize any mismatch:
   table       — to_deltasvm(query_norm=True) on --device, scored on CPU
   direct      — gkmpredict on each 10-mer the variants use, model() on --device
+                through the masked join (l-mer table and index off)
   direct-cpu  — the same on CPU, for a random subset of those 10-mers
   deltaSVM.pl — the table scored as the Beer lab deltasvm.pl scores it (poly-A/T
                 l-mers dropped; see dsqtl_auprc.deltasvm_pl). This is what the
@@ -97,12 +98,23 @@ def _lmer_onehot(idx: np.ndarray) -> np.ndarray:
 
 
 def _lmer_weights(model, idx: np.ndarray, device: str) -> np.ndarray:
+    """model() on each l-mer, minus bias, through the masked join.
+
+    The l-mer table and index are turned off so this check doesn't share a
+    code path with to_deltasvm(), which reads the table (-t 2) or scores
+    through the index (-t 3).
+    """
     from gkmsvm.backend import to_cpu
 
+    saved = model.use_lmer_table, model.use_lmer_index
+    model.use_lmer_table = model.use_lmer_index = False
     if device == "cuda":
         model.cuda()
-    w = to_cpu(model(_lmer_onehot(idx), batch_size=8192)).ravel() - float(model.bias)
-    model.cpu()
+    try:
+        w = to_cpu(model(_lmer_onehot(idx), batch_size=8192)).ravel() - float(model.bias)
+    finally:
+        model.cpu()
+        model.use_lmer_table, model.use_lmer_index = saved
     return w
 
 
