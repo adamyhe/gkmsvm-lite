@@ -83,6 +83,67 @@ def is_mlx(x: Any) -> bool:
     return HAS_MLX and isinstance(x, mx.array)
 
 
+class DeviceModel:
+    """Device moves for models: ``cuda()``, ``mlx()``, ``cpu()``.
+
+    Subclasses name their device arrays in ``_DEVICE_ARRAYS`` and may
+    override ``_on_device_move()``, called after the arrays move and before
+    the device flags change.
+    """
+
+    _DEVICE_ARRAYS: tuple[str, ...] = ()
+    _on_gpu = False
+    _on_mlx = False
+
+    def _on_device_move(self) -> None:
+        pass
+
+    def _move(self, convert, on_gpu: bool, on_mlx: bool):
+        for name in self._DEVICE_ARRAYS:
+            setattr(self, name, convert(getattr(self, name)))
+        self._on_device_move()
+        self._on_gpu, self._on_mlx = on_gpu, on_mlx
+        return self
+
+    def cuda(self):
+        """Move model arrays to GPU (CuPy)."""
+        return self._move(to_gpu, True, False)
+
+    def mlx(self):
+        """Move model arrays to Apple GPU (MLX)."""
+        return self._move(lambda a: to_mlx(to_cpu(a)), False, True)
+
+    def cpu(self):
+        """Move model arrays to CPU (NumPy)."""
+        return self._move(to_cpu, False, False)
+
+    def _to_device(self, device: str) -> None:
+        """Move to ``"cuda"``/``"gpu"``, ``"mlx"``, ``"cpu"`` or ``"auto"``."""
+        if device in ("cuda", "gpu"):
+            self.cuda()
+        elif device == "mlx":
+            self.mlx()
+        elif device == "auto":
+            if HAS_CUPY:
+                self.cuda()
+            elif HAS_MLX:
+                self.mlx()
+        elif device != "cpu":
+            raise ValueError(
+                f"Unknown device {device!r}. Use 'auto', 'cpu', 'cuda', or 'mlx'."
+            )
+
+    def _match_device(self, x: Any) -> Any:
+        """x on the model's device."""
+        if self._on_gpu and not is_gpu(x):
+            return to_gpu(np.asarray(x) if is_mlx(x) else x)
+        if self._on_mlx and not is_mlx(x):
+            return to_mlx(to_cpu(x) if is_gpu(x) else x)
+        if not self._on_gpu and not self._on_mlx and (is_gpu(x) or is_mlx(x)):
+            return to_cpu(x)
+        return x
+
+
 def get_strides(x: Any) -> tuple:
     """Return array strides, or zeros for MLX (which has no strides)."""
     if hasattr(x, "strides"):
@@ -192,8 +253,8 @@ def _mlx_sliding_windows(x: Any, shape: tuple, strides: tuple) -> Any:
     """Implement as_strided for MLX using mx.as_strided.
 
     Only handles the sliding-window patterns used in gkmsvm:
-    - [B, C, W, l] from [B, C, L] (flat_windows)
-    - [B, W, l] from [B, L] (base_index_windows)
+    - [B, C, W, l] from [B, C, L] (one-hot windows: weighted kernels, DeltaSVM)
+    - [B, W, l] from [B, L]
     """
     ndim_in = x.ndim
     ndim_out = len(shape)

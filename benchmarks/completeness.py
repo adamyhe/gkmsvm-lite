@@ -14,19 +14,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import gzip
 
 import numpy as np
-from _common import REPO, write_tsv
+
+from _common import REPO, read_seqs, write_tsv
 
 FIXTURES = REPO / "tests" / "fixtures"
 SEQ_LEN = 200
-
-
-def _read_fasta_gz(path) -> list[str]:
-    with gzip.open(path, "rt") as f:
-        records = f.read().split(">")[1:]
-    return ["".join(r.splitlines()[1:]) for r in records]
 
 
 def main():
@@ -40,7 +34,6 @@ def main():
     args = parser.parse_args()
 
     import pandas as pd
-
     from gkmsvm import gkmexplain, one_hot_encode
     from gkmsvm.backend import to_cpu
     from gkmsvm.importers.lsgkm import load_lsgkm_model
@@ -49,8 +42,8 @@ def main():
     if args.device == "cuda":
         model.cuda()
 
-    pos = _read_fasta_gz(FIXTURES / "nanog_pos_test.fa.gz")
-    neg = _read_fasta_gz(FIXTURES / "nanog_neg_test.fa.gz")
+    pos = read_seqs(FIXTURES / "nanog_pos_test.fa.gz")
+    neg = read_seqs(FIXTURES / "nanog_neg_test.fa.gz")
     rng = np.random.default_rng(0)
     rand = ["".join(rng.choice(list("ACGT"), SEQ_LEN)) for _ in range(args.n_random)]
     seqs = pos + neg + rand

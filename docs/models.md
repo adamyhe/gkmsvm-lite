@@ -15,8 +15,8 @@ from gkmsvm import load_lsgkm_model
 model = load_lsgkm_model("model.txt")
 model = load_lsgkm_model("model.txt.gz")
 
-# Control memory usage for large models
-model = load_lsgkm_model("model.txt.gz", sv_chunk_size=5000)
+# Straight onto a GPU
+model = load_lsgkm_model("model.txt.gz", device="cuda")
 ```
 
 Models trained with kundajelab/lsgkm (which adds GkmExplain) and kundajelab/lsgkm-svr (which adds SVR) use the same format and load with this function.
@@ -41,7 +41,7 @@ Bias convention: `bias = +rho` (opposite from LS-GKM). This is handled automatic
 
 ### R gkmSVM (R/kernlab package)
 
-The R package (Ghandi et al. 2016) uses `#`-prefixed headers and FASTA-style support vectors.
+The R package (Ghandi et al. 2016) uses `#`-prefixed headers and FASTA-style support vectors. The kernel is `gkm_esttrunc` unless a `#kernel_type` header (name or `-t` integer) says otherwise.
 
 ```python
 from gkmsvm import load_r_gkmsvm_model
@@ -103,7 +103,7 @@ model.save("model.txt")
 model.save("model.txt.gz")  # gzipped
 
 # Explicit format override
-model.save("model.bin", format="npz")
+model.save("model.bin", fmt="npz")
 ```
 
 ## Training new models
@@ -151,29 +151,24 @@ predictions = model(x)  # [B, 1]
 
 ### Solver selection
 
-Training requires computing kernel values between all pairs of training sequences. Two solvers are available:
+Training needs kernel values between pairs of training sequences.
 
-- **Precomputed Gram + sklearn** (`solver="libsvm"`): Computes the full N x N kernel matrix, then passes it to scikit-learn's LIBSVM-backed `SVC(kernel='precomputed')`. Fast, but requires O(N^2) memory. For N=10K sequences, the Gram matrix is ~800 MB.
-
-- **Column-cached SMO** (`solver="smo"`): WSS3 working set selection with shrinking and LRU-cached kernel columns. Memory is O(cache_size x N) instead of O(N^2). A C extension handles the SMO loop; kernel columns are computed on the fastest available backend (Numba CPU, CuPy GPU, or MLX). Scales to 80K+ sequences.
-
-- **Nyström approximation** (`solver="nystrom"`): Low-rank kernel approximation using landmark points. Faster than both Gram and SMO, but produces an approximate solution.
-
-- **Auto** (`solver="auto"`, default): Estimates whether the Gram matrix fits in 75% of available RAM (CPU) or VRAM (GPU). Uses precomputed Gram when it fits, SMO otherwise.
+- **Precomputed Gram + sklearn** (`solver="libsvm"`): computes the full N x N kernel matrix in host RAM (tiles on the training device) and passes it to scikit-learn's LIBSVM-backed `SVC(kernel="precomputed")`. Fast, but O(N^2) memory: ~800 MB at N=10K.
+- **Column-cached SMO** (`solver="smo"`): WSS3 working set selection with shrinking and an LRU cache of kernel columns in a C extension; memory is O(cache_size x N). For `-t 1/2/3` a column is one query of an l-mer index over the training set; other kernels compute columns in batches through the masked join. With a cache smaller than N, evicted columns are recomputed, so it is slower than libsvm when the Gram fits.
+- **Nyström approximation** (`solver="nystrom"`): kernel values against `n_components` landmarks only (O(N m) instead of O(N^2)), then an approximate N x N Gram for sklearn. Saves time, not memory; the solution is approximate.
+- **Auto** (`solver="auto"`, default): libsvm when the Gram fits in 75% of available RAM (and under `max_gram_gb`), else SMO with a warning.
 
 ```python
-# Force a specific solver
-model = train_gkmsvm(pos, neg, solver="libsvm")    # fast, needs N^2 memory
-model = train_gkmsvm(pos, neg, solver="smo", cache_size=512)  # large-scale
-model = train_gkmsvm(pos, neg, solver="nystrom", n_components=500)  # fast approximate
+model = train_gkmsvm(pos, neg, solver="libsvm")                      # needs N^2 memory
+model = train_gkmsvm(pos, neg, solver="smo", cache_size=2048)        # O(cache_size x N)
+model = train_gkmsvm(pos, neg, solver="nystrom", n_components=500)   # approximate
 
-# SVR uses the precomputed Gram solver only — SMO SVR is not yet implemented.
-# This means SVR training requires O(N^2) memory. For most regression datasets
-# (quantitative chromatin accessibility, gene expression) this is sufficient.
+# SVR uses the precomputed Gram (or Nyström); SMO SVR is not implemented,
+# so SVR training needs O(N^2) memory.
 model = train_gkmsvr(seqs, labels)
 ```
 
-Training works on all backends (CPU, NVIDIA GPU, Apple Silicon MLX). On MLX, the Metal kernels accelerate Gram matrix and kernel column computation. After training, use `model.mlx()` or `model.cuda()` to move the model for inference.
+Training works on all backends (CPU, NVIDIA GPU, Apple Silicon MLX). The returned model is on CPU; use `model.cuda()` or `model.mlx()` to move it for inference. Timings are in [performance](performance.md#measurements).
 
 ### Kernel types
 
@@ -228,5 +223,5 @@ x = np.stack(test_seqs)
 scores = model(x)
 
 # Interpret
-attr = gkmexplain(model, x, mode=0)
+attr = gkmexplain(model, x, mode="importance")
 ```

@@ -87,6 +87,20 @@ class TestRGkmsvmGkmmodel:
         assert model.kernel_params["k"] == 5
         assert model.kernel_params["d"] == 2
 
+    def test_kernel_type_header(self, tmp_path):
+        """A #kernel_type header (name or -t integer) sets the kernel; default esttrunc."""
+        svs = _make_seqs(3, 15, seed=5)
+        path = tmp_path / "test.gkmmodel"
+        _write_gkmmodel(path, svs, [0.5, -0.3, 0.2], 0.1, l=8, k=5, d=2)
+        assert load_r_gkmsvm_model(path).kernel_type == "gkm_esttrunc"
+        text = path.read_text()
+        path.write_text("#kernel_type 3\n#gamma 2.0\n" + text)
+        model = load_r_gkmsvm_model(path)
+        assert model.kernel_type == "gkmrbf"
+        assert model.kernel.gamma == 2.0
+        path.write_text("#kernel_type wgkm\n#M 3\n#H 2.0\n" + text)
+        assert load_r_gkmsvm_model(path).kernel_type == "wgkm"
+
     def test_nsv_mismatch_raises(self, tmp_path):
         svs = _make_seqs(3, 11, seed=5)
         coefs = [0.5, -0.3, 0.2]

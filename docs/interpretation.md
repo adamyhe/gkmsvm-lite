@@ -4,11 +4,11 @@
 
 gkm-SVMs compute kernel values through discrete k-mer counting and mismatch table lookups. There is no meaningful gradient through these operations. **Gradient-based attribution methods are not compatible with gkm-SVMs.** This includes DeepLIFT, DeepSHAP, Integrated Gradients, Saliency, GradCAM, and gradient-based methods in captum. Ledidi (gradient-based sequence design) is also incompatible.
 
-**Perturbation-based methods do work** — they only need to evaluate the model, not differentiate through it. This includes KernelSHAP, Occlusion, Shapley Value Sampling, and Feature Ablation (all available in captum). However, these require many kernel evaluations per sequence and are much slower than GkmExplain or ISM. GkmExplain has theoretical connections to Integrated Gradients and is the recommended attribution method for gkm-SVMs — it is both faster than ISM and handles epistatic motif logic (OR/redundancy) that saturates ISM.
+**Perturbation-based methods do work** — they only need to evaluate the model, not differentiate through it. This includes KernelSHAP, Occlusion, Shapley Value Sampling, and Feature Ablation (all available in captum). However, these require many kernel evaluations per sequence and are much slower than GkmExplain or ISM. GkmExplain has theoretical connections to Integrated Gradients and is the recommended attribution method for gkm-SVMs: it handles epistatic motif logic (OR/redundancy) that saturates ISM.
 
 ## GkmExplain
 
-GkmExplain analytically decomposes the SVM decision function into per-base importance scores. It provides theoretically grounded attributions with connections to Integrated Gradients.
+GkmExplain analytically decomposes the SVM decision function into per-base importance scores. It provides theoretically grounded attributions with connections to Integrated Gradients. Attribution modes need a count-table kernel (`-t 0/1/2`); for RBF and weighted models use `mutation_impact()` or ISM.
 
 ```python
 from gkmsvm import gkmexplain
@@ -35,7 +35,7 @@ Importance is exactly `hypothetical * one_hot_input`. Internally, only the hypot
 
 **Perturbation** (`mode="perturbation"`, legacy `mode=2`) computes the discrete kernel-value change from each possible single-base mutation. At each position, the reference base channel is zero; alternate base channels contain the predicted score change from that mutation. Corresponds to lsgkm C mode 3 (`perturbation_eff=1`). Uses `gamma[m] = mismatch_table[m+1] - mismatch_table[m]` for match-to-mismatch and `kappa[m] = mismatch_table[m-1] - mismatch_table[m]` for mismatch-to-match. Exact for linear kernels; does not account for the RBF `exp()` in `-t 3`/`-t 5`. Use for per-position mutation maps.
 
-**Mutation impact score** (`mutation_impact(model, ref, alt)`, or `model.score_variants(ref, alt, method="gkmexplain")`) is the variant effect score used in the GkmExplain paper's dsQTL evaluation (lsgkm `gkmexplain -m 5`). Per support vector, the base-kernel change is normalized by the *reference* sequence's norm; for RBF kernels the kernel value above its floor, `exp(γ(K-1)) - exp(-γ)`, is distributed in proportion to `ΔK / K`. It is a linearization, so it differs slightly from ISM (`score(alt) - score(ref)`). Verified against lsgkm `gkmexplain -m 5` output. With the paper's models it reproduces the paper's dsQTL AUPRCs exactly ([validation](validation.md#dsqtl-variant-effect-prediction)).
+**Mutation impact score** (`mutation_impact(model, ref, alt)`, or `model.score_variants(ref, alt, method="gkmexplain")`) is the variant effect score used in the GkmExplain paper's dsQTL evaluation (lsgkm `gkmexplain -m 5`). Per support vector, the base-kernel change is normalized by the *reference* sequence's norm; for RBF kernels the kernel value above its floor, `exp(γ(K-1)) - exp(-γ)`, is distributed in proportion to `ΔK / K`. It is a linearization, so it differs slightly from the kernel delta `score(alt) - score(ref)`. It works for every kernel type. Verified against lsgkm `gkmexplain -m 5` output. With the paper's models it reproduces the paper's dsQTL AUPRCs exactly ([validation](validation.md#dsqtl-variant-effect-prediction)).
 
 ### Practical usage
 
@@ -69,11 +69,7 @@ GkmExplain processes input sequences in batches (default 50) and support vectors
 attr = gkmexplain(model, x, mode="importance", batch_size=20, verbose=True)
 ```
 
-GkmExplain uses a packed uint32 pre-filter to skip ~99.88% of window pairs (those beyond the mismatch threshold `d`), then decomposes only the contributing pairs per-position. Per-position base identity is extracted directly from packed uint32 via bit shifts, eliminating all float intermediate arrays.
-
-The inner kernel fuses coefficient multiplication and SV-dimension reduction directly into the accumulation loop, writing weighted contributions into a `[B, 4, L]` result array. This eliminates the `O(B × 4 × L × S_chunk)` per-SV intermediate array (~640 MB at typical sizes). Forward and reverse-complement SV windows are concatenated along the window axis for a single kernel launch per chunk.
-
-On CPU, a fused Numba kernel parallelizes over `B` (batch dimension) with `prange`, giving each thread exclusive ownership of its `[4, L]` result slice (~6.4 KB, L1-resident). On NVIDIA GPU, a fused CuPy RawKernel uses one CUDA thread per (batch, SV) pair with coalesced memory access, shared-memory caching, and float64 `atomicAdd` into the result array (requires compute capability >= 6.0). On Apple Silicon, GkmExplain falls back to the CPU path (MLX is float32-only, which violates the completion axiom's precision requirements). This makes GkmExplain roughly **2x faster than ISM** for typical parameters (l=11, k=7, d=3).
+GkmExplain compares packed uint32 windows (XOR + popcount), skipping window pairs beyond the mismatch cutoff (~99.9% for l=11 k=7 d=3), and decomposes only the contributing pairs per position. The kernel multiplies by the normalized coefficient and reduces over SVs in its inner loop, accumulating into the `[B, 4, L]` result, so there is no per-SV intermediate. On CPU a Numba kernel parallelizes over the batch; on NVIDIA GPUs a CuPy kernel runs one thread per (sequence, SV) pair and accumulates with float64 `atomicAdd` (compute capability >= 6.0). On Apple Silicon it falls back to CPU (Metal has no float64, which the completeness axiom needs).
 
 ## In-silico mutagenesis (ISM)
 
@@ -93,13 +89,13 @@ deltas = ism(model, x)  # [B, 4, L] — delta scores
 
 ISM in gkmsvm-lite uses a window-delta optimization: when a single base changes, only ~l of the W = L - l + 1 kernel windows are affected. Only these windows are recomputed rather than the full kernel, making ISM ~(W/l)x faster than naive re-scoring.
 
-ISM works on all backends (CPU, NVIDIA GPU, and Apple Silicon MLX). On MLX, ISM uses the custom Metal kernels for the kernel evaluation step.
+ISM works for every kernel type and on all backends (CPU, NVIDIA GPU, and Apple Silicon MLX). The affected windows are packed (padded with a window value that cancels in the difference) and scored against the SVs through the same path as `model()`, including the cached l-mer index; weighted (`-t 4/5`) inputs with N score all 4L mutants instead.
 
 ### When to use what
 
 | | GkmExplain | ISM | KernelSHAP |
 |---|---|---|---|
-| Speed | ~2x faster than ISM | Fast (packed uint32 + window-delta) | Orders of magnitude slower |
+| Speed | All window pairs within the cutoff | Affected windows only, via the l-mer index where it applies | Orders of magnitude slower |
 | Output | Analytical decomposition | Exact score deltas | Shapley values |
 | Interpretation | What contributes to the kernel | What happens if you mutate | Feature importance with interactions |
 | Epistatic logic | Handles OR/redundant motifs correctly | Saturates (misses redundant motifs) | Handles interactions |
@@ -107,9 +103,9 @@ ISM works on all backends (CPU, NVIDIA GPU, and Apple Silicon MLX). On MLX, ISM 
 | Perturbation | Discrete kernel Δ per mutation | N/A | N/A |
 | Use case | Recommended default | Exact mutation effects | When Shapley guarantees are needed |
 
-GkmExplain is both faster and more informative than ISM. ISM suffers from **saturation effects**: when multiple motifs can independently drive the score (OR logic), mutating one motif has no effect if the other is intact, so ISM reports both as unimportant. GkmExplain analytically decomposes the kernel and correctly attributes importance to all contributing motifs regardless of redundancy. Hypothetical importance scores enable motif discovery with TF-MoDISco and are not available from ISM.
+GkmExplain is more informative than ISM. ISM suffers from **saturation effects**: when multiple motifs can independently drive the score (OR logic), mutating one motif has no effect if the other is intact, so ISM reports both as unimportant. GkmExplain analytically decomposes the kernel and correctly attributes importance to all contributing motifs regardless of redundancy. Hypothetical importance scores enable motif discovery with TF-MoDISco and are not available from ISM.
 
-For variant effect prediction, use `model.score_variants(method="gkmexplain")` (the paper's mutation impact score) or ISM (`method="kernel"`) for the exact score change. KernelSHAP provides formal Shapley value guarantees but is impractical for routine use due to the cost of repeated kernel evaluations.
+For variant effect prediction, use `model.score_variants(method="gkmexplain")` (the paper's mutation impact score) or `method="kernel"` for the exact score change. KernelSHAP provides formal Shapley value guarantees but is impractical for routine use due to the cost of repeated kernel evaluations.
 
 ## Paired REF/ALT scoring
 
@@ -121,10 +117,10 @@ from gkmsvm import one_hot_encode
 ref = one_hot_encode("ACGTACGTACGTACGT")
 alt = one_hot_encode("ACGTACGAACGTACGT")  # T→A at position 8
 
-delta = model(alt[None, ...]).item() - model(ref[None, ...]).item()
+delta = model.score_variants(ref[None], alt[None]).item()  # score(alt) - score(ref)
 ```
 
-This gives the exact score change for a specific variant. For batch scoring, use `model.score_variants()`.
+This gives the exact score change for a specific variant; pass [N, 4, L] arrays to score many at once.
 
 Note: `score(ALT) - score(REF)` from the full SVM is **not** identical to deltaSVM's k-mer weight approximation. DeltaSVM is a linear approximation that is faster but less accurate.
 

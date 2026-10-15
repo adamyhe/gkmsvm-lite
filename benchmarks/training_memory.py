@@ -33,6 +33,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+
 from _common import (
     LSGKM_THREADS,
     RESULTS,
@@ -44,25 +45,16 @@ from _common import (
     lsgkm_default_threads,
     lsgkm_has_option,
     lsgkm_version,
+    read_seqs,
     run_measured,
     set_cpu_threads,
     worker_result,
+    write_seqs,
     write_tsv,
 )
 
 SOLVERS = ("libsvm", "smo", "nystrom", "lsgkm")
 DEFAULT_SIZES = "1000,2000,5000,10000,20000,30000,max"
-
-
-def _write_fasta(path: Path, seqs: list[str], prefix: str) -> None:
-    with open(path, "w") as f:
-        f.writelines(f">{prefix}{i}\n{s}\n" for i, s in enumerate(seqs))
-
-
-def _read_fasta(path) -> list[str]:
-    from gkmsvm import read_fasta
-
-    return [s for _, s in read_fasta(str(path))]
 
 
 # ── gkmsvm-lite worker (child process) ─────────────────────────────
@@ -73,9 +65,9 @@ def _worker(spec: dict) -> None:
     from gkmsvm.backend import to_cpu
 
     work = Path(spec["work"])
-    pos = _read_fasta(work / f"pos_{spec['N']}.fa")
-    neg = _read_fasta(work / f"neg_{spec['N']}.fa")
-    test = _read_fasta(work / "test.fa")
+    pos = read_seqs(work / f"pos_{spec['N']}.fa")
+    neg = read_seqs(work / f"neg_{spec['N']}.fa")
+    test = read_seqs(work / "test.fa")
 
     t0 = time.perf_counter()
     model = train_gkmsvm(
@@ -151,15 +143,15 @@ def main():
                      "to skip LS-GKM")
         predict_threads = args.threads if lsgkm_has_option(bins["gkmpredict"], "-T") else None
 
-    import dsqtl_auprc as bench
+    from gkmsvm.train import _gram_fits_on_cpu
     from sklearn.metrics import roc_auc_score
 
-    from gkmsvm.train import _gram_fits_on_cpu
+    import dsqtl_auprc as bench
 
     bench.download_sequence_sets()
     rng = np.random.default_rng(0)
-    pos = _read_fasta(SEQ_DIR / "gm12878_shared.fa")
-    neg = _read_fasta(SEQ_DIR / "nullseqs_gm12878_shared.1.1.fa")
+    pos = read_seqs(SEQ_DIR / "gm12878_shared.fa")
+    neg = read_seqs(SEQ_DIR / "nullseqs_gm12878_shared.1.1.fa")
     pos = [pos[i] for i in rng.permutation(len(pos))]
     neg = [neg[i] for i in rng.permutation(len(neg))]
     test_pos, pos = pos[: args.n_test], pos[args.n_test:]
@@ -171,13 +163,13 @@ def main():
     print(f"Sizes: {sizes}  (max {n_max:,}), held out {2 * args.n_test:,}")
 
     work = Path(tempfile.mkdtemp(prefix="training_memory_"))
-    _write_fasta(work / "test.fa", test_pos + test_neg, "t")
+    write_seqs(work / "test.fa", test_pos + test_neg, "t")
 
     rows = []
     for N in sizes:
         half = N // 2
-        _write_fasta(work / f"pos_{N}.fa", pos[:half], "p")
-        _write_fasta(work / f"neg_{N}.fa", neg[:half], "n")
+        write_seqs(work / f"pos_{N}.fa", pos[:half], "p")
+        write_seqs(work / f"neg_{N}.fa", neg[:half], "n")
         gram_gb = N * N * 8 / 1024**3
         print(f"\n── N = {N:,} (Gram {gram_gb:.1f} GB) ──")
         scores = {}

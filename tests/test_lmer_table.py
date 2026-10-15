@@ -83,3 +83,18 @@ def test_to_deltasvm_matches_brute(case, include_rc, query_norm):
                                rtol=1e-6, atol=1e-7)
     # to_deltasvm must not disturb the model's own scoring
     np.testing.assert_array_equal(np.asarray(model(X)), before)
+
+
+@pytest.mark.parametrize("query_norm", [False, True])
+def test_to_deltasvm_rbf_weights_are_lmer_scores(query_norm):
+    """RBF is defined on the normalized kernel, so every weight is the model's
+    score on that l-mer alone minus bias, whatever query_norm says."""
+    rng = np.random.default_rng(4)
+    sv = _onehot(30, 40, rng)
+    model = GkmSVM(sv, rng.normal(size=30), 0.1, kernel_type="gkmrbf",
+                   kernel_params={"L": 6, "k": 4, "d": 2, "gamma": 2.0})
+    weights = np.asarray(model.to_deltasvm(query_norm=query_norm).weights)
+    idx = rng.choice(4**6, 50, replace=False)
+    lmers = np.eye(4)[(idx[:, None] // 4 ** np.arange(5, -1, -1)) % 4].transpose(0, 2, 1)
+    expected = np.asarray(model(np.ascontiguousarray(lmers))).ravel() - model.bias
+    np.testing.assert_allclose(weights[idx], expected, rtol=1e-6, atol=1e-7)

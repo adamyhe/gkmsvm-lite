@@ -5,7 +5,6 @@ from math import comb
 import numpy as np
 from numba import njit, prange
 
-from gkmsvm.backend import get_array_module, get_strides
 from gkmsvm.kernels.packed import PackedGkmKernel
 
 # ---------------------------------------------------------------------------
@@ -419,25 +418,6 @@ class DirectGkmKernel(PackedGkmKernel):
                 return self.l - m
         return self.l + 1
 
-    def flat_windows(self, x: np.ndarray) -> np.ndarray:
-        """Extract length-l sliding windows, flattened across channels.
-
-        Args:
-            x: [B, 4, L] one-hot encoded sequences.
-
-        Returns:
-            [B, W, 4*l] where W = L - l + 1.
-        """
-        xp = get_array_module(x)
-        B, C, L = x.shape
-        self._check_length(L)
-        W = L - self.l + 1
-        shape = (B, C, W, self.l)
-        s = get_strides(x)
-        new_strides = (s[0], s[1], s[2], s[2])
-        wx = xp.lib.stride_tricks.as_strided(x, shape=shape, strides=new_strides)
-        wx = xp.ascontiguousarray(wx.transpose(0, 2, 1, 3))  # [B, W, 4, l]
-        return wx.reshape(B, W, C * self.l)
 
     _HAS_BRUTE = True
 

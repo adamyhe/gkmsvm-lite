@@ -113,9 +113,15 @@ class TestDirectGkmKernelRC:
         assert float(k[0, 0]) == pytest.approx(1.0)
 
 
+def _flat_windows(x, l):
+    """[B, W, 4*l] one-hot length-l windows."""
+    w = np.lib.stride_tricks.sliding_window_view(x, l, axis=2)  # [B, 4, W, l]
+    return w.transpose(0, 2, 1, 3).reshape(x.shape[0], -1, 4 * l)
+
+
 def _table_oracle(kernel, x, y):
     """K_raw from one-hot window match counts and the mismatch table."""
-    matches = np.einsum("bif,sjf->bsij", kernel.flat_windows(x), kernel.flat_windows(y))
+    matches = np.einsum("bif,sjf->bsij", _flat_windows(x, kernel.l), _flat_windows(y, kernel.l))
     mism = np.clip(np.rint(kernel.l - matches).astype(np.int64), 0, kernel.l)
     return np.asarray(kernel._mismatch_table)[mism].sum(axis=(-2, -1))
 

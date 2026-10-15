@@ -159,10 +159,7 @@ def _get_csmo():
 
 import ctypes as _ct
 
-_COLUMN_CB = _ct.CFUNCTYPE(
-    None, _ct.c_int, _ct.c_int,
-    _ct.POINTER(_ct.c_double), _ct.c_void_p, _ct.c_void_p,
-)
+_COLUMN_CB = _ct.CFUNCTYPE(None, _ct.c_int, _ct.c_int, _ct.POINTER(_ct.c_double), _ct.c_void_p)
 
 
 # Most columns computed per kernel-cache miss in the C solver: the requested
@@ -273,7 +270,7 @@ def _smo_csolver(kernel, X, y, C, tol, max_iter, cache_size, verbose):
                           RuntimeWarning, stacklevel=2)
             return cache.compute_columns([idx])
 
-    def _column_callback(idx, n, out_ptr, _userdata, c_cache):
+    def _column_callback(idx, n, out_ptr, c_cache):
         try:
             cols = _columns(idx, c_cache)
             col = _host(cols.pop(idx))
@@ -301,7 +298,6 @@ def _smo_csolver(kernel, X, y, C, tol, max_iter, cache_size, verbose):
         _ct.c_int,
         _ct.c_int,
         _COLUMN_CB,
-        _ct.c_void_p,
         _ct.POINTER(_ct.c_double),
         _ct.POINTER(_ct.c_double),
         _ct.c_int,
@@ -316,7 +312,6 @@ def _smo_csolver(kernel, X, y, C, tol, max_iter, cache_size, verbose):
         max_iter,
         min(cache_size, N),
         cb,
-        None,
         alpha_out.ctypes.data_as(_ct.POINTER(_ct.c_double)),
         rho_out.ctypes.data_as(_ct.POINTER(_ct.c_double)),
         int(verbose),

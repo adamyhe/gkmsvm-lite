@@ -9,7 +9,7 @@
 - [x] RbfGkmKernel (`-t 3` / `gkmrbf` / `rbf`)
 - [x] CenterWeightedGkmKernel (`-t 4` / `wgkm` / `weighted`)
 - [x] CenterWeightedRbfGkmKernel (`-t 5` / `wgkmrbf` / `weighted_rbf`)
-- [x] GkmSVM with chunked SV evaluation
+- [x] GkmSVM scoring with memory-capped [rows, S] blocks
 - [x] LS-GKM model importer (plain text and gzip)
 - [x] Classic gkmSVM importer — C gkmSVM LIBSVM-style format (opposite bias sign convention)
 - [x] R gkmSVM importer — `.gkmmodel` unified and `_svalpha.out`/`_svseq.fa` two-file formats
@@ -36,14 +36,14 @@
 - [x] tqdm progress bars for inference, ISM, GkmExplain
 - [x] dsQTL benchmark: GkmExplain paper (Fig. 8) reproduced per model with the paper's models — ISM, GkmExplain mutation impact, deltaSVM ([validation](validation.md))
 - [x] GkmExplain mutation impact score (lsgkm `gkmexplain -m 5`)
-- [x] Training via precomputed Gram matrix (libsvm-official C solver)
+- [x] Training via precomputed Gram matrix (scikit-learn's LIBSVM)
 - [x] Tiled Gram matrix computation with symmetry exploitation
 - [x] Model serialization: npz (native) and LS-GKM text (interop) formats
 - [x] `GkmSVM.save()` with auto-format detection
 - [x] `load_model()` unified loader (npz + LS-GKM auto-detect)
-- [x] Column-cached SMO solver (`solver="smo"`) — LRU-cached kernel columns, no N×N Gram matrix, scales to ATAC/ChIP-scale (80K+ sequences)
-- [x] `train_gkmsvm()` solver selection: `auto` / `smo` / `libsvm`
-- [x] Memory-aware solver auto-selection — estimates Gram matrix size against available RAM/VRAM (75% budget)
+- [x] Column-cached SMO solver (`solver="smo"`) — LRU-cached kernel columns, no N×N Gram matrix
+- [x] `train_gkmsvm()` solver selection: `auto` / `libsvm` / `smo` / `nystrom`
+- [x] Memory-aware solver auto-selection — Gram size against 75% of available RAM
 - [x] Epsilon-SVR regression via `train_gkmsvr()` — continuous-valued prediction with configurable epsilon tube
 - [x] MLX backend for Apple Silicon GPU inference (`model.mlx()`)
 - [x] MLX shim for NumPy API compatibility (strides, copy, fancy indexing)
@@ -61,7 +61,11 @@
 - [x] GkmExplain forward + RC fusion — single kernel launch via concatenated SV windows
 - [x] GkmExplain mode 0 = mode 1 × OHE — unified to single mode 1 kernel
 - [x] GkmExplain CPU `prange(B)` — L1-resident per-thread result arrays
-- [x] 365 tests passing
+- [x] Masked-join kernel for Gram tiles and SMO columns, all six kernel types, CPU/CUDA/Metal ([design](design/mask-join-kernel.md))
+- [x] Exact l-mer weight table for `-t 0/1/2/4` prediction and `to_deltasvm`
+- [x] Packed kernel interface (`kernel.base`, `kernel.finish`, `raw_packed`) shared by Gram, SMO, scoring, ISM and mutation impact
+- [x] Cached l-mer index for scoring, ISM and mutation impact against SVs, and for SMO columns over the training set (`-t 1/2/3`)
+- [x] ISM and mutation impact for every kernel type
 
 ## Next
 

@@ -1,154 +1,63 @@
 # Performance
 
-## Kernel paths
+## Which path a call takes
 
-- **Packed uint32 path** (`PackedGkmKernel.raw_packed`): windows packed to uint32 (2 bits/base), match counting via XOR + popcount. Used by training, scoring, ISM, and GkmExplain, for every kernel type (RBF kernels through their base kernel). With 16+ sequences on both sides it uses the masked join (`kernels/masked.py`) instead of comparing every window pair.
-- **Cached l-mer index** (`kernels/lmer_index.py`): for scoring against a model's SVs with a d-cutoff kernel (e.g. `-t 2`/`-t 3`, d <= 3). Built once per model (0.55 s and 81 MB for 32,715 SVs at l=10); each query window looks up its d-mismatch neighborhood, so a call costs nothing per SV. On an M4, 500 dsQTL variants on the `-t 3` paper model score 4x faster than with the masked join, at 43% lower peak RSS.
-- **Exact l-mer table** (`lmer_table.py`): prediction for `-t 0/1/2/4` models with 500+ SVs.
-- **Weighted kernels** (`-t 4`/`-t 5`): the masked join with per-mask weights; inputs with N positions use a per-position match path.
+Every kernel works on windows packed 2 bits per base into uint32 (`PackedGkmKernel.pack`); RBF kernels (`-t 3`, `-t 5`) go through their base kernel and apply `exp(γ(K - 1))` at the end.
 
-## CPU backend
-
-Fused Numba kernels (`@njit(parallel=True, fastmath=True)`) combine match-count, table-lookup, and accumulation into a single parallel kernel, avoiding materialization of the full `[B, S, W, W]` match tensor. Numba's threading layer is pinned to `workqueue` on import to avoid OpenMP conflicts.
-
-Packed SV windows, their self-kernels and the l-mer index are cached on the model after the first call.
-
-## NVIDIA GPU backend (CuPy)
-
-CuPy RawKernel CUDA code with:
-
-- **Packed uint32 windows**: Each l-mer packed into a uint32. SV array goes from `[l, Wy, S]` int8 (229 MB for 72K SVs at 300bp) to `[Wy, S]` uint32 (84 MB) — 2.7x memory reduction with better cache locality.
-- **Coalesced memory access**: SV windows laid out so adjacent CUDA threads read adjacent memory.
-- **Shared-memory caching**: Query sequence packed windows and the mismatch weight table are loaded into shared memory once per thread block. For S >> blockDim (typical), all threads in a block share the same query data.
-- **Min-matches skip**: Window pairs below `min_matches` (derived from mismatch table sparsity) skip the table lookup entirely. For esttrunc l=11 k=7 d=3, 99.88% of random window pairs are skipped.
-- **`--use_fast_math`**: Enables fast math intrinsics.
-
-GPU uses float32 accumulation for the float path. Score differences between CPU and GPU are <3e-3 due to float32 diagonal computation on GPU.
-
-## Apple Silicon GPU backend (MLX)
-
-Custom Metal shaders via `mx.fast.metal_kernel` with the same algorithmic approach as the CUDA path:
-
-- **Packed uint32 XOR + popcount**: Each l-mer packed into a uint32. Metal's hardware `popcount()` counts mismatches in a single instruction.
-- **Per-thread early exit**: `min_matches` threshold skips window pairs that contribute nothing, same as the CUDA path.
-- **No intermediate materialization**: Each Metal thread accumulates its own (batch, SV) result — no `[B, S, Wx, Wy]` tensor.
-- **`mx.as_strided` sliding windows**: Native MLX strided view replaces the Python-loop concatenation that was the initial performance bottleneck.
-
-MLX arrays lack some NumPy features (`.strides`, `.copy()`, fancy indexing). These are handled by:
-- `get_strides()` helper returning zeros for MLX (the MLX shim's `_mlx_sliding_windows` computes strides from shape).
-- `xp.ascontiguousarray()` in place of `.copy()`.
-- `to_cpu(X)[indices]` guard in training code (transfers to numpy before fancy indexing).
-
-DeltaSVM auto-chunks batch dimension when intermediates would exceed 256 MB, preventing memory thrashing on Apple Silicon's unified memory.
-
-## Chunked SV inference
-
-`GkmSVM(sv_chunk_size=N)` chunks pairwise kernel computation over support vectors to bound memory. Recommended chunk sizes for single-sequence scoring at 300bp:
-
-| GPU VRAM | `sv_chunk_size` | Peak memory |
+| Work | Path | Cost |
 |---|---|---|
-| 10 GB | 5000 | ~3.4 GB |
-| 16+ GB | 10000 | ~6.8 GB |
-| CPU | 5000 or None | N/A |
+| Scoring `-t 0/1/2/4` (l <= 12, 500+ SVs) | Exact l-mer weight table (`lmer_table.py`): one lookup per window | Independent of the number of SVs once built |
+| Scoring `-t 1/2/3` (d-cutoff, neighborhood <= 8,192 l-mers) | Cached l-mer index over the SVs (`kernels/lmer_index.py`): each query window visits its d-mismatch neighborhood | Proportional to the matching (window, SV) pairs; nothing per SV |
+| Other scoring, Gram tiles, SMO columns for `-t 0/4/5` | Masked join (`kernels/masked.py`) when both sides have 16+ sequences, else brute force (XOR + popcount over all window pairs) | Masked join indexes one side per call |
+| SMO columns for `-t 1/2/3` | l-mer index over the training set | One query row per column |
+| GkmExplain attribution | Fused packed kernel (CPU, CUDA), reducing over SVs in the inner loop | All window pairs within the mismatch cutoff |
+| Inputs with N for `-t 4/5` | Per-position one-hot match path | Slow; chunked to `_MATCH_BYTES` |
 
-For batch scoring, reduce proportionally (`5000 / batch_size`). GkmExplain defaults to 2000-SV chunks.
+The model caches packed SV windows, their self-kernels, the l-mer table and the l-mer index per device (`GkmSVM._sv_cache`); the first call pays for building them (0.55 s and 81 MB for the l-mer index over 32,715 SVs at l=10).
 
-## ISM window-delta optimization
+CPU kernels are Numba `@njit(parallel=True)`; the threading layer is pinned to `workqueue` on import. On CPU, kernel scoring normalizes, applies the RBF and reduces over SVs in one parallel pass (`svm._normalized_dot`, and `explain._impact_cpu` for mutation impact), so the only [rows, S] array is the raw kernel. CUDA kernels are CuPy RawKernels; Metal kernels use `mx.fast.metal_kernel`. The CUDA index query accumulates float64 with `atomicAdd`; Metal has no float64, so it counts hits per mismatch level in int32 and combines levels in float64 on the CPU (exact; results are returned as float32). On CUDA the cost is the scattered atomics themselves (about 7×10¹⁰ for `to_deltasvm` on the model below), and int32 counting measured no faster.
 
-When a single base changes, only ~l of the W = L - l + 1 windows are affected. ISM computes the delta from affected windows only, rather than recomputing the full kernel.
+## Measurements
 
-## Throughput benchmarks
+Variant scoring on the GkmExplain paper's `-t 3` dsQTL model (gkmrbf l=10 k=6 d=3, 32,715 SVs) for the 28,309 dsQTL test variants (51 bp windows), `benchmarks/timing_variants.py --no-lsgkm`. Server with an NVIDIA Titan Xp; compute time excludes model loading and JIT. "Before" is the code before the l-mer index (`cba8064`).
 
-### NVIDIA GPU (ENCFF579AOX, 72K SVs)
+| Method | Device | Before | Now | Peak RSS before → now |
+|---|---|---|---|---|
+| Kernel delta, `score_variants(method="kernel")` | CPU | 1137 s | 155 s | 2916 → 1537 MB |
+| | CUDA | 86.9 s | 20.2 s | 1557 → 1557 MB (GPU pool 2139 → 786 MB) |
+| Mutation impact, `method="gkmexplain"` | CPU | 570 s | 168 s | 5190 → 1537 MB |
+| | CUDA | 43.0 s | 19.2 s | 1558 → 1557 MB (GPU pool 5388 → 786 MB) |
+| `to_deltasvm(query_norm=True)`, all 4^10 10-mers | CPU | ~1 h (est.) | 113 s | → 1631 MB |
+| | CUDA | | 43.7 s | → 1557 MB |
 
-All benchmarks use the ENCODE ENCFF579AOX model (72,145 SVs, esttrunc l=11 k=7 d=3). GPU: RTX 3080. CPU: Numba parallel threading on all available cores. Steady-state throughput (packed SV windows cached).
+The two variant methods cost the same: both are one index query on [ref; alt] against the SVs, followed by a different reduction. `to_deltasvm` on an RBF model is a one-time conversion and is the most expensive of the three, because every one of the 1M l-mers still produces a full row of 32,715 kernel values; afterwards a `DeltaSVM` scores a variant with a few table lookups.
 
-### Best throughput per sequence length
+Training the `-t 2` l=10 k=6 d=3 model on GM12878 DHSs (300 bp), `benchmarks/training_memory.py --no-lsgkm` with a 2,048-column SMO cache, on the same server's GPU:
 
-| Sequence length | GPU (seq/s) | CPU (seq/s) | GPU/CPU speedup |
-|---|---|---|---|
-| 19bp (dsQTL variants) | 342.9 | 52.8 | 6.5x |
-| 50bp | 74.6 | 12.9 | 5.8x |
-| 100bp | 33.0 | 5.9 | 5.6x |
-| 200bp | 15.9 | 3.0 | 5.3x |
-| 300bp (ENCODE peaks) | 10.4 | 1.9 | 5.5x |
+| N | libsvm (precomputed Gram) | SMO | Nyström | SMO peak vs libsvm |
+|---|---|---|---|---|
+| 1,000 | 1.7 s | 0.9 s | 2.0 s | 647 vs 717 MB |
+| 2,000 | 2.0 s | 1.3 s | 2.1 s | 672 vs 765 MB |
+| 5,000 | 3.4 s | 5.7 s | 2.9 s | 763 vs 921 MB |
+| 10,000 | 8.4 s | 22.7 s | 5.1 s | 899 vs 1698 MB |
 
-GPU throughput is flat across batch sizes (compute-bound). CPU benefits slightly from larger batches at short sequences.
+SMO and libsvm give identical models (same SVs, AUROC, held-out scores r = 1.00000). With a cache smaller than N, SMO recomputes evicted columns, so it trades time for O(cache × N) memory. Nyström computes fewer kernel values but still builds a dense N × N approximate Gram, so it saves time, not memory.
 
-### Full sweep: GPU (CuPy)
+On an Apple M4 (CPU), `-t 3` SMO at N=1,000 takes 1.2 s and `-t 5` SMO at N=600 takes 1.4 s; both previously computed one column at a time through the one-hot path (80 s and 2.7 h). Biases and SV counts match the earlier code.
 
-| Length | Batch 1 | Batch 4 | Batch 16 | Batch 64 | Batch 256 |
-|---|---|---|---|---|---|
-| 19bp | 288.8 | 325.4 | 335.0 | 316.9 | **342.9** |
-| 50bp | 71.9 | 70.9 | **74.6** | 74.1 | 72.8 |
-| 100bp | 30.8 | 31.3 | 31.7 | **33.0** | 32.6 |
-| 200bp | 15.2 | 14.8 | 15.1 | 15.8 | **15.9** |
-| 300bp | 10.1 | 10.0 | 10.3 | **10.4** | 10.3 |
+Comparisons with LS-GKM are the paper figures in `benchmarks/` (`make -C benchmarks fig1b fig1c s2 s3`); see [benchmarks/README.md](../benchmarks/README.md).
 
-### Full sweep: CPU (Numba)
+## Memory
 
-| Length | Batch 1 | Batch 4 | Batch 16 | Batch 64 | Batch 256 |
-|---|---|---|---|---|---|
-| 19bp | 35.5 | 44.6 | 49.0 | 50.1 | **52.8** |
-| 50bp | 10.3 | 10.8 | 11.5 | 12.3 | **12.9** |
-| 100bp | 4.7 | 5.0 | 5.3 | 5.7 | **5.9** |
-| 200bp | 2.9 | 2.9 | **3.0** | 3.0 | 2.7 |
-| 300bp | 1.9 | **1.9** | 1.9 | 1.8 | 1.9 |
+- Kernel scoring holds [rows, S] kernel values in blocks of at most `GkmSVM._MAX_SCORE_BYTES` (512 MB), whatever `batch_size` says. `batch_size` bounds the inputs moved to the device at once.
+- Without the l-mer table or index, every masked-join call indexes all SV windows, so `batch_size` is raised until a call fills ~256 MB of [batch, S] (`GkmSVM._min_batch_size`).
+- GkmExplain processes inputs in batches (default 50) and SVs in chunks of `model.sv_chunk_size` (default 2,000).
+- Training with `solver="libsvm"` holds the N × N float64 Gram in host RAM; `solver="auto"` switches to SMO when it would exceed 75% of available RAM or `max_gram_gb`.
 
-Values in **bold** are the best batch size per sequence length. All values are seq/s.
-
-### Comparison with LS-GKM C
-
-LS-GKM C (`gkmpredict`) is single-threaded. At 300bp with 72K SVs:
-
-| Implementation | seq/s |
-|---|---|
-| gkmsvm-lite GPU | 10.4 |
-| gkmsvm-lite CPU | 1.9 |
-| LS-GKM C (single thread) | ~1.25 |
-
-## Bottleneck analysis
-
-The gapped k-mer kernel is inherently more expensive than a standard RBF kernel on pre-extracted features:
-
-| | RBF on features | gkm string kernel |
-|---|---|---|
-| Kernel eval per (query, SV) | D multiply-adds | W² × l match comparisons |
-| Typical dimensions | D = 360 | W = 290, l = 11 |
-| FLOPs per SV | ~720 | ~5,000,000 |
-
-Throughput scales as O(W² × S) per query where W = seq_len - l + 1 and S = num SVs. This is inherent to the kernel function, not an implementation gap.
-
-## Batch size recommendations
-
-- **GPU**: Batch size has minimal impact on throughput (GPU is compute-bound). Use batch_size=16-64 to save VRAM without sacrificing speed.
-- **CPU**: Larger batches help at short sequences (up to ~1.5x at 19bp). At 200bp+, batch size doesn't matter.
-
-### Apple Silicon GPU (Nanog, 8.8K SVs)
-
-Benchmarks use the Nanog reference model (8,873 SVs, esttrunc l=11 k=7 d=3) on an M1 MacBook Pro (16 GB unified memory). Custom Metal kernels via `mx.fast.metal_kernel`.
-
-| Config | CPU (seq/s) | MLX (seq/s) | Speedup |
-|---|---|---|---|
-| batch=1, 19bp | 215 | 387 | 1.8x |
-| batch=1, 50bp | 46 | 126 | 2.7x |
-| batch=4, 50bp | 48 | 277 | 5.8x |
-| batch=16, 50bp | 49 | 308 | 6.3x |
-| batch=1, 100bp | 20 | 61 | 3.1x |
-| batch=4, 100bp | 22 | 129 | 5.9x |
-| batch=16, 100bp | 23 | 140 | 6.1x |
-
-MLX throughput scales well with batch size (GPU saturation). At batch=16 the speedup plateaus at ~6x.
-
-DeltaSVM (linear k-mer scoring) gets 1.7-2.5x on MLX. The gather-heavy combinatorial path doesn't benefit from GPU as much as the fused XOR+popcount kernel path.
-
-## Reproducing benchmarks
+## Reproducing
 
 ```bash
-python benchmarks/throughput_sweep.py --device cpu
-python benchmarks/throughput_sweep.py --device cuda
-python benchmarks/throughput_sweep.py --device both   # side-by-side with speedup table
-make -C benchmarks s2                                  # same, saved to benchmarks/results/throughput.tsv
+python benchmarks/timing_variants.py --device cuda --no-lsgkm --n-variants 500
+python benchmarks/training_memory.py --device cuda --no-lsgkm --sizes 1000,2000,5000,10000
+make -C benchmarks s2      # throughput sweep, benchmarks/results/throughput.tsv
 ```
-
-Requires the ENCODE ENCFF579AOX fixture in `tests/fixtures/`.

@@ -1,6 +1,6 @@
 # Masked-join gkm kernel: handoff
 
-Status: phase 1 (CPU and CUDA Gram, `-t 0` to `-t 5`) and phase 1b (l-mer table prediction and `to_deltasvm`, `-t 0/1/2/4`) implemented; MLX steps 1-3 (table on MLX; Metal join and index build, 3.7x/4.5x faster than the M4 CPU masked join at 1k/2k) and phase 3 (SMO columns prefetched in batches into free cache slots; N=2000 96 s -> 7.7 s, N=5000 43 s) implemented; CUDA join tuning from a hardware profile and cheap CPU gains (segment key extraction, diagonal-block duplication in panels) open. Branch: `mask-join-kernel` (off `main` at `67da231`, which includes the benchmark pipeline).
+Status: implemented on `main`. The masked join serves Gram tiles and SMO columns for `-t 0` to `-t 5` on CPU, CUDA and MLX (Metal join with int32 counts); the exact l-mer table serves prediction and `to_deltasvm` for `-t 0/1/2/4`; a cached l-mer index serves scoring, ISM and mutation impact against a model's SVs, and SMO columns over the training set, for `-t 1/2/3`. Open: CUDA join tuning from a hardware profile, and the optimizations listed near the end. The sections below keep the design rationale and the measurements that motivated each step.
 
 ## Goal
 
@@ -122,29 +122,26 @@ Measured against the masked join on that model (M4 CPU, one call):
 | 64 | 0.10 s vs 4.6 s | 0.72 s vs 5.0 s |
 | 1024 | 1.6 s vs 5.7 s | 10.7 s vs 13.7 s |
 
-It applies to count-table kernels with at most `MAX_NEIGHBORS` (8,192) neighbors and l <= 12. `-t 0` and the weighted kernels have no d cutoff below l - k (about 20k–32k neighbors at l = 10–11) and keep the masked join. CUDA accumulates with float64 atomics; Metal counts hits per mismatch level in int32 and combines in float64 on the CPU.
+It applies to count-table kernels with at most `MAX_NEIGHBORS` (8,192) neighbors and l <= 12. `-t 0` and the weighted kernels have no d cutoff below l - k (about 20k–32k neighbors at l = 10–11) and keep the masked join. CPU and CUDA accumulate float64 directly; Metal counts hits per mismatch level in int32 (it has no float64) and combines levels in float64 on the CPU. Per-level int32 counting on CUDA measured slower on a Titan Xp (48.7 s vs 43.7 s for `to_deltasvm` on the 32,715-SV `-t 3` model, with a larger GPU pool): the cost is the ~7×10¹⁰ scattered atomics, whatever their type. A faster CUDA query would need shared-memory accumulation over SV tiles.
+
+SMO columns use the same index built over the training set: a column K(i, :) is one query row, so a cache smaller than N no longer degrades to single brute-force columns.
 
 ## Where it plugs in
 
-| Entry point | File | Phase |
+| Entry point | Path today | File |
 |---|---|---|
-| Gram tiles (`_fast_pairwise_tile`, `_fit_libsvm`, `_fit_libsvm_gpu_gram`, Nyström) | `gram.py`, `train.py` | 1 |
-| Prediction, `-t 0`/`-t 1`/`-t 2` (`GkmSVM.__call__`) | `svm.py`, `deltasvm.py` (l-mer table) | 1b |
-| Prediction, `-t 3` | `svm.py` (`pairwise_from_indices` calls) | 2 |
-| SMO kernel columns (`KernelColumnCache.compute_columns`) | `solver.py` | 3 |
-| ISM, GkmExplain, deltaSVM tables | `ism.py`, `explain.py`, `deltasvm.py` | Out of scope |
+| Gram tiles (`compute_gram`: libsvm, Nyström) | Masked join in column panels | `gram.py` |
+| SMO kernel columns (`KernelColumnCache.compute_columns`) | l-mer index over the training set (`-t 1/2/3`), else batched masked join | `solver.py` |
+| Prediction `-t 0/1/2/4` | Exact l-mer table | `svm.py`, `lmer_table.py` |
+| Prediction `-t 3`, other kernels; ISM; mutation impact | Cached l-mer index over the SVs, else masked join | `svm.py`, `ism.py`, `explain.py` |
+| `to_deltasvm` | l-mer table, else scoring all 4^l l-mers | `svm.py` |
+| GkmExplain attribution | Brute-force packed kernel (per-position decomposition) | `explain.py` |
 
-- **Phase 1:** a new method beside `pairwise_from_indices`, e.g. `pairwise_masked(bx, by, by_rc)`, used by `compute_gram` when the kernel has a finite `dmax` and the mask count is reasonable. Keep the brute-force path as the fallback and the test oracle.
-- **Phase 1b:** exact l-mer table prediction (previous section), with a scatter-based table build. Also gives exact, faster `to_deltasvm`.
-- **Phase 2 (`-t 3` prediction):** the column side is the SVs and doesn't change between calls, so its per-mask CSR can be built once and cached on the model, like the packed SV windows now. Memory at 70k SVs × 290 windows × 232 masks × 4 bytes ≈ 19 GB is too much, so cache only the size-(l−dmax) level, or build per SV chunk.
-- **Phase 3:** SMO columns are one query sequence against all N. The per-call sort cost dominates unless the column-side index persists, which is the same memory problem. Revisit after phases 1 and 2.
-- ISM and GkmExplain rely on per-window kernel structure (window-delta ISM, per-position attribution); a masked version is a separate design.
+The brute-force packed kernels remain for calls with fewer than 16 sequences on a side and as the test oracle (`kernel.use_masked = False`). Inputs with N for `-t 4/5` use the per-position match path.
 
-Out of scope: any table without a finite `dmax`. (`-t 4`/`-t 5` were originally out of scope too; they now use the join through `weighted_mask_plan`, with the per-position path kept for inputs with N.)
+## MLX (Apple GPU)
 
-## MLX (Apple GPU) plan
-
-Today MLX models use Metal brute-force kernels for the forward pass and ISM (`direct.py`, `mx.fast.metal_kernel`), and GkmExplain falls back to CPU. None of the masked-join or l-mer-table work runs on MLX yet. Both weighted-kernel paths explicitly skip MLX inputs, and the l-mer table path is written generically but has never been run on MLX.
+Steps 1–2 below are implemented (the l-mer table runs on MLX in float32; the Metal masked join and the Metal l-mer index count in int32), and the index build moved to Metal as well. GkmExplain attribution still falls back to CPU. The plan is kept for its constraints.
 
 Constraints that shape the design:
 
@@ -201,7 +198,11 @@ Targets:
 
 ## Files
 
-- `src/gkmsvm/kernels/direct.py`: packing (`_pack_windows_cpu`), brute-force kernels (`_fused_pairwise_packed_numba`, `_fused_pairwise_packed_sym_numba`), `pairwise_from_indices`, `_min_matches`.
+- `src/gkmsvm/kernels/packed.py`: `PackedGkmKernel` (`pack`, `raw_packed`, `raw_diag_packed`), `PAD_WINDOW`.
+- `src/gkmsvm/kernels/direct.py`: brute-force packed kernels (`_fused_pairwise_packed_numba`, `_fused_pairwise_packed_sym_numba`, CUDA and Metal equivalents), `_min_matches`.
+- `src/gkmsvm/kernels/masked.py`: mask plans (`mask_plan`, `weighted_mask_plan`) and the joins on CPU, CUDA and Metal.
+- `src/gkmsvm/kernels/lmer_index.py`: the cached l-mer index.
+- `src/gkmsvm/lmer_table.py`: exact l-mer table build.
 - `src/gkmsvm/kernels/esttrunc.py`: `_build_estlmer_table` (h(m) for `-t 1`/`-t 2`).
-- `src/gkmsvm/gram.py`: tiling, symmetry, normalization, `-t 3` handling.
+- `src/gkmsvm/gram.py`: tiling, symmetry, column panels, normalization.
 - `benchmarks/README.md`: benchmark pipeline. Run timings on one host and record it (result headers do this).

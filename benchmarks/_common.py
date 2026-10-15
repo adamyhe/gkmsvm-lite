@@ -112,10 +112,9 @@ def _gpu() -> str | None:
 def _versions() -> str:
     from importlib.metadata import PackageNotFoundError, version
 
+    import gkmsvm  # noqa: F401  pins Numba's threading layer before first use
     import numba
     import numpy as np
-
-    import gkmsvm  # noqa: F401  pins Numba's threading layer before first use
 
     try:
         lite = version("gkmsvm-lite")
@@ -151,9 +150,8 @@ def set_cpu_threads(n: int) -> int:
     raises if it differs from the pool it already started. Returns the count
     used (capped at the cores Numba sees).
     """
-    import numba
-
     import gkmsvm  # noqa: F401  pins Numba's threading layer before first use
+    import numba
 
     usable = usable_cores()
     if n > usable:
@@ -252,6 +250,22 @@ def read_provenance(path) -> dict[str, str]:
 
 
 # ── Measured child processes ───────────────────────────────────────
+
+
+def write_seqs(path, seqs: list[str], prefix: str) -> None:
+    """FASTA with records named prefix0, prefix1, ..."""
+    with open(path, "w") as f:
+        f.writelines(f">{prefix}{i}\n{s}\n" for i, s in enumerate(seqs))
+
+
+def read_seqs(path) -> list[str]:
+    """Sequences of a FASTA file (gzipped if the name ends in .gz)."""
+    import gzip
+
+    path = Path(path)
+    with (gzip.open(path, "rt") if path.suffix == ".gz" else open(path)) as f:
+        records = f.read().split(">")[1:]
+    return ["".join(r.splitlines()[1:]) for r in records]
 
 
 @dataclass

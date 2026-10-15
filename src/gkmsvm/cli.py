@@ -46,6 +46,23 @@ def _encode_seqs(records: list[tuple[str, str]]) -> np.ndarray:
     return np.stack([one_hot_encode(seq) for name, seq in records])
 
 
+def _write_tsv(path: str | None, columns: tuple[str, str], names, values) -> None:
+    """Two-column TSV to `path`, or stdout when None."""
+    import contextlib
+
+    with contextlib.nullcontext(sys.stdout) if path is None else open(path, "w") as out:
+        out.write("\t".join(columns) + "\n")
+        for name, value in zip(names, values):
+            out.write(f"{name}\t{value:.6f}\n")
+
+
+def _save_model(model, path: str) -> None:
+    """Save as .npz, or LS-GKM text for any other extension."""
+    model.save(path, fmt="npz" if Path(path).suffix == ".npz" else "lsgkm")
+    print(f"Saved model to {path} "
+          f"({model.num_support_vectors} SVs, bias={model.bias:.4f})", file=sys.stderr)
+
+
 def cmd_predict(args: argparse.Namespace) -> None:
     from gkmsvm.fasta import read_fasta
 
@@ -55,19 +72,10 @@ def cmd_predict(args: argparse.Namespace) -> None:
     names = [name for name, seq in records]
     X = _encode_seqs(records)
 
-    scores = model(
-        X, batch_size=args.batch_size, verbose=args.verbose,
-    ).flatten()
+    from gkmsvm.backend import to_cpu
 
-    out = sys.stdout if args.output is None else open(args.output, "w")
-    try:
-        out.write("name\tscore\n")
-        for name, score in zip(names, scores):
-            out.write(f"{name}\t{score:.6f}\n")
-    finally:
-        if out is not sys.stdout:
-            out.close()
-
+    scores = to_cpu(model(X, batch_size=args.batch_size, verbose=args.verbose)).ravel()
+    _write_tsv(args.output, ("name", "score"), names, scores)
     if args.output:
         print(f"Wrote {len(scores)} scores to {args.output}", file=sys.stderr)
 
@@ -94,20 +102,7 @@ def cmd_train(args: argparse.Namespace) -> None:
         device=args.device,
         verbose=args.verbose,
     )
-
-    output = Path(args.output)
-    if output.suffix == ".npz":
-        from gkmsvm.serialization import save_npz
-        save_npz(model, output)
-    else:
-        from gkmsvm.serialization import save_lsgkm
-        save_lsgkm(model, output)
-
-    print(
-        f"Saved model to {output} "
-        f"({model.num_support_vectors} SVs, bias={model.bias:.4f})",
-        file=sys.stderr,
-    )
+    _save_model(model, args.output)
 
 
 def cmd_trainsvr(args: argparse.Namespace) -> None:
@@ -126,7 +121,8 @@ def cmd_trainsvr(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
 
-    svr_kwargs = dict(
+    model = train_gkmsvr(
+        seqs, labels,
         kernel_type=args.kernel_type,
         l=args.l, k=args.k, d=args.d,
         C=args.C,
@@ -134,26 +130,11 @@ def cmd_trainsvr(args: argparse.Namespace) -> None:
         gamma=args.gamma,
         M=args.M, H=args.H,
         include_rc=not args.no_rc,
+        solver=args.solver,
         device=args.device,
         verbose=args.verbose,
     )
-    if hasattr(args, "solver"):
-        svr_kwargs["solver"] = args.solver
-    model = train_gkmsvr(seqs, labels, **svr_kwargs)
-
-    output = Path(args.output)
-    if output.suffix == ".npz":
-        from gkmsvm.serialization import save_npz
-        save_npz(model, output)
-    else:
-        from gkmsvm.serialization import save_lsgkm
-        save_lsgkm(model, output)
-
-    print(
-        f"Saved model to {output} "
-        f"({model.num_support_vectors} SVs, bias={model.bias:.4f})",
-        file=sys.stderr,
-    )
+    _save_model(model, args.output)
 
 
 def cmd_ism(args: argparse.Namespace) -> None:
@@ -228,20 +209,12 @@ def cmd_deltasvm(args: argparse.Namespace) -> None:
 
     from gkmsvm.backend import to_cpu
     scores = to_cpu(dsvm(X, verbose=args.verbose).flatten())
-
-    out = sys.stdout if args.output is None else open(args.output, "w")
-    try:
-        out.write("name\tscore\n")
-        for name, score in zip(names, scores):
-            out.write(f"{name}\t{score:.6f}\n")
-    finally:
-        if out is not sys.stdout:
-            out.close()
+    _write_tsv(args.output, ("name", "score"), names, scores)
 
 
 def cmd_to_deltasvm(args: argparse.Namespace) -> None:
-    model = _load_model(args.model, device="cpu")
-    dsvm = model.to_deltasvm(device="cpu", verbose=args.verbose)
+    model = _load_model(args.model, device=args.device)
+    dsvm = model.to_deltasvm(device="cpu", query_norm=args.query_norm, verbose=args.verbose)
 
     output = Path(args.output)
     _save_deltasvm_weights(dsvm, output)
@@ -274,7 +247,6 @@ def _save_deltasvm_weights(dsvm, path: Path) -> None:
 
 def cmd_score_variants(args: argparse.Namespace) -> None:
     from gkmsvm.backend import to_cpu
-    from gkmsvm.codec import one_hot_encode
 
     model = _load_model(args.model, device=args.device)
 
@@ -295,18 +267,10 @@ def cmd_score_variants(args: argparse.Namespace) -> None:
 
     X_ref = model._match_device(X_ref)
     X_alt = model._match_device(X_alt)
-    deltas = to_cpu(
-        model.score_variants(X_ref, X_alt, verbose=args.verbose).flatten()
-    )
-
-    out = sys.stdout if args.output is None else open(args.output, "w")
-    try:
-        out.write("name\tdelta\n")
-        for name, delta in zip(ref_names, deltas):
-            out.write(f"{name}\t{delta:.6f}\n")
-    finally:
-        if out is not sys.stdout:
-            out.close()
+    deltas = to_cpu(model.score_variants(
+        X_ref, X_alt, method=args.method, verbose=args.verbose,
+    )).ravel()
+    _write_tsv(args.output, ("name", "delta"), ref_names, deltas)
 
 
 def cmd_import(args: argparse.Namespace) -> None:
@@ -361,10 +325,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-o", "--output", required=True, help="Output model (.npz or .model.txt).")
     p.add_argument("-C", type=float, default=1.0, help="Regularization (default: 1.0).")
     p.add_argument(
-        "--solver", default="auto", choices=["auto", "smo", "libsvm"],
-        help="Solver (default: auto).",
+        "--solver", default="auto", choices=["auto", "libsvm", "smo", "nystrom"],
+        help="Solver (default: auto: libsvm if the Gram fits in RAM, else smo).",
     )
-    p.add_argument("--cache-size", type=int, default=256, help="SMO cache columns (default: 256).")
+    p.add_argument("--cache-size", type=int, default=None,
+                   help="SMO kernel-column cache size (default: sized from available RAM).")
     _add_kernel_args(p)
     _add_device_arg(p)
 
@@ -422,17 +387,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("-m", "--model", required=True, help="Model file (.npz or .model.txt).")
     p.add_argument("-o", "--output", required=True, help="Output DeltaSVM weight file.")
+    p.add_argument("--query-norm", action="store_true",
+                   help="Keep each l-mer's normalization (weights = gkmpredict on the "
+                   "l-mer minus bias, as lsgkm deltaSVM weights; implied for RBF).")
     _add_device_arg(p)
 
     # ── score-variants ──────────────────────────────────────────────
     p = sub.add_parser(
         "score-variants",
-        help="Score variant effects: score(alt) - score(ref).",
+        help="Score variant effects (kernel score delta or GkmExplain mutation impact).",
     )
     p.add_argument("-m", "--model", required=True, help="Model file.")
     p.add_argument("--ref", required=True, help="Reference sequences FASTA.")
     p.add_argument("--alt", required=True, help="Alternate sequences FASTA.")
     p.add_argument("-o", "--output", default=None, help="Output TSV (default: stdout).")
+    p.add_argument("--method", default="kernel", choices=["kernel", "gkmexplain"],
+                   help="kernel: score(alt) - score(ref); gkmexplain: mutation impact "
+                   "(lsgkm gkmexplain -m 5). Default: kernel.")
     _add_device_arg(p)
 
     # ── import ───────────────────────────────────────────────────────

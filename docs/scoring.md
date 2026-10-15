@@ -41,7 +41,7 @@ records = read_fasta("sequences.fa")
 sequences = [seq for _, seq in records]
 x = encode_batch(sequences)
 
-scores = model(x, verbose=True)  # progress bar for large batches
+scores = model(x, batch_size=1000, verbose=True)  # progress bar over batches
 ```
 
 ## Variant effect prediction
@@ -52,9 +52,7 @@ scores = model(x, verbose=True)  # progress bar for large batches
 ref = one_hot_encode("ACGTACGTACGTACGT")
 alt = one_hot_encode("ACGTACGAACGTACGT")  # T→A at position 8
 
-ref_score = model(ref[None, ...]).item()
-alt_score = model(alt[None, ...]).item()
-delta = alt_score - ref_score
+delta = model.score_variants(ref[None], alt[None]).item()  # score(alt) - score(ref)
 ```
 
 ### Batch variant scoring
@@ -66,8 +64,14 @@ ref_seqs = np.stack([one_hot_encode(s) for s in ref_strings])
 alt_seqs = np.stack([one_hot_encode(s) for s in alt_strings])
 
 # Returns [N, 1] delta scores (alt - ref)
-deltas = model.score_variants(ref_seqs, alt_seqs, verbose=True)
+deltas = model.score_variants(ref_seqs, alt_seqs, batch_size=1000, verbose=True)
+
+# GkmExplain mutation impact (lsgkm gkmexplain -m 5), the GkmExplain
+# paper's dsQTL score; a linearization, so not equal to the kernel delta
+impact = model.score_variants(ref_seqs, alt_seqs, method="gkmexplain")
 ```
+
+Both methods score ref and alt in the same calls and cost about the same.
 
 ### DeltaSVM (linear approximation)
 
@@ -83,74 +87,29 @@ deltas = dsvm.score_variants(ref_seqs, alt_seqs)
 
 DeltaSVM is orders of magnitude faster than full SVM scoring but is a linear approximation. For accurate scores, use the full model's `score_variants()`.
 
-To build a deltaSVM table from a trained model (any kernel, `l <= 14`):
+To build a deltaSVM table from a trained model (any kernel, `l <= 14`; `-t 0/1/2/4` with l <= 12 read it off the exact l-mer table, others score all 4^l l-mers, minutes for a large RBF model):
 
 ```python
 dsvm = model.to_deltasvm(query_norm=True)  # weight = gkmpredict(l-mer) - bias
 deltas = dsvm.score_variants(ref_seqs, alt_seqs)
 ```
 
-`query_norm=True` matches how deltaSVM weights are built from lsgkm models (`gkmpredict` on every l-mer). The default omits the per-l-mer normalization. Scores published with the Beer lab `deltasvm.pl` script differ for variants containing poly-A/T l-mers; see [validation](validation.md#differences-from-the-papers-scripts).
+`query_norm=True` matches how deltaSVM weights are built from lsgkm models (`gkmpredict` on every l-mer). The default omits the per-l-mer normalization; RBF models always keep it, since the RBF is defined on the normalized kernel. Scores published with the Beer lab `deltasvm.pl` script differ for variants containing poly-A/T l-mers; see [validation](validation.md#differences-from-the-papers-scripts).
 
 ## GPU acceleration
 
-### NVIDIA (CuPy)
-
-Move models to GPU for ~6x speedup:
-
 ```python
-model.cuda()           # move to GPU
-scores = model(x_gpu)  # input must also be on GPU
-
-import cupy as cp
-x_gpu = cp.asarray(x)
-scores = model(x_gpu)
-
-model.cpu()            # move back to CPU
+model.cuda()     # NVIDIA (CuPy)
+model.mlx()      # Apple Silicon (MLX)
+scores = model(x)  # inputs are moved to the model's device; outputs stay there
+model.cpu()      # back to CPU
 ```
 
-GPU throughput is roughly flat across batch sizes (compute-bound). Use batch_size=16-64 to save VRAM without sacrificing speed.
-
-### Apple Silicon (MLX)
-
-Move models to MLX for 2-6x speedup on Apple Silicon:
-
-```python
-from gkmsvm.backend import to_mlx
-
-model.mlx()            # move to Apple GPU
-x_mlx = to_mlx(x)
-scores = model(x_mlx)
-
-model.cpu()            # move back to CPU
-```
-
-MLX uses custom Metal shaders with the same packed uint32 XOR+popcount approach as the CUDA path. Speedup scales with batch size — use batch_size=4-16 for best throughput. Apple Silicon's unified memory is shared between CPU and GPU; avoid running memory-heavy background processes during large jobs.
+Moving a model drops its device caches (packed SVs, l-mer index), which are rebuilt on the first call. MLX runs custom Metal kernels and returns float32 scores (Metal has no float64); GkmExplain attribution on MLX falls back to CPU. Apple Silicon's memory is shared between CPU and GPU, so other processes compete for it. Timings are in [performance](performance.md).
 
 ## Memory management
 
-For large models (>10K support vectors), use chunked SV inference to bound peak memory:
-
-```python
-# At load time
-model = load_model("large_model.npz", sv_chunk_size=5000)
-
-# Or on an existing model
-model.sv_chunk_size = 5000
-```
-
-Recommended chunk sizes for single-sequence scoring at 300bp:
-
-| GPU VRAM | `sv_chunk_size` | Peak memory |
-|---|---|---|
-| 10 GB NVIDIA | 5000 | ~3.4 GB |
-| 16+ GB NVIDIA | 10000 | ~6.8 GB |
-| 16 GB Apple Silicon | 5000 | ~3.4 GB (unified memory shared with system) |
-| CPU | 5000 or None | N/A |
-
-For batch scoring, reduce proportionally (`5000 / batch_size`).
-
-**Apple Silicon note:** MLX uses unified memory shared between CPU and GPU. Keep batch sizes moderate (4-16) and be aware that other applications (browsers, other processes) compete for the same memory pool. DeltaSVM auto-chunks large batches to prevent memory thrashing.
+Peak memory is bounded internally: kernel scoring computes [rows, S] kernel values in blocks of at most 512 MB, whatever `batch_size` says, and `batch_size` bounds how many inputs move to the device at once. `model.sv_chunk_size` (default 2,000) only chunks SVs inside GkmExplain. See [performance](performance.md#memory).
 
 ## One-hot encoding
 
@@ -160,7 +119,7 @@ DNA sequences are represented as `[4, length]` one-hot arrays with channel order
 from gkmsvm import one_hot_encode, one_hot_decode, reverse_complement
 
 # Encode
-x = one_hot_encode("ACGT")  # [4, 4] float64
+x = one_hot_encode("ACGT")  # [4, 4] float32
 
 # Decode back to string
 seq = one_hot_decode(x)  # "ACGT"
@@ -176,7 +135,7 @@ x = encode_batch(["ACGT", "ACGTACGT"])  # [2, 4, 8], shorter seqs zero-padded
 
 ## Reverse-complement invariance
 
-By default, kernels are RC-equivalent: `K(x, y) = K(x, y) + K(x, RC(y))`. This means scores are the same for a sequence and its reverse complement:
+By default, kernels are RC-equivalent: the raw kernel adds the reverse-complement term, `K_raw(x, y) + K_raw(x, RC(y))`. This means scores are the same for a sequence and its reverse complement:
 
 ```python
 x = one_hot_encode("ACGTACGTACGT")[None, ...]
@@ -184,7 +143,7 @@ rc_x = reverse_complement(x)
 
 score = model(x).item()
 rc_score = model(rc_x).item()
-assert abs(score - rc_score) < 1e-10
+assert abs(score - rc_score) < 1e-5  # float32 inputs
 ```
 
 RC equivalence is on by default and matches LS-GKM's `norc=0` setting. Models loaded from LS-GKM files respect the `norc` header if present.
