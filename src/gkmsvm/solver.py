@@ -5,146 +5,73 @@ from __future__ import annotations
 import numpy as np
 
 from gkmsvm.backend import get_array_module, is_mlx, to_cpu
-from gkmsvm.codec import reverse_complement
 from gkmsvm.kernels.base import GkmKernel
+from gkmsvm.kernels.packed import PackedGkmKernel
 
 
 class KernelColumnCache:
     """Normalized kernel columns K(i, :) for the C SMO solver.
 
-    Pre-computes packed uint32 window representations for all training
-    sequences once and computes columns on request. The solver keeps the
-    columns in its own cache.
+    Packs all training sequences once (through the base kernel for -t 3/-t 5)
+    and computes columns on request. The solver keeps the columns in its own
+    cache.
     """
 
     def __init__(self, kernel: GkmKernel, X: np.ndarray):
-        xp = get_array_module(X)
         self._kernel = kernel
-        self._xp = xp
+        self._xp = get_array_module(X)
         self._N = X.shape[0]
-        self._use_fast = hasattr(kernel, "pairwise_from_indices")
-
+        self._mlx = is_mlx(X)
+        base = kernel.base
+        self._use_fast = isinstance(base, PackedGkmKernel) and base.packs(X)
         if self._use_fast:
-            self._idx_windows = kernel.base_index_windows(X)
-            self._rc_idx_windows = (
-                kernel.base_index_windows(reverse_complement(X))
-                if kernel.include_rc
-                else None
-            )
-            self._packed_t = None
-            self._rc_packed_t = None
-            if hasattr(kernel, "_min_matches"):
-                from gkmsvm.kernels.direct import (
-                    _pack_windows_cpu,
-                    _pack_windows_uint32,
-                )
-
-                if is_mlx(self._idx_windows):
-                    self._packed_t = xp.asarray(_pack_windows_cpu(
-                        np.ascontiguousarray(to_cpu(self._idx_windows))
-                    ))
-                    if self._rc_idx_windows is not None:
-                        self._rc_packed_t = xp.asarray(_pack_windows_cpu(
-                            np.ascontiguousarray(to_cpu(self._rc_idx_windows))
-                        ))
-                elif xp is not np:
-                    packed = _pack_windows_uint32(self._idx_windows, xp)
-                    self._packed_t = xp.ascontiguousarray(packed.T)
-                    if self._rc_idx_windows is not None:
-                        rc_packed = _pack_windows_uint32(
-                            self._rc_idx_windows, xp
-                        )
-                        self._rc_packed_t = xp.ascontiguousarray(rc_packed.T)
-                else:
-                    self._packed_t = _pack_windows_cpu(
-                        np.ascontiguousarray(self._idx_windows)
-                    )
-                    if self._rc_idx_windows is not None:
-                        self._rc_packed_t = _pack_windows_cpu(
-                            np.ascontiguousarray(self._rc_idx_windows)
-                        )
+            self._packed, self._packed_rc = base.pack_both(X)
             self._X = None
+            diag = base.raw_diag_packed(self._packed, self._packed_rc).astype(X.dtype)
         else:
             self._X = X
-            self._idx_windows = None
-            self._rc_idx_windows = None
-            self._packed_t = None
-            self._rc_packed_t = None
-
-        self._mlx = is_mlx(X)
-        diag = kernel._raw_diagonal(X)
-        if self._mlx:
-            diag = to_cpu(diag)
-        self._diag = diag.astype(np.float64)
+            diag = base._raw_diagonal(X)
+        self._diag = to_cpu(diag).astype(np.float64)
+        # The diagonal where the columns are normalized (CuPy: on the GPU)
+        self._diag_xp = self._diag if self._xp is np or self._mlx else self._xp.asarray(self._diag)
 
     def compute_columns(self, indices) -> dict:
         """Normalized columns {i: K(i, :)} for `indices`, in one kernel call (uncached).
 
         Uses symmetry, K(i, :) = K(:, i): all training sequences against the
-        batch (and its reverse complements), so a masked-join kernel indexes
+        batch and its reverse complements, so a masked-join kernel indexes
         only the small batch side.
         """
         indices = [int(i) for i in indices]
         if not indices:
             return {}
-        if not self._use_fast or len(indices) == 1:
-            return {i: self._compute_column(i) for i in indices}
         xp = self._xp
         kernel = self._kernel
-        sel = xp.asarray(np.asarray(indices, dtype=np.int64))
+        base = kernel.base
+        idx = np.asarray(indices, dtype=np.int64)
+        if not self._use_fast:
+            cols = kernel.pairwise(self._X, self._X[xp.asarray(idx)])
+            cols = to_cpu(cols) if self._mlx else cols
+            return {i: xp.ascontiguousarray(cols[:, b]) if not self._mlx else
+                    np.ascontiguousarray(cols[:, b]) for b, i in enumerate(indices)}
         if self._mlx:
             import mlx.core as mx
 
-            sel = mx.array(np.asarray(indices, dtype=np.int32))
-        by = self._idx_windows[sel]
-        bx_packed = self._packed_t if (xp is np and self._packed_t is not None) else None
-        raw = kernel.pairwise_from_indices(self._idx_windows, by, bx_packed=bx_packed)
-        if kernel.include_rc and self._rc_idx_windows is not None:
-            raw = raw + kernel.pairwise_from_indices(
-                self._idx_windows, self._rc_idx_windows[sel], bx_packed=bx_packed,
-            )
-        if self._mlx:
-            raw = to_cpu(raw)
-            xp = np
-        raw = raw.astype(np.float64)  # [N, B]
-        if kernel.normalize:
-            d = xp.asarray(self._diag) if xp is not np else self._diag
-            norm = xp.sqrt(d[:, None] * d[xp.asarray(np.asarray(indices, dtype=np.int64))][None, :])
-            raw = raw / xp.clip(norm, 1e-10, None)
-        return {i: xp.ascontiguousarray(raw[:, b]) for b, i in enumerate(indices)}
-
-    def _compute_column(self, i: int):
-        """Compute normalized K(i, :) using the fastest available path.
-
-        Returns numpy for MLX inputs, stays on device for CuPy.
-        """
-        xp = self._xp
-        kernel = self._kernel
-
-        if self._use_fast:
-            bx_i = self._idx_windows[i : i + 1]
-            raw = kernel.pairwise_from_indices(
-                bx_i, self._idx_windows, by_packed_t=self._packed_t
-            )
-            if kernel.include_rc and self._rc_idx_windows is not None:
-                raw = raw + kernel.pairwise_from_indices(
-                    bx_i,
-                    self._rc_idx_windows,
-                    by_packed_t=self._rc_packed_t,
-                )
+            sel = mx.array(idx.astype(np.int32))
         else:
-            raw = kernel._raw_pairwise(self._X[i : i + 1], self._X)
-
+            sel = xp.asarray(idx)
+        rc = None if self._packed_rc is None else self._packed_rc[sel]
+        raw = base.raw_packed(self._packed, self._packed[sel], rc)  # [N, B]
         if self._mlx:
             raw = to_cpu(raw)
             xp = np
         raw = raw.astype(np.float64)
-
-        if kernel.normalize:
-            norm = xp.sqrt(self._diag[i] * self._diag)
+        if base.normalize:
+            d = self._diag if xp is np else self._diag_xp
+            norm = xp.sqrt(d[:, None] * d[xp.asarray(idx)][None, :])
             raw = raw / xp.clip(norm, 1e-10, None)
-
-        return raw[0]
+        raw = kernel.finish(raw)
+        return {i: xp.ascontiguousarray(raw[:, b]) for b, i in enumerate(indices)}
 
 
 def smo_solve(
@@ -327,7 +254,7 @@ def _smo_csolver(kernel, X, y, C, tol, max_iter, cache_size, verbose):
 
             warnings.warn(f"SMO column prefetch failed ({exc!r}); computing columns singly",
                           RuntimeWarning, stacklevel=2)
-            return {idx: cache._compute_column(idx)}
+            return cache.compute_columns([idx])
 
     def _column_callback(idx, n, out_ptr, _userdata, c_cache):
         try:

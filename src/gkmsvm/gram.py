@@ -5,9 +5,8 @@ from __future__ import annotations
 import numpy as np
 
 from gkmsvm.backend import get_array_module, to_cpu
-from gkmsvm.codec import reverse_complement
 from gkmsvm.kernels.base import GkmKernel
-from gkmsvm.kernels.rbf import RbfGkmKernel
+from gkmsvm.kernels.packed import PackedGkmKernel
 
 
 def compute_gram(
@@ -24,11 +23,10 @@ def compute_gram(
     When Y is None, computes K(X, X) with symmetry exploitation —
     only upper-triangle tiles are evaluated, then mirrored.
 
-    Uses the packed uint32 path when available (DirectGkmKernel,
-    EstTruncGkmKernel, and RbfGkmKernel via its base kernel). When the
-    kernel uses the masked join, whole column panels are computed per call so
-    each column tile's index is built once; otherwise square tiles are used,
-    and on CPU diagonal tiles compute only their upper triangle.
+    Uses the base kernel's packed path when it applies (RBF kernels via
+    their base kernel). When the kernel uses the masked join, whole column
+    panels are computed per call so each column tile's index is built once;
+    otherwise square tiles are used.
 
     Args:
         kernel: A GkmKernel instance.
@@ -47,71 +45,51 @@ def compute_gram(
         Y = X
     N = X.shape[0]
     M = Y.shape[0]
-
-    # Kernel whose packed path computes the tiles: the kernel itself, or the
-    # base kernel of -t 3 gkmrbf (exp is applied after normalizing)
-    if hasattr(kernel, "pairwise_from_indices"):
-        fast = kernel
-    elif isinstance(kernel, RbfGkmKernel):
-        fast = kernel._base
-    else:
-        fast = None
-    use_fast = fast is not None
-
     gram = np.zeros((N, M), dtype=np.float64) if out is None else out
 
-    row_ranges = list(range(0, N, chunk_size))
-    col_ranges = list(range(0, M, chunk_size))
+    # Tiles come from the base kernel's packed path (the base of -t 3/-t 5,
+    # then finish() applies the RBF), unless it can't pack these inputs
+    base = kernel.base
+    packed = isinstance(base, PackedGkmKernel) and base.packs(X) and (symmetric or base.packs(Y))
 
-    # The masked-join kernel builds an index of the column sequences on every
-    # call, so compute whole column panels (all rows, or all rows up to the
+    # The masked join builds an index of the column sequences on every call,
+    # so compute whole column panels (all rows, or all rows up to the
     # diagonal) to build each column tile's index once
-    plan_fn = getattr(fast, "_masked_plan", None) if use_fast else None
-    panels = plan_fn is not None and plan_fn() is not None
-
+    panels = packed and base._masked_plan() is not None
+    row_ranges = range(0, N, chunk_size)
+    col_ranges = range(0, M, chunk_size)
     if panels:
         tiles = [(0, c) for c in col_ranges]
     elif symmetric:
-        tiles = [
-            (r, c)
-            for r in row_ranges
-            for c in col_ranges
-            if r <= c
-        ]
+        tiles = [(r, c) for r in row_ranges for c in col_ranges if r <= c]
     else:
         tiles = [(r, c) for r in row_ranges for c in col_ranges]
-
     if verbose:
         from tqdm import tqdm
         tiles = tqdm(tiles, desc="Gram matrix")
 
-    if use_fast:
-        diag_x = fast._raw_diagonal(X)
-        if symmetric:
-            diag_y = diag_x
-        else:
-            diag_y = fast._raw_diagonal(Y)
+    if packed:
+        bx, bx_rc = base.pack_both(X)
+        by, by_rc = (bx, bx_rc) if symmetric else base.pack_both(Y)
+        if base.normalize:
+            # In the input dtype, as kernel.pairwise normalizes
+            diag_x = base.raw_diag_packed(bx, bx_rc).astype(X.dtype)
+            diag_y = diag_x if symmetric else base.raw_diag_packed(by, by_rc).astype(Y.dtype)
 
     for r_start, c_start in tiles:
         c_end = min(c_start + chunk_size, M)
-        if panels:
-            r_end = c_end if symmetric else N
-        else:
-            r_end = min(r_start + chunk_size, N)
+        r_end = (c_end if symmetric else N) if panels else min(r_start + chunk_size, N)
 
-        if use_fast:
-            tile = _fast_pairwise_tile(
-                fast, X[r_start:r_end], Y[c_start:c_end],
-                symmetric=symmetric and not panels and r_start == c_start,
-                diag_offset=c_start if symmetric and panels else None,
-            )
-            if fast.normalize:
-                norm = xp.sqrt(
-                    diag_x[r_start:r_end, None] * diag_y[c_start:c_end][None, :]
-                )
+        if packed:
+            diag_offset = c_start if symmetric and panels and get_array_module(bx) is np else None
+            tile = base.raw_packed(
+                bx[r_start:r_end], by[c_start:c_end],
+                None if by_rc is None else by_rc[c_start:c_end], diag_offset=diag_offset,
+            ).astype(X.dtype)
+            if base.normalize:
+                norm = xp.sqrt(diag_x[r_start:r_end, None] * diag_y[c_start:c_end][None, :])
                 tile = tile / xp.clip(norm, 1e-10, None)
-            if fast is not kernel:
-                tile = xp.exp(kernel.gamma * (tile - 1))
+            tile = kernel.finish(tile)
         else:
             tile = kernel.pairwise(X[r_start:r_end], Y[c_start:c_end])
 
@@ -129,35 +107,3 @@ def compute_gram(
             gram[c_start:c_end, r_start:r_end] = tile_np.T
 
     return gram
-
-
-def _fast_pairwise_tile(kernel, x, y, *, symmetric=False, diag_offset=None):
-    """Compute raw pairwise kernel using the packed uint32 path.
-
-    symmetric: x and y are the same sequences (a diagonal Gram tile).
-    diag_offset: x is sequences 0..B-1 and y sequences diag_offset.. of one
-        set; entries below the diagonal may be left 0 (a column panel).
-    """
-    bx = kernel.base_index_windows(x)
-    by = bx if symmetric else kernel.base_index_windows(y)
-    if diag_offset is not None and get_array_module(bx) is np:
-        plan = kernel._masked_plan() if hasattr(kernel, "_masked_plan") else None
-        if plan is not None:
-            # One masked call for the forward and RC blocks (one shared index)
-            from gkmsvm.kernels.direct import _pack_windows_cpu
-            from gkmsvm.kernels.masked import masked_pairwise
-
-            def pack(a):
-                return _pack_windows_cpu(np.ascontiguousarray(a))
-
-            by_rc = (pack(kernel.base_index_windows(reverse_complement(y)))
-                     if kernel.include_rc else None)
-            return masked_pairwise(pack(bx), pack(by), plan, by_rc,
-                                   diag_offset=diag_offset).astype(x.dtype)
-    result = kernel.pairwise_from_indices(bx, by, symmetric=symmetric)
-
-    if kernel.include_rc:
-        by_rc = kernel.base_index_windows(reverse_complement(y))
-        result = result + kernel.pairwise_from_indices(bx, by_rc, symmetric=symmetric)
-
-    return result.astype(x.dtype)

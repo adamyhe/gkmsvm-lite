@@ -31,10 +31,13 @@ src/gkmsvm/
 ├── backend.py           # get_array_module (numpy/cupy/mlx dispatch)
 ├── _threading.py        # Numba threading layer pin
 ├── kernels/
-│   ├── base.py          # GkmKernel ABC
-│   ├── direct.py        # -t 0 gkm_cnt + packed uint32 fused kernels
+│   ├── base.py          # GkmKernel ABC (base / finish hooks)
+│   ├── packed.py        # PackedGkmKernel: pack(), raw_packed(), raw_diag_packed()
+│   ├── direct.py        # -t 0 gkm_cnt + brute-force packed kernels (CPU/CUDA/Metal)
 │   ├── esttrunc.py      # -t 1 gkm_estfull, -t 2 gkm_esttrunc
-│   ├── rbf.py           # -t 3 gkmrbf
+│   ├── masked.py        # masked-join kernel (CPU/CUDA/Metal)
+│   ├── lmer_index.py    # cached l-mer -> SV index for scoring (CPU/CUDA/Metal)
+│   ├── rbf.py           # RbfKernel wrapper; -t 3 gkmrbf
 │   └── weighted.py      # -t 4 wgkm, -t 5 wgkmrbf
 └── importers/
     ├── lsgkm.py         # load_lsgkm_model()
@@ -66,24 +69,25 @@ src/gkmsvm/
 - Mutation impact: `mutation_impact(model, ref, alt)` = lsgkm `gkmexplain -m 5`, the paper's dsQTL VEP score. `score_variants(method="gkmexplain")` calls it. Normalizes ΔK by the ref norm only; RBF distributes `exp(γ(K-1)) - exp(-γ)` proportionally to ΔK/K. Not equal to ISM. Oracle: `tests/fixtures/lsgkm_mode5_*`.
 - RBF (`-t 3`, `-t 5`): `K = exp(γ(K_norm - 1))` on the normalized base kernel, matching lsgkm.
 - `to_deltasvm(query_norm=True)` makes each weight = gkmpredict on that l-mer (how lsgkm deltaSVM weights are built); default drops the l-mer norm.
-- `batch_size` on `model()`, `score_variants()`, `ism()`, `gkmexplain()` chunks over inputs. SV chunking is internal via `model.sv_chunk_size`. Kernel scoring raises small `batch_size` values so each call fills ~256 MB of [batch, S] (`GkmSVM._min_batch_size`): every masked-join call indexes all SV windows.
+- `batch_size` on `model()`, `score_variants()`, `ism()`, `gkmexplain()` chunks over inputs. Kernel scoring computes [rows, S] blocks of at most `GkmSVM._MAX_SCORE_BYTES`; `model.sv_chunk_size` only chunks SVs in GkmExplain. When scoring goes through the masked join (no l-mer table or index), small `batch_size` values are raised so each call fills ~256 MB of [batch, S] (`GkmSVM._min_batch_size`): every masked-join call indexes all SV windows.
 - `verbose=True` on `model()`, `score_variants()`, `ism()`, `gkmexplain()` enables tqdm progress bars over input batches
 - No PyTorch dependency. Gradient-based methods are incompatible — use GkmExplain or ISM
 - tangermeme interop is vendored (pyfaidx for FASTA extraction)
 
 ## Key implementation details
 
-- Forward pass, ISM, and GkmExplain use the packed uint32 path (XOR + popcount). GkmExplain's inner kernel fuses normalization + coefficient multiplication + SV-dimension reduction, accumulating directly into `[B, 4, L]` result (no per-SV intermediate). Forward + RC SV windows concatenated for single kernel launch. CPU: `prange(B)` with L1-resident per-thread result arrays. GPU: float64 `atomicAdd` (CC >= 6.0). Apple GPU: custom Metal shaders via `mx.fast.metal_kernel` (forward/ISM only; GkmExplain falls back to CPU). Kernels without `pairwise_from_indices` (`-t 3`/`-t 4`/`-t 5`) do ISM by scoring all 4L mutants through `model()`.
-- Packed SV windows are cached on the model for CPU, NVIDIA GPU, and MLX. First call packs; subsequent calls reuse.
+- Forward pass, ISM, and GkmExplain use the packed uint32 path (XOR + popcount). GkmExplain's inner kernel fuses normalization + coefficient multiplication + SV-dimension reduction, accumulating directly into `[B, 4, L]` result (no per-SV intermediate). Forward + RC SV windows concatenated for single kernel launch. CPU: `prange(B)` with L1-resident per-thread result arrays. GPU: float64 `atomicAdd` (CC >= 6.0). Apple GPU: custom Metal shaders via `mx.fast.metal_kernel` (forward/ISM only; GkmExplain falls back to CPU). ISM builds the packed windows covering each position (padded with `PAD_WINDOW`, which cancels in new − old) and works for every kernel type; inputs the packed path can't represent (weighted with N) score all 4L mutants through `model()`.
+- Kernel interface: `kernel.base` is the kernel giving raw values (the base of an RBF kernel, else itself) and `kernel.finish(k_norm)` applies the RBF. Base kernels are `PackedGkmKernel`s: `pack(x)` gives [B, W] uint32 windows on x's device (MLX packs on CPU), `raw_packed(bx, by, by_rc)` the raw kernel with the RC block in the same call (masked join, or brute force below 16 rows), `raw_diag_packed(bx, bx_rc)` the self-kernel. `packs(x)` is False for weighted kernels on inputs with N (one-hot fallback). Gram, SMO columns, scoring, ISM and mutation impact all use this, so `-t 3`/`-t 5` get packed caches, Gram panels and batched SMO columns.
+- The model caches packed SV windows, their base self-kernels and the l-mer index per device (`GkmSVM._sv_cache`, cleared on device moves).
 - Min-matches skip: for esttrunc l=11 k=7 d=3, `min_matches=8`. 99.88% of window pairs skipped.
 - CPU inner loop: Numba `@njit(parallel=True, fastmath=True)`. NVIDIA GPU inner loop: CuPy RawKernel with shared-memory caching. Apple GPU inner loop: Metal kernel with per-thread accumulation and `popcount()`.
 - MLX compatibility: `get_strides()` for arrays without `.strides`, `xp.ascontiguousarray()` for `.copy()`, `to_cpu(X)[indices]` for fancy indexing. DeltaSVM auto-chunks intermediates >256 MB.
-- SV diagonal is cached after first computation.
-- CPU/CUDA/MLX `pairwise_from_indices` uses the masked-join kernel (`kernels/masked.py`) when both sides have >= 16 sequences: h(m) as a signed sum of C(l-m, j), each term an exact-match join on masked l-mer keys. `kernel.use_masked = False` forces brute force. `compute_gram` then works in column panels so each column index is built once. MLX builds the index on CPU and joins in Metal, writing int32 counts that the CPU combines in float64. `-t 4`/`-t 5` use it too (per-mask coefficients; inputs with N fall back to the per-position path).
+- Scoring against the SVs uses the cached l-mer index (`kernels/lmer_index.py`) for count-table kernels with at most `MAX_NEIGHBORS` l-mers within dmax mismatches (e.g. `-t 1`/`-t 2`/`-t 3` with d <= 3, l <= 12): CSR over 4^l l-mers listing the SVs containing each, built once; a query window visits its dmax-neighborhood, so a call costs nothing per SV. CPU/CUDA accumulate float64; Metal counts hits per mismatch level in int32 and combines on CPU. `model.use_lmer_index = False` forces the masked join.
+- `raw_packed` uses the masked-join kernel (`kernels/masked.py`) when both sides have >= 16 sequences: h(m) as a signed sum of C(l-m, j), each term an exact-match join on masked l-mer keys. `kernel.use_masked = False` forces brute force. `compute_gram` then works in column panels so each column index is built once. MLX builds the index and joins in Metal, writing int32 counts that the CPU combines in float64. `-t 4`/`-t 5` use it too (per-mask coefficients; inputs with N fall back to the per-position path).
 - Prediction for `-t 0`/`-t 1`/`-t 2`/`-t 4` (l <= 12) uses an exact 4^l l-mer weight table (`lmer_table.py`, built from marginals of the SV l-mer weights): f(x) = sum_i w(x_i) / sqrt(K(x,x)) + b. `model.use_lmer_table`: `"auto"` (>= 500 SVs), True, False. RBF uses the kernel path.
 - `compute_gram` self-Gram: skips tiles below the diagonal; on CPU, diagonal tiles compute one triangle (`_fused_pairwise_packed_sym_numba`, also valid for the RC block). `-t 3` tiles use the base esttrunc packed path, then `exp`.
 - Training: `solver="auto"` estimates Gram matrix size — uses precomputed Gram + sklearn when it fits in device memory (< 75%); on GPU, falls back to GPU-computed Gram + CPU-side sklearn when it fits in system RAM (< 75%); else column-cached SMO. SMO uses WSS3 working set selection (C extension `_csmo` with Python kernel column callback), shrinking, and kernel columns cached in C (batched, prefetched) — memory is O(cache_size × N) not O(N²). No Python fallback: without the extension, `solver="smo"` raises. `solver="nystrom"` uses low-rank kernel approximation for fast approximate training. `max_gram_gb` caps Gram allocation on shared compute.
-- `KernelColumnCache` pre-packs all training windows once, computes single columns via `pairwise_from_indices(bx[1,W,l], by_all)` on cache miss.
+- `KernelColumnCache` packs all training sequences once (through `kernel.base`) and computes columns as all rows against the requested columns and their RCs, so the masked join indexes only the batch.
 - SVR (`train_gkmsvr`) uses sklearn epsilon-SVR with precomputed Gram. SMO SVR is not yet implemented.
 - `scikit-learn` provides the LIBSVM C solver for both SVC and SVR via `SVC(kernel='precomputed')` / `SVR(kernel='precomputed')`. No direct `libsvm-official` dependency.
 

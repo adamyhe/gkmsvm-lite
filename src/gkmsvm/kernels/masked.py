@@ -29,6 +29,14 @@ from numba import njit, prange
 _MAX_MASKS = 1000
 # Masks per chunk: bounds the column-side index memory per call
 _MASK_CHUNK = 16
+# CPU index memory per chunk (offsets + one int32 id per column window per
+# mask); fewer masks per chunk when the columns are large
+_INDEX_BYTES = 512 * 2**20
+
+
+def _cpu_mask_chunk(n_win: int, j: int) -> int:
+    per_mask = 4 * (n_win + (1 << (2 * j)) + 1)
+    return max(1, min(_MASK_CHUNK, _INDEX_BYTES // per_mask))
 
 
 @cache
@@ -188,8 +196,9 @@ def _masked_pairwise_upper(bx, by_blocks, plan, diag_offset):
     row_min = np.maximum(0, np.arange(B) - diag_offset).astype(np.int64)
     result = np.zeros((B, S), dtype=np.float64)
     for j, coef, positions in plan:
-        for start in range(0, len(positions), _MASK_CHUNK):
-            runs = mask_runs(positions[start : start + _MASK_CHUNK])
+        step = _cpu_mask_chunk(by.size, j)
+        for start in range(0, len(positions), step):
+            runs = mask_runs(positions[start : start + step])
             offsets, colseq = _build_column_index(by, seq_of_row, runs, j)
             _join_rows_upper(bx, runs, offsets, colseq, coef, result, row_min)
     return result
@@ -220,9 +229,9 @@ def masked_pairwise(bx_packed, by_packed, plan, by_rc_packed=None, diag_offset=N
         seq_of_row = np.arange(S, dtype=np.int32)
     result = np.zeros((bx.shape[0], S), dtype=np.float64)
     for j, coef, positions in plan:
-        for start in range(0, len(positions), _MASK_CHUNK):
-            chunk = positions[start : start + _MASK_CHUNK]
-            runs = mask_runs(chunk)
+        step = _cpu_mask_chunk(by.size, j)
+        for start in range(0, len(positions), step):
+            runs = mask_runs(positions[start : start + step])
             offsets, colseq = _build_column_index(by, seq_of_row, runs, j)
             _join_rows(bx, runs, offsets, colseq, coef, result)
     return result

@@ -7,7 +7,6 @@ from gkmsvm.codec import reverse_complement
 from gkmsvm.kernels.direct import (
     DirectGkmKernel,
     _fused_pairwise_packed_numba,
-    _pack_windows_cpu,
 )
 from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
 from gkmsvm.kernels.masked import mask_plan, masked_pairwise
@@ -22,7 +21,7 @@ def _onehot(n, length, rng):
 
 
 def _packed(kernel, X):
-    return _pack_windows_cpu(np.ascontiguousarray(kernel.base_index_windows(X)))
+    return kernel.pack(X)
 
 
 KERNELS = {

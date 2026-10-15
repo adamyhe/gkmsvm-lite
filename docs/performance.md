@@ -2,14 +2,16 @@
 
 ## Kernel paths
 
-- **Packed uint32 path** (`pairwise_from_indices`): Base indices packed to uint32 (2 bits/base), match counting via XOR + popcount. Used by the forward pass, ISM, and GkmExplain. ~3x faster than int8 on CPU. With 16+ sequences on both sides it uses the masked join (`kernels/masked.py`) instead of comparing every window pair.
+- **Packed uint32 path** (`PackedGkmKernel.raw_packed`): windows packed to uint32 (2 bits/base), match counting via XOR + popcount. Used by training, scoring, ISM, and GkmExplain, for every kernel type (RBF kernels through their base kernel). With 16+ sequences on both sides it uses the masked join (`kernels/masked.py`) instead of comparing every window pair.
+- **Cached l-mer index** (`kernels/lmer_index.py`): for scoring against a model's SVs with a d-cutoff kernel (e.g. `-t 2`/`-t 3`, d <= 3). Built once per model (0.55 s and 81 MB for 32,715 SVs at l=10); each query window looks up its d-mismatch neighborhood, so a call costs nothing per SV. On an M4, 500 dsQTL variants on the `-t 3` paper model score 4x faster than with the masked join, at 43% lower peak RSS.
+- **Exact l-mer table** (`lmer_table.py`): prediction for `-t 0/1/2/4` models with 500+ SVs.
 - **Weighted kernels** (`-t 4`/`-t 5`): the masked join with per-mask weights; inputs with N positions use a per-position match path.
 
 ## CPU backend
 
 Fused Numba kernels (`@njit(parallel=True, fastmath=True)`) combine match-count, table-lookup, and accumulation into a single parallel kernel, avoiding materialization of the full `[B, S, W, W]` match tensor. Numba's threading layer is pinned to `workqueue` on import to avoid OpenMP conflicts.
 
-Packed SV windows are cached on the model after first call, eliminating redundant packing on repeated scoring.
+Packed SV windows, their self-kernels and the l-mer index are cached on the model after the first call.
 
 ## NVIDIA GPU backend (CuPy)
 

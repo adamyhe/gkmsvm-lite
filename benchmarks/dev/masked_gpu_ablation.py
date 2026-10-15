@@ -95,7 +95,6 @@ def main():
 
     from gkmsvm import one_hot_encode, read_fasta
     from gkmsvm.codec import reverse_complement
-    from gkmsvm.kernels.direct import _pack_windows_cpu
     from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
     from gkmsvm.kernels.masked import _build_column_index, mask_plan, mask_runs
 
@@ -105,7 +104,7 @@ def main():
     kern = EstTruncGkmKernel(11, 7, d=3)
 
     def pack(a):
-        return _pack_windows_cpu(np.ascontiguousarray(kern.base_index_windows(a)))
+        return kern.pack(a)
 
     bx = pack(X[: args.rows])
     cols = X[: args.cols]

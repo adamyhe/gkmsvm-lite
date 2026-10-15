@@ -161,6 +161,10 @@ class TestGkmSVMVariants:
 
     def test_min_batch_size(self, small_model):
         assert small_model._min_batch_size(None) is None
+        # The cached l-mer index has no per-call SV cost: batch_size stands
+        assert small_model._min_batch_size(2) == 2
+        small_model.use_lmer_index = False
+        small_model._sv_cache = {}
         assert small_model._min_batch_size(2) == GkmSVM._MIN_BATCH_BYTES // (8 * 3)
 
     def test_same_variant_is_zero(self, small_model):

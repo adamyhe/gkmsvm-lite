@@ -54,17 +54,11 @@ CPU: Numba `@njit(parallel=True, fastmath=True)` fuses match-count + table-looku
 
 NVIDIA GPU: CuPy RawKernel with coalesced memory access. Uses `--use_fast_math` and shared-memory caching of both the mismatch weight table and query packed windows.
 
-Apple GPU: Custom Metal shaders via `mx.fast.metal_kernel`. Each thread handles one (batch, SV) pair, looping over all window pairs with XOR+popcount and `min_matches` early exit. Three kernel variants: pairwise (forward pass), diagonal (self-kernel), and cross-diagonal (forward × RC). Kernels are lazily compiled on first use.
+Apple GPU: Custom Metal shaders via `mx.fast.metal_kernel`. Each thread handles one (batch, SV) pair, looping over all window pairs with XOR+popcount and `min_matches` early exit. Two kernel variants: pairwise and cross-diagonal (each row against a second window set; the self-kernel is the cross-diagonal against [x, rc(x)]). Kernels are lazily compiled on first use.
 
-## Chunked SV inference
+## Memory in scoring
 
-`GkmSVM(sv_chunk_size=N)` chunks pairwise kernel computation over support vectors, bounding memory for large models. ENCODE ENCFF579AOX has 72,145 SVs — without chunking at 300bp, the matches tensor alone would be hundreds of GB. Recommended chunk sizes for single-sequence scoring at 300bp:
-
-- 10 GB GPU: `sv_chunk_size=5000` (peak ~3.4 GB for matches + histogram)
-- 16+ GB GPU: `sv_chunk_size=10000`
-- CPU: `sv_chunk_size=5000` or `None` for small models
-
-For batch scoring, reduce proportionally (`5000 / batch_size`).
+Kernel scoring holds [rows, S] kernel values, so `GkmSVM.__call__` processes inputs in row blocks of at most `_MAX_SCORE_BYTES` (512 MB of float64), whatever `batch_size` says; for the 72,145-SV ENCODE model ENCFF579AOX that is ~930 rows per block. The model also caches packed SV windows (4 bytes per window and strand) and, for d-cutoff kernels, the l-mer index (8·4^l bytes of offsets plus 4 bytes per SV window and strand: ~110 MB at l=11 for 32k SVs). `GkmSVM(sv_chunk_size=N)` now only chunks SVs inside GkmExplain.
 
 ## Training
 
