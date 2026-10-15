@@ -110,6 +110,20 @@ Building the table is the cost. `to_deltasvm` scores all 4^l l-mers against ever
 
 This is the simplest, largest win in this doc. Do it before the masked join's phase 2.
 
+## Scoring: cached l-mer index for RBF and per-SV kernel values
+
+The l-mer table sums over SVs, so it can't serve `-t 3` prediction (exp per SV), ISM or `mutation_impact`, which need K(x, sv) for each SV. The masked join rebuilds its column index on every call, about 6 s for the 32,715-SV dsQTL `-t 3` model, however few queries a call has. When the columns are a model's SVs, `kernels/lmer_index.py` indexes them once instead: CSR over all 4^l l-mers, row v listing the SV of every window (fwd and RC) equal to v. A query window w visits each l-mer within dmax mismatches (w XOR one of sum_{m<=dmax} C(l,m) 3^m precomputed masks: 3,676 for l=10 d=3) and adds h(m) to every SV in that row. Each matching pair is visited once.
+
+Measured against the masked join on that model (M4 CPU, one call):
+
+| Queries | 51 bp | 300 bp |
+|---|---|---|
+| 16 | 0.03 s vs 4.5 s | 0.25 s vs 4.8 s |
+| 64 | 0.10 s vs 4.6 s | 0.72 s vs 5.0 s |
+| 1024 | 1.6 s vs 5.7 s | 10.7 s vs 13.7 s |
+
+It applies to count-table kernels with at most `MAX_NEIGHBORS` (8,192) neighbors and l <= 12. `-t 0` and the weighted kernels have no d cutoff below l - k (about 20k–32k neighbors at l = 10–11) and keep the masked join. CUDA accumulates with float64 atomics; Metal counts hits per mismatch level in int32 and combines in float64 on the CPU.
+
 ## Where it plugs in
 
 | Entry point | File | Phase |

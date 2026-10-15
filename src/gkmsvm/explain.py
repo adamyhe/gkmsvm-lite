@@ -20,11 +20,7 @@ from numba import njit, prange
 
 from gkmsvm.backend import get_array_module, is_mlx
 from gkmsvm.codec import reverse_complement
-from gkmsvm.kernels.direct import (
-    _pack_windows_cpu,
-    _pack_windows_uint32,
-    _packed_mismatches,
-)
+from gkmsvm.kernels.direct import _packed_mismatches
 from gkmsvm.svm import GkmSVM
 
 
@@ -593,52 +589,27 @@ def gkmexplain(
     use_gpu = xp is not np
 
     if do_norm:
-        diag_sv = kernel._raw_diagonal(sv, chunk_size=cs or 1000)
+        diag_sv = model._sv_diag()
+    if use_packed:
+        sv_fwd, sv_rc = model._sv_packed()
 
-    # --- Pre-compute SV chunk data (packed uint32, small) ---
+    # --- SV chunks: packed fwd + RC windows side by side ---
     sv_chunks = []
     for sv_start in range(0, S, cs):
         sv_end = min(sv_start + cs, S)
-        sv_c = sv[sv_start:sv_end]
-        S_c = sv_end - sv_start
-        coefs_c = coefs[sv_start:sv_end]
-
         chunk_info = {
-            "sv_start": sv_start, "sv_end": sv_end, "S_c": S_c,
-            "coefs_c": coefs_c,
+            "sv_start": sv_start, "sv_end": sv_end, "S_c": sv_end - sv_start,
+            "coefs_c": coefs[sv_start:sv_end],
         }
-
         if use_packed:
-            wy = kernel.flat_windows(sv_c)
-            wy_4l = wy.reshape(S_c, -1, 4, l)
-            Wy = wy_4l.shape[1]
-
+            packed_y = sv_fwd[sv_start:sv_end]
             if do_rc:
-                wy_rc = kernel.flat_windows(reverse_complement(sv_c))
-                wy_rc_4l = wy_rc.reshape(S_c, -1, 4, l)
-
+                packed_y = xp.concatenate([packed_y, sv_rc[sv_start:sv_end]], axis=1)
+            chunk_info["Wy_total"] = packed_y.shape[1]
             if use_gpu:
-                by = xp.argmax(wy_4l, axis=2).astype(xp.int8)
-                packed_y = _pack_windows_uint32(by, xp)
-                if do_rc:
-                    by_rc = xp.argmax(wy_rc_4l, axis=2).astype(xp.int8)
-                    packed_y = xp.concatenate(
-                        [packed_y, _pack_windows_uint32(by_rc, xp)],
-                        axis=1,
-                    )
                 chunk_info["packed_y_t"] = xp.ascontiguousarray(packed_y.T)
-                chunk_info["Wy_total"] = packed_y.shape[1]
             else:
-                by = np.argmax(wy_4l, axis=2).astype(np.int8)
-                packed_y = _pack_windows_cpu(by)
-                if do_rc:
-                    by_rc = np.argmax(wy_rc_4l, axis=2).astype(np.int8)
-                    packed_y = np.concatenate(
-                        [packed_y, _pack_windows_cpu(by_rc)], axis=1,
-                    )
-                chunk_info["packed_y"] = packed_y
-                chunk_info["Wy_total"] = packed_y.shape[1]
-
+                chunk_info["packed_y"] = np.ascontiguousarray(packed_y)
         sv_chunks.append(chunk_info)
 
     result = xp.zeros((B, 4, seqlen), dtype=np.float64)
@@ -657,21 +628,13 @@ def gkmexplain(
         x_b = x[b_start:b_end]
         Bb = b_end - b_start
 
-        wx_b = kernel.flat_windows(x_b)
-        wx_4l_b = wx_b.reshape(Bb, W, 4, l)
-
         if do_norm:
             diag_x_b = kernel._raw_diagonal(x_b)
 
         if use_packed:
-            if use_gpu:
-                bx = xp.argmax(wx_4l_b, axis=2).astype(xp.int8)
-                packed_x = xp.ascontiguousarray(
-                    _pack_windows_uint32(bx, xp)
-                )
-            else:
-                bx = np.argmax(wx_4l_b, axis=2).astype(np.int8)
-                packed_x = _pack_windows_cpu(bx)
+            packed_x = xp.ascontiguousarray(kernel.pack(x_b))
+        else:
+            wx_b = kernel.flat_windows(x_b)
 
         for ci in sv_chunks:
             sv_start = ci["sv_start"]
@@ -743,46 +706,6 @@ def gkmexplain(
     return result.astype(x.dtype)
 
 
-def _base_kernel_and_gamma(kernel):
-    from gkmsvm.kernels.rbf import RbfGkmKernel
-    from gkmsvm.kernels.weighted import CenterWeightedRbfGkmKernel
-
-    if isinstance(kernel, (RbfGkmKernel, CenterWeightedRbfGkmKernel)):
-        return kernel._base, kernel.gamma
-    return kernel, None
-
-
-def _sv_windows(base, sv):
-    """Base-index + packed SV windows (fwd, rc) for the packed fast path."""
-    from gkmsvm.backend import to_cpu
-
-    def _pack(by):
-        xp = get_array_module(by)
-        if xp is np:
-            return _pack_windows_cpu(np.ascontiguousarray(by))
-        if is_mlx(by):
-            return xp.asarray(_pack_windows_cpu(np.ascontiguousarray(to_cpu(by))))
-        return xp.ascontiguousarray(_pack_windows_uint32(by, xp).T)
-
-    by = base.base_index_windows(sv)
-    out = [(by, _pack(by))]
-    if base.include_rc:
-        by_rc = base.base_index_windows(reverse_complement(sv))
-        out.append((by_rc, _pack(by_rc)))
-    return out
-
-
-def _base_raw_vs_sv(base, x, sv, sv_windows):
-    if sv_windows is None:
-        return base._raw_pairwise(x, sv)
-    bx = base.base_index_windows(x)
-    raw = None
-    for by, by_packed in sv_windows:
-        r = base.pairwise_from_indices(bx, by, by_packed_t=by_packed)
-        raw = r if raw is None else raw + r
-    return raw.astype(x.dtype)
-
-
 def mutation_impact(
     model: GkmSVM,
     ref: np.ndarray,
@@ -821,18 +744,13 @@ def mutation_impact(
     """
     from gkmsvm.backend import to_cpu
 
-    base, gamma = _base_kernel_and_gamma(model.kernel)
-    sv = model.support_sequences
+    kernel = model.kernel
+    base = kernel.base
     coef = model.coefficients
-    sv_windows = (
-        _sv_windows(base, sv) if hasattr(base, "pairwise_from_indices") else None
-    )
-    if base.normalize:
-        cs = 1000 if sv.shape[0] > base._DIAG_CHUNK_THRESHOLD else None
-        sv_diag = base._raw_diagonal(sv, chunk_size=cs)
+    packed_svs = model._sv_packed() is not None
 
     B = ref.shape[0]
-    bs = B if batch_size is None else model._min_batch_size(batch_size)
+    bs = B if batch_size is None else model._min_batch_size(batch_size, table=False)
     starts = range(0, B, bs)
     if verbose:
         from tqdm import tqdm
@@ -843,19 +761,26 @@ def mutation_impact(
         r = model._match_device(ref[s:s + bs])
         a = model._match_device(alt[s:s + bs])
         xp = get_array_module(r)
-        # Both alleles in one call share the per-call SV cost
-        k_both = _base_raw_vs_sv(base, xp.concatenate([r, a]), sv, sv_windows)
-        k_ref = k_both[:r.shape[0]]
-        dk = k_both[r.shape[0]:] - k_ref
+        n = r.shape[0]
+        both = xp.concatenate([r, a])
+        if packed_svs and base.packs(both):
+            # One call for both alleles (the masked join builds its SV index once)
+            bx, bx_rc = base.pack_both(both)
+            k_both = model._sv_raw(bx)
+            diag_r = base.raw_diag_packed(bx[:n], None if bx_rc is None else bx_rc[:n])
+        else:
+            k_both = base._raw_pairwise(both, model.support_sequences)
+            diag_r = base._raw_diagonal(r)
+        k_ref = k_both[:n]
+        dk = k_both[n:] - k_ref
         if base.normalize:
-            norm = xp.sqrt(base._raw_diagonal(r)[:, None] * sv_diag[None, :])
-            norm = xp.clip(norm, 1e-10, None)
+            norm = xp.clip(xp.sqrt(diag_r[:, None] * model._sv_diag()[None, :]), 1e-10, None)
             k_ref = k_ref / norm
             dk = dk / norm
-        if gamma is not None:
+        if base is not kernel:  # RBF
             pos = k_ref > 0
             safe_k = xp.where(pos, k_ref, 1.0)
-            scale = (xp.exp(gamma * (k_ref - 1)) - np.exp(-gamma)) / safe_k
+            scale = (kernel.finish(k_ref) - np.exp(-kernel.gamma)) / safe_k
             dk = xp.where(pos, dk * scale, 0.0)
         parts.append(to_cpu((dk * coef).sum(axis=1, keepdims=True)))
 

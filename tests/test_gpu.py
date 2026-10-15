@@ -511,7 +511,6 @@ class TestMaskedGPU:
         from gkmsvm.kernels.direct import (
             DirectGkmKernel,
             _fused_pairwise_packed_numba,
-            _pack_windows_cpu,
         )
         from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
 
@@ -527,7 +526,7 @@ class TestMaskedGPU:
         Y = np.stack([one_hot_encode(s) for s in _make_seqs(30, 60, seed=4)])
 
         def pack(A):
-            return _pack_windows_cpu(np.ascontiguousarray(kernel.base_index_windows(A)))
+            return kernel.pack(A)
 
         bx, by, by_rc = pack(X), pack(Y), pack(reverse_complement(Y))
         t, l, mm = kernel._mismatch_table, kernel.l, kernel._min_matches
@@ -561,3 +560,39 @@ class TestLmerTableGPU:
         got = cp.asnumpy(model(X)).ravel()
         assert model._lmer_table is not False
         np.testing.assert_allclose(got, ref, atol=3e-3)
+
+
+class TestLmerIndexGPU:
+    """Cached l-mer index on the device vs the CPU index."""
+
+    @pytest.mark.parametrize("which", ["t0", "t2_l9", "t2_l11"])
+    def test_index_matches_cpu(self, which):
+        from gkmsvm.codec import reverse_complement
+        from gkmsvm.kernels.direct import DirectGkmKernel
+        from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
+        from gkmsvm.kernels.lmer_index import LmerIndex
+        from gkmsvm.kernels.packed import PAD_WINDOW
+
+        kernel = {
+            "t0": lambda: DirectGkmKernel(8, 5),
+            "t2_l9": lambda: EstTruncGkmKernel(9, 6, d=3),
+            "t2_l11": lambda: EstTruncGkmKernel(11, 7, d=3),
+        }[which]()
+        X = np.stack([one_hot_encode(s) for s in _make_seqs(21, 80, seed=3)])
+        Y = np.stack([one_hot_encode(s) for s in _make_seqs(30, 60, seed=4)])
+        X[2, :, 5:45] = Y[9, :, 10:50]  # shared subsequence
+        index = LmerIndex(kernel, kernel.pack(Y), kernel.pack(reverse_complement(Y)))
+        bx = kernel.pack(X)
+        bx[1, :3] = PAD_WINDOW
+        ref = index.pairwise(bx)
+        got = cp.asnumpy(index.pairwise(cp.asarray(bx)))
+        np.testing.assert_allclose(got, ref, rtol=1e-12, atol=1e-12)
+
+    def test_rbf_model_scores_match_cpu(self):
+        model = _make_model(40, 60, "gkmrbf", {"L": 9, "k": 6, "d": 3, "gamma": 2.0})
+        X = np.stack([one_hot_encode(s) for s in _make_seqs(25, 60, seed=7)])
+        cpu = np.asarray(model(X)).ravel()
+        assert model._sv_index() is not None
+        model.cuda()
+        got = cp.asnumpy(model(cp.asarray(X))).ravel()
+        np.testing.assert_allclose(got, cpu, atol=1e-4)

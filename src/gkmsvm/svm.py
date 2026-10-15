@@ -1,17 +1,40 @@
 from __future__ import annotations
 
 import numpy as np
+from numba import njit, prange
 
 from gkmsvm.backend import get_array_module, is_gpu, is_mlx, to_cpu, to_gpu, to_mlx
-from gkmsvm.codec import reverse_complement
 from gkmsvm.kernels.base import GkmKernel
 from gkmsvm.kernels.direct import DirectGkmKernel
 from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
-from gkmsvm.kernels.rbf import RbfGkmKernel
+from gkmsvm.kernels.packed import PackedGkmKernel
+from gkmsvm.kernels.rbf import RbfGkmKernel, RbfKernel
 from gkmsvm.kernels.weighted import (
     CenterWeightedGkmKernel,
     CenterWeightedRbfGkmKernel,
 )
+
+
+@njit(parallel=True, cache=True)
+def _normalized_dot(raw, diag_x, diag_sv, norm, coef, gamma):
+    """[B]: sum_s coef_s f(k), k = raw[b, s] / sqrt(diag_x[b] diag_sv[s]) if norm.
+
+    f(k) = exp(gamma (k - 1)) when gamma is not NaN (RBF), else k.
+    """
+    B, S = raw.shape
+    rbf = not np.isnan(gamma)
+    out = np.zeros(B)
+    for b in prange(B):
+        acc = 0.0
+        for s in range(S):
+            k = raw[b, s]
+            if norm:
+                k /= max(np.sqrt(diag_x[b] * diag_sv[s]), 1e-10)
+            if rbf:
+                k = np.exp(gamma * (k - 1.0))
+            acc += coef[s] * k
+        out[b] = acc
+    return out
 
 # Kernel modes:
 #   -t 0  gkm_cnt       / direct          Exact gapped k-mer count
@@ -154,11 +177,12 @@ class GkmSVM:
         self._kernel_params = kernel_params
         self.kernel = KERNEL_BUILDERS[self.kernel_type](kernel_params)
         self.sv_chunk_size = sv_chunk_size
-        self._cached_sv_diag: np.ndarray | None = None
-        self._sv_idx_windows: np.ndarray | None = None
-        self._sv_rc_idx_windows: np.ndarray | None = None
-        self._sv_packed_t: np.ndarray | None = None
-        self._sv_rc_packed_t: np.ndarray | None = None
+        # Packed SV windows, their base-kernel self-kernels and the l-mer
+        # index, on the model's device (built lazily, cleared on device moves)
+        self._sv_cache: dict = {}
+        # Score through the cached l-mer index (kernels/lmer_index.py) when it
+        # applies; False forces the masked join / brute-force kernel
+        self.use_lmer_index = True
         # Exact l-mer weight table for non-RBF kernels (lmer_table.py):
         # "auto" uses it when it applies and there are enough SVs to pay for
         # building it; True/False force it on or off
@@ -197,13 +221,8 @@ class GkmSVM:
         return dict(self._kernel_params)
 
     def _invalidate_caches(self):
-        had_gpu = is_gpu(self._sv_idx_windows) if self._sv_idx_windows is not None else self._on_gpu
-        had_mlx = is_mlx(self._sv_idx_windows) if self._sv_idx_windows is not None else self._on_mlx
-        self._cached_sv_diag = None
-        self._sv_idx_windows = None
-        self._sv_rc_idx_windows = None
-        self._sv_packed_t = None
-        self._sv_rc_packed_t = None
+        had_gpu, had_mlx = self._on_gpu, self._on_mlx
+        self._sv_cache = {}
         self._lmer_table_dev = None
         if had_mlx:
             try:
@@ -283,63 +302,78 @@ class GkmSVM:
         else:
             raise ValueError(f"Unknown format {fmt!r}. Use 'npz' or 'lsgkm'.")
 
-    def _get_sv_diag(self) -> np.ndarray:
-        sv = self.support_sequences
-        if self._cached_sv_diag is not None:
-            if is_gpu(self._cached_sv_diag) == is_gpu(sv):
-                return self._cached_sv_diag
-        self._cached_sv_diag = self.kernel._raw_diagonal(sv, chunk_size=1000)
-        return self._cached_sv_diag
+    def _sv_packed(self):
+        """(fwd, rc or None) packed SV windows of the base kernel, or None.
 
-    def _get_sv_index_windows(self):
-        """Lazily compute and cache int8 base-index windows for SVs (fwd + RC).
-
-        On GPU, also caches packed uint32 windows for the CUDA kernel.
+        None when the base kernel has no packed path for these SVs (weighted
+        kernels with N positions).
         """
-        if self._sv_idx_windows is None:
-            kernel = self.kernel
-            self._sv_idx_windows = kernel.base_index_windows(
-                self.support_sequences
-            )
-            if kernel.include_rc:
-                self._sv_rc_idx_windows = kernel.base_index_windows(
-                    reverse_complement(self.support_sequences)
-                )
-            if hasattr(kernel, '_min_matches'):
-                from gkmsvm.kernels.direct import (
-                    _pack_windows_cpu, _pack_windows_uint32,
-                )
-                if is_mlx(self._sv_idx_windows):
-                    xp = get_array_module(self._sv_idx_windows)
-                    self._sv_packed_t = xp.asarray(_pack_windows_cpu(
-                        np.ascontiguousarray(to_cpu(self._sv_idx_windows))
-                    ))
-                    if self._sv_rc_idx_windows is not None:
-                        self._sv_rc_packed_t = xp.asarray(_pack_windows_cpu(
-                            np.ascontiguousarray(
-                                to_cpu(self._sv_rc_idx_windows)
-                            )
-                        ))
-                elif self._on_gpu:
-                    xp = get_array_module(self._sv_idx_windows)
-                    packed = _pack_windows_uint32(self._sv_idx_windows, xp)
-                    self._sv_packed_t = xp.ascontiguousarray(packed.T)
-                    if self._sv_rc_idx_windows is not None:
-                        packed_rc = _pack_windows_uint32(
-                            self._sv_rc_idx_windows, xp
-                        )
-                        self._sv_rc_packed_t = xp.ascontiguousarray(
-                            packed_rc.T
-                        )
-                else:
-                    self._sv_packed_t = _pack_windows_cpu(
-                        np.ascontiguousarray(self._sv_idx_windows)
-                    )
-                    if self._sv_rc_idx_windows is not None:
-                        self._sv_rc_packed_t = _pack_windows_cpu(
-                            np.ascontiguousarray(self._sv_rc_idx_windows)
-                        )
-        return self._sv_idx_windows, self._sv_rc_idx_windows
+        c = self._sv_cache
+        if "packed" not in c:
+            base = self.kernel.base
+            sv = self.support_sequences
+            ok = isinstance(base, PackedGkmKernel) and base.packs(sv)
+            c["packed"] = base.pack_both(sv) if ok else None
+        return c["packed"]
+
+    def _sv_diag(self) -> np.ndarray:
+        """Base-kernel K_raw(sv, sv) on the model's device (cached)."""
+        c = self._sv_cache
+        if "diag" not in c:
+            packed = self._sv_packed()
+            base = self.kernel.base
+            if packed is not None:
+                diag = base.raw_diag_packed(*packed)
+            else:
+                diag = base._raw_diagonal(self.support_sequences, chunk_size=1000)
+            c["diag"] = diag.astype(self.support_sequences.dtype)
+        return c["diag"]
+
+    def _sv_index(self):
+        """Cached l-mer index over the SVs, or None when it doesn't apply."""
+        c = self._sv_cache
+        if "index" not in c:
+            from gkmsvm.kernels import lmer_index
+
+            packed = self._sv_packed()
+            base = self.kernel.base
+            use = self.use_lmer_index and packed is not None and lmer_index.applies(base)
+            c["index"] = lmer_index.LmerIndex(base, *packed) if use else None
+        return c["index"]
+
+    def _sv_raw(self, bx):
+        """Base-kernel K_raw [B, S] of packed query rows bx against the SVs."""
+        index = self._sv_index()
+        if index is not None:
+            return index.pairwise(bx)
+        return self.kernel.base.raw_packed(bx, *self._sv_packed())
+
+    def _sv_scores(self, x):
+        """sum_s coef_s K(x, sv_s) [B, 1] of one-hot x (on the model's device)."""
+        kernel = self.kernel
+        base = kernel.base
+        if self._sv_packed() is None or not base.packs(x):
+            return (kernel.pairwise(x, self.support_sequences)
+                    * self.coefficients).sum(axis=1, keepdims=True)
+        xp = get_array_module(x)
+        bx, bx_rc = base.pack_both(x)
+        raw = self._sv_raw(bx)
+        diag_x = base.raw_diag_packed(bx, bx_rc) if base.normalize else None
+        if xp is np:
+            # Normalize, finish and reduce in one parallel pass, no [B, S] temporaries
+            norm = diag_x is not None
+            gamma = kernel.gamma if isinstance(kernel, RbfKernel) else np.nan
+            out = _normalized_dot(
+                np.ascontiguousarray(raw, dtype=np.float64),
+                diag_x.astype(np.float64) if norm else np.ones(1),
+                self._sv_diag().astype(np.float64) if norm else np.ones(1),
+                norm, self.coefficients.astype(np.float64), float(gamma))
+            return out.astype(x.dtype)[:, None]
+        k = raw.astype(x.dtype)
+        if diag_x is not None:
+            k = k / xp.clip(xp.sqrt(diag_x.astype(x.dtype)[:, None] * self._sv_diag()[None, :]),
+                            1e-10, None)
+        return (kernel.finish(k) * self.coefficients).sum(axis=1, keepdims=True)
 
     def __call__(
         self, x: np.ndarray, *,
@@ -351,10 +385,10 @@ class GkmSVM:
         Args:
             x: [B, 4, L] one-hot encoded DNA sequences.
             batch_size: Process inputs in batches of this size.  ``None``
-                means process all at once.  When set, ``verbose`` shows
-                progress over input batches instead of SV chunks.  Raised
-                to at least ``_min_batch_size()``.
-            verbose: Show tqdm progress bar.
+                means process all at once (internally in blocks that cap the
+                [batch, S] kernel values at ``_MAX_SCORE_BYTES``).  Raised to
+                at least ``_min_batch_size()``.
+            verbose: Show a tqdm progress bar over input batches.
 
         Returns:
             [B, 1] uncalibrated decision values.
@@ -375,20 +409,27 @@ class GkmSVM:
                 parts.append(to_cpu(self._score_unbatched(batch)))
             return np.concatenate(parts, axis=0)
 
-        x = self._match_device(x)
-        return self._score_unbatched(x, verbose=verbose)
+        return self._score_unbatched(self._match_device(x))
 
     # "auto" builds the l-mer table only for models at least this large
     _LMER_TABLE_MIN_SVS = 500
 
-    # Each kernel call pays a fixed per-SV cost (the masked join indexes every
-    # SV window: ~6 s for 32k SVs on CPU), so batches fill at least this many
-    # bytes of [batch, S] float64
+    # Without the l-mer table or index, each kernel call pays a fixed per-SV
+    # cost (the masked join indexes every SV window: ~6 s for 32k SVs on CPU),
+    # so batches fill at least this many bytes of [batch, S] float64
     _MIN_BATCH_BYTES = 256 * 2**20
+    # Kernel scoring computes [rows, S] kernel values in blocks of at most this
+    _MAX_SCORE_BYTES = 512 * 2**20
 
-    def _min_batch_size(self, batch_size: int | None) -> int | None:
+    def _min_batch_size(self, batch_size: int | None, *, table: bool = True) -> int | None:
+        """batch_size, raised when calls go through the masked join.
+
+        table: the caller scores through the l-mer table when it applies.
+        """
         if batch_size is None:
             return None
+        if (table and self._lmer_table_for(np) is not None) or self._sv_index() is not None:
+            return batch_size
         return max(batch_size, self._MIN_BATCH_BYTES // (8 * self.num_support_vectors))
 
     def _build_lmer_table(self) -> np.ndarray | None:
@@ -398,31 +439,26 @@ class GkmSVM:
         cutoff, l > lmer_table.MAX_TABLE_L).
         """
         if self._lmer_table is None:
-            from gkmsvm.kernels.direct import _pack_windows_cpu
             from gkmsvm.lmer_table import build_lmer_table
 
             kernel = self.kernel
-            if not hasattr(kernel, "_join_plan"):
+            if not isinstance(kernel, PackedGkmKernel) or kernel._join_plan() is None:
                 self._lmer_table = False
                 return None
             sv = to_cpu(self.support_sequences).astype(np.float64)
-
-            def pack(a):
-                return _pack_windows_cpu(np.ascontiguousarray(kernel.base_index_windows(a)))
-
+            fwd, rc = kernel.pack_both(sv)
             coef = to_cpu(self.coefficients).astype(np.float64)
             if kernel.normalize:
-                diag = to_cpu(kernel._raw_diagonal(sv, chunk_size=1000)).astype(np.float64)
+                diag = kernel.raw_diag_packed(fwd, rc)
                 coef = coef / np.sqrt(np.clip(diag, 1e-10, None))
-            rc = pack(reverse_complement(sv)) if kernel.include_rc else None
-            table = build_lmer_table(kernel, pack(sv), rc, coef)
+            table = build_lmer_table(kernel, fwd, rc, coef)
             self._lmer_table = False if table is None else table
         return None if self._lmer_table is False else self._lmer_table
 
     def _lmer_table_for(self, xp):
         """The l-mer table on xp's device, or None when it doesn't apply."""
         use = self.use_lmer_table
-        if use is False or not hasattr(self.kernel, "_join_plan"):
+        if use is False or not isinstance(self.kernel, PackedGkmKernel):
             return None
         if use == "auto" and self.num_support_vectors < self._LMER_TABLE_MIN_SVS:
             return None
@@ -440,132 +476,24 @@ class GkmSVM:
 
     def _score_lmer_table(self, x, table):
         """f(x) = sum of table weights over x's windows / sqrt(K(x, x)) + b."""
-        from gkmsvm.kernels.direct import _pack_windows_cpu, _pack_windows_uint32
-
         xp = get_array_module(x)
         kernel = self.kernel
-        bx = kernel.base_index_windows(x)
-        if xp is np:
-            packed = _pack_windows_cpu(np.ascontiguousarray(bx))
-        elif is_mlx(bx):
-            packed = xp.asarray(_pack_windows_cpu(np.ascontiguousarray(to_cpu(bx))))
-        else:
-            packed = _pack_windows_uint32(bx, xp)
+        packed, packed_rc = kernel.pack_both(x)
         raw = table[packed].sum(axis=1)
         if kernel.normalize:
-            diag_x = kernel._raw_diagonal(x).astype(raw.dtype)
+            diag_x = kernel.raw_diag_packed(packed, packed_rc).astype(raw.dtype)
             raw = raw / xp.sqrt(xp.clip(diag_x, 1e-10, None))
         return raw.astype(x.dtype)[:, None] + self.bias
 
-    def _score_unbatched(
-        self, x: np.ndarray, *, verbose: bool = False,
-    ) -> np.ndarray:
-        """Score a single batch (no input-level chunking)."""
+    def _score_unbatched(self, x: np.ndarray) -> np.ndarray:
+        """Score one batch on the model's device."""
         xp = get_array_module(x)
-        S = self.num_support_vectors
-        chunk = self.sv_chunk_size
-        kernel = self.kernel
-        do_norm = kernel.normalize
-
         table = self._lmer_table_for(xp)
-        if table is not None and kernel._packed_exact(x):
+        if table is not None and self.kernel.packs(x):
             return self._score_lmer_table(x, table)
-
-        if do_norm:
-            diag_x = kernel._raw_diagonal(x)
-            diag_sv = self._get_sv_diag()
-
-        if hasattr(kernel, "pairwise_from_indices") and (chunk is None or chunk >= S):
-            sv_idx, sv_rc_idx = self._get_sv_index_windows()
-            bx = kernel.base_index_windows(x)
-            raw = kernel.pairwise_from_indices(
-                bx, sv_idx, by_packed_t=self._sv_packed_t
-            )
-            if kernel.include_rc:
-                raw = raw + kernel.pairwise_from_indices(
-                    bx, sv_rc_idx, by_packed_t=self._sv_rc_packed_t
-                )
-            raw = raw.astype(x.dtype)
-            if do_norm:
-                norm = xp.sqrt(diag_x[:, None] * diag_sv[None, :])
-                raw = raw / xp.clip(norm, 1e-10, None)
-            scores = (raw * self.coefficients).sum(axis=1, keepdims=True)
-        elif chunk is not None and chunk < S and hasattr(kernel, "pairwise_from_indices"):
-            self._get_sv_index_windows()
-            bx = kernel.base_index_windows(x)
-            # MLX packs SVs as [S, W] like the CPU path; CUDA as [W, S].
-            on_mlx = is_mlx(bx)
-            on_gpu = is_gpu(bx) and not on_mlx
-            if on_gpu:
-                import cupy as cp
-                from gkmsvm.kernels.direct import _pack_windows_uint32
-                bx_p = cp.ascontiguousarray(
-                    _pack_windows_uint32(cp.asarray(bx), cp)
-                )
-            elif on_mlx:
-                from gkmsvm.kernels.direct import _pack_windows_cpu
-                bx_p = xp.asarray(
-                    _pack_windows_cpu(np.ascontiguousarray(to_cpu(bx)))
-                )
-            else:
-                bx_p = None
-
-            def _slice_packed(packed, s, e):
-                if on_gpu:
-                    return xp.ascontiguousarray(packed[:, s:e])
-                return packed[s:e]
-
-            scores = xp.zeros((x.shape[0], 1), dtype=x.dtype)
-            sv_iter = range(0, S, chunk)
-            if verbose:
-                from tqdm import tqdm
-                sv_iter = tqdm(sv_iter, desc="SV chunks", total=(S + chunk - 1) // chunk)
-            for start in sv_iter:
-                end = min(start + chunk, S)
-                by_t = _slice_packed(self._sv_packed_t, start, end)
-                raw = kernel.pairwise_from_indices(
-                    bx, None, by_packed_t=by_t, bx_packed=bx_p
-                )
-                if kernel.include_rc:
-                    by_rc_t = _slice_packed(self._sv_rc_packed_t, start, end)
-                    raw = raw + kernel.pairwise_from_indices(
-                        bx, None, by_packed_t=by_rc_t, bx_packed=bx_p
-                    )
-                raw = raw.astype(x.dtype)
-                if do_norm:
-                    norm = xp.sqrt(
-                        diag_x[:, None] * diag_sv[start:end][None, :]
-                    )
-                    raw = raw / xp.clip(norm, 1e-10, None)
-                scores += (raw * self.coefficients[start:end]).sum(
-                    axis=1, keepdims=True
-                )
-        elif chunk is not None and chunk < S:
-            scores = xp.zeros((x.shape[0], 1), dtype=x.dtype)
-            sv_iter = range(0, S, chunk)
-            if verbose:
-                from tqdm import tqdm
-                sv_iter = tqdm(sv_iter, desc="SV chunks", total=(S + chunk - 1) // chunk)
-            for start in sv_iter:
-                end = min(start + chunk, S)
-                raw = kernel._raw_pairwise(
-                    x, self.support_sequences[start:end]
-                )
-                if do_norm:
-                    norm = xp.sqrt(
-                        diag_x[:, None] * diag_sv[start:end][None, :]
-                    )
-                    raw = raw / xp.clip(norm, 1e-10, None)
-                scores += (raw * self.coefficients[start:end]).sum(
-                    axis=1, keepdims=True
-                )
-        else:
-            raw = kernel._raw_pairwise(x, self.support_sequences)
-            if do_norm:
-                norm = xp.sqrt(diag_x[:, None] * diag_sv[None, :])
-                raw = raw / xp.clip(norm, 1e-10, None)
-            scores = (raw * self.coefficients).sum(axis=1, keepdims=True)
-
+        rows = max(1, self._MAX_SCORE_BYTES // (8 * self.num_support_vectors))
+        parts = [self._sv_scores(x[s:s + rows]) for s in range(0, x.shape[0], rows)]
+        scores = parts[0] if len(parts) == 1 else xp.concatenate(parts, axis=0)
         return scores + self.bias
 
     def score_variants(
@@ -733,7 +661,7 @@ class GkmSVM:
         kernel = self.kernel
         adj_coefs = to_cpu(self.coefficients).astype(np.float64)
         if kernel.normalize and not query_norm:
-            sv_diag = to_cpu(self._get_sv_diag()).astype(np.float64)
+            sv_diag = to_cpu(self._sv_diag()).astype(np.float64)
             adj_coefs = adj_coefs / np.sqrt(np.clip(sv_diag, 1e-10, None))
 
         saved_norm = kernel.normalize

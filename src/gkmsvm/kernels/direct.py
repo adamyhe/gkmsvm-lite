@@ -5,17 +5,12 @@ from math import comb
 import numpy as np
 from numba import njit, prange
 
-from gkmsvm.backend import get_array_module, get_strides, is_gpu, is_mlx
-from gkmsvm.codec import reverse_complement
-from gkmsvm.kernels.base import GkmKernel
+from gkmsvm.backend import get_array_module, get_strides
+from gkmsvm.kernels.packed import PackedGkmKernel
 
 # ---------------------------------------------------------------------------
 # Numba-accelerated kernels
 # ---------------------------------------------------------------------------
-
-# Below this many query or column sequences, the masked join's per-call index
-# build costs more than it saves (e.g. single SMO columns)
-_MASKED_MIN_ROWS = 16
 
 
 @njit(inline="always")
@@ -57,56 +52,6 @@ def _fused_pairwise_packed_numba(bx, by, table, l, min_matches):
 
 
 @njit(parallel=True, cache=True, fastmath=True)
-def _fused_pairwise_packed_sym_numba(bx, by, table, l, min_matches):
-    """_fused_pairwise_packed_numba for a symmetric result (B == S).
-
-    Valid when by holds the windows of the same sequences as bx, or of their
-    reverse complements: m(a, rc(b)) = m(rc(a), b), so both blocks of the RC
-    kernel are symmetric. Computes the upper triangle and mirrors it. Rows b
-    and B-1-b share an iteration so every iteration does B+1 entries.
-    """
-    B = bx.shape[0]
-    Wx = bx.shape[1]
-    Wy = by.shape[1]
-    result = np.empty((B, B), dtype=np.float64)
-    for r in prange((B + 1) // 2):
-        r = np.int64(r)  # prange index is unsigned; B - 1 - r would type as float
-        for half in range(2):
-            b = r if half == 0 else B - 1 - r
-            if half == 1 and b == r:
-                break
-            for s in range(b, B):
-                acc = 0.0
-                for i in range(Wx):
-                    bx_val = bx[b, i]
-                    for j in range(Wy):
-                        matches = l - _packed_mismatches(bx_val, by[s, j])
-                        if matches >= min_matches:
-                            acc += table[l - matches]
-                result[b, s] = acc
-                result[s, b] = acc
-    return result
-
-
-@njit(parallel=True, cache=True, fastmath=True)
-def _fused_diagonal_packed_numba(bx, table, l, min_matches):
-    """Self-kernel diagonal from packed uint32 windows."""
-    B = bx.shape[0]
-    W = bx.shape[1]
-    result = np.empty(B, dtype=np.float64)
-    for b in prange(B):
-        acc = 0.0
-        for i in range(W):
-            bx_val = bx[b, i]
-            for j in range(W):
-                matches = l - _packed_mismatches(bx_val, bx[b, j])
-                if matches >= min_matches:
-                    acc += table[l - matches]
-        result[b] = acc
-    return result
-
-
-@njit(parallel=True, cache=True, fastmath=True)
 def _fused_cross_diagonal_packed_numba(bx, bx_rc, table, l, min_matches):
     """Cross-kernel diagonal (fwd vs RC) from packed uint32 windows."""
     B = bx.shape[0]
@@ -123,16 +68,6 @@ def _fused_cross_diagonal_packed_numba(bx, bx_rc, table, l, min_matches):
                     acc += table[l - matches]
         result[b] = acc
     return result
-
-
-def _pack_windows_cpu(bw):
-    """Pack int8 base-index windows [N, W, l] → [N, W] uint32 on CPU."""
-    N, W, l = bw.shape
-    packed = np.zeros((N, W), dtype=np.uint32)
-    bw_u32 = bw.astype(np.uint32)
-    for k in range(l):
-        packed |= bw_u32[:, :, k] << (2 * k)
-    return packed
 
 
 # ---------------------------------------------------------------------------
@@ -206,43 +141,6 @@ void fused_pairwise_idx(
 }
 """
 
-_FUSED_DIAGONAL_CUDA = r"""
-extern "C" __global__
-void fused_diagonal(
-    const unsigned int* __restrict__ bx_packed,
-    const double* __restrict__ table,
-    double* __restrict__ result,
-    const int B,
-    const int W,
-    const int l,
-    const int min_matches
-) {
-    extern __shared__ double s_table[];
-    for (int i = threadIdx.x; i <= l; i += blockDim.x) {
-        s_table[i] = table[i];
-    }
-    __syncthreads();
-
-    const int b = blockDim.x * blockIdx.x + threadIdx.x;
-    if (b >= B) return;
-
-    double acc = 0.0;
-    for (int i = 0; i < W; i++) {
-        unsigned int bx_val = bx_packed[b * W + i];
-        for (int j = 0; j < W; j++) {
-            unsigned int x = bx_val ^ bx_packed[b * W + j];
-            unsigned int mismatches = ((x >> 1) | x) & 0x55555555u;
-            int mismatch_count = __popc(mismatches);
-            int matches = l - mismatch_count;
-            if (matches >= min_matches) {
-                acc += s_table[l - matches];
-            }
-        }
-    }
-    result[b] = acc;
-}
-"""
-
 _FUSED_CROSS_DIAGONAL_CUDA = r"""
 extern "C" __global__
 void fused_cross_diagonal(
@@ -283,37 +181,7 @@ void fused_cross_diagonal(
 """
 
 _cupy_fused_idx_kernel = None
-_cupy_fused_diag_kernel = None
 _cupy_fused_cross_diag_kernel = None
-
-
-def _fused_diagonal_packed_gpu(bx_packed, table, l, min_matches):
-    """Self-kernel diagonal via CUDA RawKernel (packed uint32 path)."""
-    global _cupy_fused_diag_kernel
-    import cupy as cp
-
-    if _cupy_fused_diag_kernel is None:
-        _cupy_fused_diag_kernel = cp.RawKernel(
-            _FUSED_DIAGONAL_CUDA,
-            "fused_diagonal",
-            options=("--use_fast_math",),
-        )
-
-    B, W = bx_packed.shape
-    table_gpu = cp.asarray(table, dtype=cp.float64)
-    result = cp.empty(B, dtype=cp.float64)
-
-    block = 256
-    grid = (B + block - 1) // block
-
-    _cupy_fused_diag_kernel(
-        (grid,),
-        (block,),
-        (bx_packed, table_gpu, result,
-         np.int32(B), np.int32(W), np.int32(l), np.int32(min_matches)),
-        shared_mem=(l + 1) * 8,
-    )
-    return result
 
 
 def _fused_cross_diagonal_packed_gpu(bx_packed, bx_rc_packed, table, l, min_matches):
@@ -345,16 +213,6 @@ def _fused_cross_diagonal_packed_gpu(bx_packed, bx_rc_packed, table, l, min_matc
         shared_mem=(l + 1) * 8,
     )
     return result
-
-
-def _pack_windows_uint32(bw, xp):
-    """Pack int8 base-index windows [N, W, l] → [N, W] uint32 (2 bits per base)."""
-    N, W, l = bw.shape
-    packed = xp.zeros((N, W), dtype=xp.uint32)
-    bw_u32 = bw.astype(xp.uint32)
-    for k in range(l):
-        packed |= bw_u32[:, :, k] << (2 * k)
-    return packed
 
 
 # ---------------------------------------------------------------------------
@@ -391,31 +249,6 @@ _METAL_PAIRWISE_SOURCE = """
     result[b * S + s] = acc;
 """
 
-_METAL_DIAGONAL_SOURCE = """
-    uint idx = thread_position_in_grid.x;
-    uint B = (uint)params[0];
-    uint W = (uint)params[1];
-    uint l = (uint)params[2];
-    uint min_matches = (uint)params[3];
-
-    if (idx >= B) return;
-
-    float acc = 0.0f;
-    for (uint i = 0; i < W; i++) {
-        uint32_t bx_val = bx_packed[idx * W + i];
-        for (uint j = 0; j < W; j++) {
-            uint32_t xored = bx_val ^ bx_packed[idx * W + j];
-            uint32_t mask = ((xored >> 1) | xored) & 0x55555555u;
-            uint mm = popcount(mask);
-            uint matches = l - mm;
-            if (matches >= min_matches) {
-                acc += table[l - matches];
-            }
-        }
-    }
-    result[idx] = acc;
-"""
-
 _METAL_CROSS_DIAGONAL_SOURCE = """
     uint idx = thread_position_in_grid.x;
     uint B = (uint)params[0];
@@ -443,7 +276,6 @@ _METAL_CROSS_DIAGONAL_SOURCE = """
 """
 
 _mlx_pairwise_kernel = None
-_mlx_diagonal_kernel = None
 _mlx_cross_diagonal_kernel = None
 
 
@@ -460,19 +292,6 @@ def _get_mlx_pairwise_kernel():
     return _mlx_pairwise_kernel
 
 
-def _get_mlx_diagonal_kernel():
-    global _mlx_diagonal_kernel
-    if _mlx_diagonal_kernel is None:
-        import mlx.core as mx
-        _mlx_diagonal_kernel = mx.fast.metal_kernel(
-            name="gkm_fused_diagonal",
-            input_names=["bx_packed", "table", "params"],
-            output_names=["result"],
-            source=_METAL_DIAGONAL_SOURCE,
-        )
-    return _mlx_diagonal_kernel
-
-
 def _get_mlx_cross_diagonal_kernel():
     global _mlx_cross_diagonal_kernel
     if _mlx_cross_diagonal_kernel is None:
@@ -486,7 +305,7 @@ def _get_mlx_cross_diagonal_kernel():
     return _mlx_cross_diagonal_kernel
 
 
-def _fused_pairwise_packed_mlx(bx_packed, by_packed, table, l, min_matches, xp):
+def _fused_pairwise_packed_mlx(bx_packed, by_packed, table, l, min_matches):
     """Fused pairwise via Metal kernel — per-thread XOR+popcount with early exit."""
     import mlx.core as mx
     B, Wx = bx_packed.shape
@@ -507,27 +326,7 @@ def _fused_pairwise_packed_mlx(bx_packed, by_packed, table, l, min_matches, xp):
     return result.reshape(B, S)
 
 
-def _fused_diagonal_packed_mlx(bx_packed, table, l, min_matches, xp):
-    """Self-kernel diagonal via Metal kernel."""
-    import mlx.core as mx
-    B, W = bx_packed.shape
-    table_mlx = mx.array(np.asarray(table, dtype=np.float32))
-    params = mx.array([B, W, l, min_matches], dtype=mx.int32)
-    block = min(B, 256)
-    grid = ((B + block - 1) // block) * block
-    return _get_mlx_diagonal_kernel()(
-        inputs=[bx_packed, table_mlx, params],
-        template=[],
-        grid=(grid, 1, 1),
-        threadgroup=(block, 1, 1),
-        output_shapes=[(B,)],
-        output_dtypes=[mx.float32],
-    )[0]
-
-
-def _fused_cross_diagonal_packed_mlx(
-    bx_packed, bx_rc_packed, table, l, min_matches, xp
-):
+def _fused_cross_diagonal_packed_mlx(bx_packed, bx_rc_packed, table, l, min_matches):
     """Cross-kernel diagonal (fwd × RC) via Metal kernel."""
     import mlx.core as mx
     B, W = bx_packed.shape
@@ -546,17 +345,11 @@ def _fused_cross_diagonal_packed_mlx(
     )[0]
 
 
-def _fused_pairwise_idx_gpu(bx, by, table, min_matches, *, by_packed_t=None,
-                            bx_packed=None):
-    """Fused pairwise CUDA kernel (packed uint32 path, coalesced SV access).
+def _fused_pairwise_packed_gpu(bx_packed, by_packed, table, l, min_matches):
+    """Fused pairwise CUDA kernel: bx [B, Wx], by [S, Wy] packed uint32.
 
-    Args:
-        bx: [B, Wx, l] int8 query windows (ignored if bx_packed given).
-        by: [S, Wy, l] int8 SV windows (ignored if by_packed_t given).
-        table: [l+1] mismatch weight table.
-        min_matches: minimum match count for non-zero contribution.
-        by_packed_t: optional pre-packed [Wy, S] uint32 SV windows.
-        bx_packed: optional pre-packed [B, Wx] uint32 query windows.
+    The kernel reads columns as [Wy, S] (adjacent threads, adjacent SVs), so
+    by is transposed per call.
     """
     global _cupy_fused_idx_kernel
     import cupy as cp
@@ -568,45 +361,25 @@ def _fused_pairwise_idx_gpu(bx, by, table, min_matches, *, by_packed_t=None,
             options=("--use_fast_math",),
         )
 
-    l = table.shape[0] - 1
-    if bx_packed is not None:
-        B, Wx = bx_packed.shape
-    else:
-        B, Wx, _ = bx.shape
-        bx_packed = cp.ascontiguousarray(_pack_windows_uint32(cp.asarray(bx), cp))
-    if by_packed_t is not None:
-        Wy, S = by_packed_t.shape
-    else:
-        S, Wy, _ = by.shape
-        by_packed_t = cp.ascontiguousarray(_pack_windows_uint32(cp.asarray(by), cp).T)
+    bx_packed = cp.ascontiguousarray(bx_packed)
+    B, Wx = bx_packed.shape
+    S, Wy = by_packed.shape
+    by_t = cp.ascontiguousarray(by_packed.T)
     table_gpu = cp.asarray(table, dtype=cp.float64)
     result = cp.empty(B * S, dtype=cp.float64)
 
     total = B * S
     block = 256
     grid = (total + block - 1) // block
-    table_bytes = (l + 1) * 8
-    bx_cache_bytes = Wx * 4
-    shared_mem = table_bytes + bx_cache_bytes
+    shared_mem = (l + 1) * 8 + Wx * 4
 
     _cupy_fused_idx_kernel(
         (grid,),
         (block,),
-        (
-            bx_packed,
-            by_packed_t,
-            table_gpu,
-            result,
-            np.int64(total),
-            np.int32(S),
-            np.int32(Wx),
-            np.int32(Wy),
-            np.int32(l),
-            np.int32(min_matches),
-        ),
+        (bx_packed, by_t, table_gpu, result, np.int64(total), np.int32(S),
+         np.int32(Wx), np.int32(Wy), np.int32(l), np.int32(min_matches)),
         shared_mem=shared_mem,
     )
-
     return result.reshape(B, S)
 
 
@@ -615,7 +388,7 @@ def _fused_pairwise_idx_gpu(bx, by, table, min_matches, *, by_packed_t=None,
 # ---------------------------------------------------------------------------
 
 
-class DirectGkmKernel(GkmKernel):
+class DirectGkmKernel(PackedGkmKernel):
     """Direct gapped k-mer kernel (LS-GKM -t 0 / gkm_cnt).
 
     For window length l and k informative positions, two windows differing
@@ -633,23 +406,11 @@ class DirectGkmKernel(GkmKernel):
         )
         self._min_matches = self._get_min_matches()
 
-    # CPU: use the masked-join kernel (kernels/masked.py) when it applies.
-    # Set False to force the brute-force loop (e.g. as a test oracle).
-    use_masked = True
-
     def _join_plan(self):
         """Mask plan for this kernel's table, or None without a mismatch cutoff."""
         from gkmsvm.kernels.masked import mask_plan
 
         return mask_plan(tuple(self._mismatch_table), self.l, self._min_matches)
-
-    def _masked_plan(self):
-        """_join_plan() for the pairwise kernel, unless use_masked is off."""
-        return self._join_plan() if self.use_masked else None
-
-    def _packed_exact(self, x) -> bool:
-        """The packed path defines this kernel, so it always applies."""
-        return True
 
     def _get_min_matches(self) -> int:
         """Minimum match count that yields a non-zero table entry."""
@@ -669,10 +430,7 @@ class DirectGkmKernel(GkmKernel):
         """
         xp = get_array_module(x)
         B, C, L = x.shape
-        if L < self.l:
-            raise ValueError(
-                f"Sequence length {L} is shorter than window length {self.l}"
-            )
+        self._check_length(L)
         W = L - self.l + 1
         shape = (B, C, W, self.l)
         s = get_strides(x)
@@ -681,199 +439,25 @@ class DirectGkmKernel(GkmKernel):
         wx = xp.ascontiguousarray(wx.transpose(0, 2, 1, 3))  # [B, W, 4, l]
         return wx.reshape(B, W, C * self.l)
 
-    def base_index_windows(self, x: np.ndarray) -> np.ndarray:
-        """Extract base indices for sliding windows.
+    _HAS_BRUTE = True
 
-        Args:
-            x: [B, 4, L] one-hot encoded sequences.
+    def _brute(self, bx, by, dev):
+        args = (self._mismatch_table, self.l, self._min_matches)
+        if dev == "cpu":
+            return _fused_pairwise_packed_numba(
+                np.ascontiguousarray(bx), np.ascontiguousarray(by), *args)
+        if dev == "cuda":
+            return _fused_pairwise_packed_gpu(bx, by, *args)
+        return _fused_pairwise_packed_mlx(bx, by, *args)
 
-        Returns:
-            [B, W, l] int8 array of base indices (0-3).
-        """
-        xp = get_array_module(x)
-        B, C, L = x.shape
-        if L < self.l:
-            raise ValueError(
-                f"Sequence length {L} is shorter than window length {self.l}"
-            )
-        W = L - self.l + 1
-        base_idx = xp.argmax(x, axis=1).astype(xp.int8)  # [B, L]
-        shape = (B, W, self.l)
-        s = get_strides(base_idx)
-        new_strides = (s[0], s[1], s[1])
-        bw = xp.lib.stride_tricks.as_strided(base_idx, shape=shape, strides=new_strides)
-        return xp.ascontiguousarray(bw)
+    def _brute_cross_diag(self, bx, by, dev):
+        args = (self._mismatch_table, self.l, self._min_matches)
+        if dev == "cpu":
+            return _fused_cross_diagonal_packed_numba(
+                np.ascontiguousarray(bx), np.ascontiguousarray(by), *args)
+        if dev == "cuda":
+            import cupy as cp
 
-    def pairwise_from_indices(
-        self, bx: np.ndarray, by: np.ndarray, *, by_packed_t=None,
-        bx_packed=None, symmetric: bool = False,
-    ) -> np.ndarray:
-        """Raw kernel from base-index windows (no RC, no normalization).
-
-        Args:
-            bx: [B, Wx, l] int8 base indices from query sequences.
-            by: [S, Wy, l] int8 base indices from support sequences.
-            by_packed_t: pre-packed SV windows. CPU: [S, Wy] uint32.
-                GPU: [Wy, S] uint32 (transposed for coalesced access).
-            bx_packed: pre-packed query windows. CPU: [B, Wx] uint32.
-                GPU: [B, Wx] uint32.
-            symmetric: by holds the windows of the same sequences as bx (or
-                of their reverse complements), so the result is symmetric.
-                CPU computes one triangle; other devices compute it all.
-
-        Returns:
-            [B, S] raw kernel values.
-        """
-        xp = get_array_module(bx if bx is not None else bx_packed)
-        if xp is np:
-            if bx_packed is None:
-                bx_packed = _pack_windows_cpu(np.ascontiguousarray(bx))
-            by_packed = (
-                by_packed_t
-                if by_packed_t is not None
-                else _pack_windows_cpu(np.ascontiguousarray(by))
-            )
-            plan = self._masked_plan()
-            if (plan is not None and bx_packed.shape[0] >= _MASKED_MIN_ROWS
-                    and by_packed.shape[0] >= _MASKED_MIN_ROWS):
-                from gkmsvm.kernels.masked import masked_pairwise
-
-                return masked_pairwise(bx_packed, by_packed, plan)
-            fn = (_fused_pairwise_packed_sym_numba if symmetric
-                  else _fused_pairwise_packed_numba)
-            return fn(
-                bx_packed,
-                by_packed,
-                self._mismatch_table,
-                self.l,
-                self._min_matches,
-            )
-        if is_mlx(bx if bx is not None else bx_packed):
-            xp = get_array_module(bx if bx is not None else bx_packed)
-            from gkmsvm.backend import to_cpu
-
-            if bx_packed is None:
-                bx_packed = xp.asarray(_pack_windows_cpu(np.ascontiguousarray(to_cpu(bx))))
-            if by_packed_t is not None:
-                by_packed = by_packed_t
-            else:
-                by_packed = xp.asarray(
-                    _pack_windows_cpu(np.ascontiguousarray(to_cpu(by)))
-                )
-            plan = self._masked_plan()
-            if (plan is not None and bx_packed.shape[0] >= _MASKED_MIN_ROWS
-                    and by_packed.shape[0] >= _MASKED_MIN_ROWS):
-                from gkmsvm.kernels.masked import masked_pairwise_mlx
-
-                # Exact integer counts combined in float64; Metal holds float32
-                return xp.asarray(
-                    masked_pairwise_mlx(bx_packed, by_packed, plan).astype(np.float32)
-                )
-            return _fused_pairwise_packed_mlx(
-                bx_packed,
-                by_packed,
-                self._mismatch_table,
-                self.l,
-                self._min_matches,
-                xp,
-            )
-        plan = self._masked_plan()
-        n_rows = bx_packed.shape[0] if bx_packed is not None else bx.shape[0]
-        n_cols = by_packed_t.shape[1] if by_packed_t is not None else by.shape[0]
-        if plan is not None and min(n_rows, n_cols) >= _MASKED_MIN_ROWS:
-            from gkmsvm.kernels.masked import masked_pairwise_gpu
-
-            if bx_packed is None:
-                bx_packed = _pack_windows_uint32(xp.asarray(bx), xp)
-            by_packed = (xp.ascontiguousarray(by_packed_t.T) if by_packed_t is not None
-                         else _pack_windows_uint32(xp.asarray(by), xp))
-            return masked_pairwise_gpu(bx_packed, by_packed, plan)
-        return _fused_pairwise_idx_gpu(
-            bx,
-            by,
-            self._mismatch_table,
-            self._min_matches,
-            by_packed_t=by_packed_t,
-            bx_packed=bx_packed,
-        )
-
-    def _raw_pairwise(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
-        bx = self.base_index_windows(x)
-        by = self.base_index_windows(y)
-        result = self.pairwise_from_indices(bx, by)
-        if self.include_rc:
-            by_rc = self.base_index_windows(reverse_complement(y))
-            result = result + self.pairwise_from_indices(bx, by_rc)
-        return result.astype(x.dtype)
-
-    def _raw_diagonal(
-        self, x: np.ndarray, *, chunk_size: int | None = None
-    ) -> np.ndarray:
-        xp = get_array_module(x)
-        B = x.shape[0]
-
-        if chunk_size is not None and chunk_size < B:
-            chunks = []
-            for start in range(0, B, chunk_size):
-                end = min(start + chunk_size, B)
-                chunks.append(self._raw_diagonal(x[start:end]))
-            return xp.concatenate(chunks)
-
-        if xp is np:
-            bx_packed = _pack_windows_cpu(self.base_index_windows(x))
-            mm = self._min_matches
-            result = _fused_diagonal_packed_numba(
-                bx_packed, self._mismatch_table, self.l, mm
-            )
-            if self.include_rc:
-                bx_rc_packed = _pack_windows_cpu(
-                    self.base_index_windows(reverse_complement(x))
-                )
-                result = result + _fused_cross_diagonal_packed_numba(
-                    bx_packed, bx_rc_packed, self._mismatch_table, self.l, mm
-                )
-            return result.astype(x.dtype)
-
-        if is_mlx(x):
-            from gkmsvm.backend import to_cpu
-
-            bx_packed = xp.asarray(
-                _pack_windows_cpu(
-                    np.ascontiguousarray(to_cpu(self.base_index_windows(x)))
-                )
-            )
-            mm = self._min_matches
-            result = _fused_diagonal_packed_mlx(
-                bx_packed, self._mismatch_table, self.l, mm, xp
-            )
-            if self.include_rc:
-                bx_rc_packed = xp.asarray(
-                    _pack_windows_cpu(
-                        np.ascontiguousarray(
-                            to_cpu(self.base_index_windows(reverse_complement(x)))
-                        )
-                    )
-                )
-                result = result + _fused_cross_diagonal_packed_mlx(
-                    bx_packed, bx_rc_packed, self._mismatch_table, self.l, mm, xp
-                )
-            return result.astype(x.dtype)
-
-        import cupy as cp
-        bx_packed = cp.ascontiguousarray(
-            _pack_windows_uint32(cp.asarray(self.base_index_windows(x)), cp)
-        )
-        mm = self._min_matches
-        result = _fused_diagonal_packed_gpu(
-            bx_packed, self._mismatch_table, self.l, mm
-        )
-        if self.include_rc:
-            bx_rc_packed = cp.ascontiguousarray(
-                _pack_windows_uint32(
-                    cp.asarray(self.base_index_windows(reverse_complement(x))), cp
-                )
-            )
-            result = result + _fused_cross_diagonal_packed_gpu(
-                bx_packed, bx_rc_packed, self._mismatch_table, self.l, mm
-            )
-        return result.astype(x.dtype)
+            return _fused_cross_diagonal_packed_gpu(
+                cp.ascontiguousarray(bx), cp.ascontiguousarray(by), *args)
+        return _fused_cross_diagonal_packed_mlx(bx, by, *args)

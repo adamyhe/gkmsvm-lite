@@ -55,6 +55,15 @@ class GkmKernel(ABC):
 
     _DIAG_CHUNK_THRESHOLD = 10000
 
+    @property
+    def base(self) -> GkmKernel:
+        """Kernel giving the raw values: self, or an RBF kernel's base kernel."""
+        return self
+
+    def finish(self, k_norm):
+        """Kernel value from the base kernel's normalized value (identity; RBF: exp)."""
+        return k_norm
+
     def pairwise(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
         """Compute kernel values between all pairs of sequences in x and y.
 

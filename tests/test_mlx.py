@@ -269,18 +269,15 @@ class TestMLXKernelPairwise:
             to_cpu(mlx_result), cpu_result, atol=1e-5,
         )
 
-    def test_pairwise_from_indices_packed(self):
+    def test_raw_packed(self):
         from gkmsvm.kernels.direct import DirectGkmKernel
 
         kernel = DirectGkmKernel(l=7, k=5, include_rc=False, normalize=False)
         seqs_a = np.stack([one_hot_encode(s) for s in _make_seqs(3, 15, seed=45)])
         seqs_b = np.stack([one_hot_encode(s) for s in _make_seqs(5, 15, seed=46)])
 
-        bx = kernel.base_index_windows(seqs_a)
-        by = kernel.base_index_windows(seqs_b)
-        cpu_result = kernel.pairwise_from_indices(bx, by)
-
-        mlx_result = kernel.pairwise_from_indices(to_mlx(bx), to_mlx(by))
+        cpu_result = kernel.raw_packed(kernel.pack(seqs_a), kernel.pack(seqs_b))
+        mlx_result = kernel.raw_packed(kernel.pack(to_mlx(seqs_a)), kernel.pack(to_mlx(seqs_b)))
 
         np.testing.assert_allclose(
             to_cpu(mlx_result), cpu_result, atol=1e-5,
@@ -504,7 +501,6 @@ class TestMaskedMLX:
     def test_join_matches_cpu(self, kernel_type, params, col_tile, monkeypatch):
         import gkmsvm.kernels.masked as masked
         from gkmsvm.codec import reverse_complement
-        from gkmsvm.kernels.direct import _pack_windows_cpu
 
         monkeypatch.setattr(masked, "_METAL_COL_TILE", col_tile)
         kernel = _make_model(20, 60, kernel_type, params).kernel
@@ -513,7 +509,7 @@ class TestMaskedMLX:
         Y = np.stack([one_hot_encode(s) for s in _make_seqs(30, 60, seed=4)])
 
         def pack(A):
-            return _pack_windows_cpu(np.ascontiguousarray(kernel.base_index_windows(A)))
+            return kernel.pack(A)
 
         plan = kernel._join_plan()
         args = (pack(X), pack(Y), plan, pack(reverse_complement(Y)))
@@ -535,3 +531,39 @@ class TestMaskedMLX:
         model.mlx()
         got = np.array(model(mx.array(X))).ravel()
         np.testing.assert_allclose(got, cpu, atol=1e-5)
+
+
+class TestLmerIndexMLX:
+    """Cached l-mer index on the device vs the CPU index."""
+
+    @pytest.mark.parametrize("which", ["t0", "t2_l9", "t2_l11"])
+    def test_index_matches_cpu(self, which):
+        from gkmsvm.codec import reverse_complement
+        from gkmsvm.kernels.direct import DirectGkmKernel
+        from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
+        from gkmsvm.kernels.lmer_index import LmerIndex
+        from gkmsvm.kernels.packed import PAD_WINDOW
+
+        kernel = {
+            "t0": lambda: DirectGkmKernel(8, 5),
+            "t2_l9": lambda: EstTruncGkmKernel(9, 6, d=3),
+            "t2_l11": lambda: EstTruncGkmKernel(11, 7, d=3),
+        }[which]()
+        X = np.stack([one_hot_encode(s) for s in _make_seqs(21, 80, seed=3)])
+        Y = np.stack([one_hot_encode(s) for s in _make_seqs(30, 60, seed=4)])
+        X[2, :, 5:45] = Y[9, :, 10:50]  # shared subsequence
+        index = LmerIndex(kernel, kernel.pack(Y), kernel.pack(reverse_complement(Y)))
+        bx = kernel.pack(X)
+        bx[1, :3] = PAD_WINDOW
+        ref = index.pairwise(bx)
+        got = np.array(index.pairwise(to_mlx(bx)))
+        np.testing.assert_allclose(got, ref, rtol=1e-6, atol=1e-6)
+
+    def test_rbf_model_scores_match_cpu(self):
+        model = _make_model(40, 60, "gkmrbf", {"L": 9, "k": 6, "d": 3, "gamma": 2.0})
+        X = np.stack([one_hot_encode(s) for s in _make_seqs(25, 60, seed=7)])
+        cpu = np.asarray(model(X)).ravel()
+        assert model._sv_index() is not None
+        model.mlx()
+        got = np.array(model(to_mlx(X))).ravel()
+        np.testing.assert_allclose(got, cpu, atol=1e-4)
