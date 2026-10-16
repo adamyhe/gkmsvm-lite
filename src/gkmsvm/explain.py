@@ -397,6 +397,33 @@ def gkmexplain(
             f"(or 0/1/2), got {mode!r}"
         )
 
+    if is_mlx(x):
+        # Metal can't accumulate in float64, which the completeness axiom needs
+        warnings.warn(
+            "GkmExplain does not have an MLX kernel — falling back to CPU. "
+            "This will be slower than MLX inference.",
+            stacklevel=2,
+        )
+        from gkmsvm.backend import to_cpu, to_mlx
+
+        # A CPU copy of the model, kept with the model's caches so its packed
+        # SVs, norms and l-mer weights are built once
+        cpu_model = model._sv_cache.get("cpu_model")
+        if cpu_model is None:
+            cpu_model = GkmSVM(
+                to_cpu(model.support_sequences),
+                to_cpu(model.coefficients),
+                model.bias,
+                model.kernel_type,
+                model._kernel_params,
+                sv_chunk_size=model.sv_chunk_size,
+            )
+            cpu_model.use_lmer_index = model.use_lmer_index
+            cpu_model.use_lmer_table = model.use_lmer_table
+            model._sv_cache["cpu_model"] = cpu_model
+        return to_mlx(gkmexplain(cpu_model, to_cpu(x), mode=resolved,
+                                 batch_size=batch_size, verbose=verbose))
+
     if resolved == "importance":
         hyp = gkmexplain(
             model, x, mode="hypothetical",
@@ -408,27 +435,6 @@ def gkmexplain(
 
     x = model._match_device(x)
 
-    if is_mlx(x):
-        warnings.warn(
-            "GkmExplain does not have an MLX kernel — falling back to CPU. "
-            "This will be slower than MLX inference.",
-            stacklevel=2,
-        )
-        from gkmsvm.backend import to_cpu, to_mlx
-        cpu_model = GkmSVM(
-            to_cpu(model.support_sequences),
-            to_cpu(model.coefficients),
-            model.bias,
-            model.kernel_type,
-            model._kernel_params,
-            sv_chunk_size=model.sv_chunk_size,
-        )
-        return to_mlx(
-            gkmexplain(
-                cpu_model, to_cpu(x), mode=resolved,
-                batch_size=batch_size, verbose=verbose,
-            )
-        )
 
     kernel = model.kernel
     base = kernel.base

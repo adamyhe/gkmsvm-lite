@@ -567,3 +567,27 @@ class TestLmerIndexMLX:
         model.mlx()
         got = np.array(model(to_mlx(X))).ravel()
         np.testing.assert_allclose(got, cpu, atol=1e-4)
+
+
+def test_gkmexplain_mlx_reuses_cpu_model():
+    """The MLX fallback keeps one CPU copy of the model (its caches survive calls)."""
+    import warnings
+
+    from gkmsvm.backend import is_mlx, to_mlx
+    from gkmsvm.explain import gkmexplain
+
+    rng = np.random.default_rng(0)
+    sv = np.eye(4)[rng.integers(0, 4, (30, 25))].transpose(0, 2, 1).astype(np.float32)
+    model = GkmSVM(sv, rng.normal(size=30).astype(np.float32), 0.1, "gkm_esttrunc",
+                   {"L": 8, "k": 5, "d": 2})
+    x = np.eye(4)[rng.integers(0, 4, (2, 25))].transpose(0, 2, 1).astype(np.float32)
+    expected = gkmexplain(model, x, mode="hypothetical")
+    model.mlx()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        first = gkmexplain(model, to_mlx(x), mode="hypothetical")
+        cpu_model = model._sv_cache["cpu_model"]
+        second = gkmexplain(model, to_mlx(x), mode="importance")
+    assert is_mlx(first) and model._sv_cache["cpu_model"] is cpu_model
+    np.testing.assert_allclose(np.array(first), expected, rtol=1e-6)
+    np.testing.assert_allclose(np.array(second), expected * x, rtol=1e-6)
