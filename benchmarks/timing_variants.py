@@ -36,6 +36,12 @@ thread). LS-GKM's -T splits each sequence's kernel sum across threads, which
 costs more than it saves on short sequences: on the 10-mers of the deltaSVM
 build, -T 16 is several times slower than -T 1.
 
+With --mlsgkm-bin, mLS-GKM (a multithreaded LS-GKM fork; gkmpredict -t N -T 1
+-D, gkmexplain -m 5 -t N -D) runs at every --cpu-threads count too, and its
+rows' max_abs_diff compare it with the first C run (LS-GKM). Build it with:
+  git clone https://github.com/harmstonlab/mLS-GKM
+  cd mLS-GKM/src && make clean && make && make install   # binaries in mLS-GKM/bin
+
 Usage:
   python benchmarks/timing_variants.py --device cuda
   python benchmarks/timing_variants.py --device cuda --lsgkm-bin ~/lsgkm/bin
@@ -56,7 +62,9 @@ import numpy as np
 
 from _common import (
     LSGKM_THREADS,
+    MLSGKM,
     RESULTS,
+    c_threads_opts,
     emit_result,
     gpu_pool_mb,
     gpu_sync,
@@ -64,6 +72,8 @@ from _common import (
     lsgkm_default_threads,
     lsgkm_has_option,
     lsgkm_version,
+    mlsgkm_binary,
+    mlsgkm_version,
     run_measured,
     set_cpu_threads,
     warm_jit_cache,
@@ -219,9 +229,11 @@ def _read_scores(path: Path, col: int = 1) -> np.ndarray:
         return np.array([float(line.rstrip("\n").split("\t")[col]) for line in f])
 
 
-def _lsgkm_runs(method: str, bins: dict, n_thr: int, work: Path, model: str) -> list[tuple]:
-    """Commands for one method on n_thr threads as (cmd, output path) pairs."""
-    opts = ["-T", str(n_thr)] if n_thr > 1 else []
+def _lsgkm_runs(method: str, impl: str, bins: dict, n_thr: int, work: Path,
+                model: str) -> list[tuple]:
+    """Commands for one method of a C implementation (LS-GKM or mLS-GKM) on
+    n_thr threads as (cmd, output path) pairs."""
+    opts = c_threads_opts(impl, n_thr)
 
     def predict(fa, out):
         return [bins["gkmpredict"], *opts, str(work / fa), model, str(work / out)], work / out
@@ -273,6 +285,9 @@ def main():
                         choices=LSGKM_THREADS,
                         help="LS-GKM -T where supported, and gkmsvm-lite CPU threads")
     parser.add_argument("--no-lsgkm", action="store_true", help="Skip LS-GKM runs")
+    parser.add_argument("--mlsgkm-bin", default=None,
+                        help="mLS-GKM bin directory (source build); adds mLS-GKM runs at "
+                        "each --cpu-threads count")
     parser.add_argument("--no-warm-jit", action="store_true",
                         help="Skip compiling kernels before the timed runs (for smoke tests; "
                         "the first run of each kernel then includes compiling it)")
@@ -297,28 +312,38 @@ def main():
     if bad:
         parser.error(f"unknown method(s): {', '.join(bad)}")
 
-    bins, threads = {}, {}
+    cpu_threads = ([int(t) for t in args.cpu_threads.split(",")] if args.cpu_threads
+                   else list(dict.fromkeys([lite_threads, 1])))
+    if any(t not in LSGKM_THREADS for t in cpu_threads):
+        parser.error(f"--cpu-threads must be from {LSGKM_THREADS}")
+
+    # C implementations: name -> (binaries, CPU thread counts for each binary)
+    need = {"gkmpredict"} | ({"gkmexplain"} if "GkmExplain" in args.methods else set())
+    c_impls = {}
     if not args.no_lsgkm:
-        for name in ("gkmpredict", "gkmexplain"):
-            bins[name] = lsgkm_binary(name, args.conda_env, args.lsgkm_bin)
-            threads[name] = bool(bins[name]) and lsgkm_has_option(bins[name], "-T")
-        need = {"gkmpredict"} | ({"gkmexplain"} if "GkmExplain" in args.methods else set())
+        bins = {n: lsgkm_binary(n, args.conda_env, args.lsgkm_bin)
+                for n in ("gkmpredict", "gkmexplain")}
         missing = [n for n in need if not bins[n]]
         if missing:
             where = f"conda env '{args.conda_env}'" + (f" or {args.lsgkm_bin}" if args.lsgkm_bin else "")
             sys.exit(f"{', '.join(missing)} not found in {where}. Build lsgkm from source "
                      "and pass --lsgkm-bin, or use --no-lsgkm.")
-        print(f"LS-GKM: {bins}  -T: {threads}")
+        # LS-GKM's -T exists in some builds only; others run on 1 thread
+        c_impls["LS-GKM"] = (bins, {n: cpu_threads if b and lsgkm_has_option(b, "-T") else [1]
+                                    for n, b in bins.items()})
+    if args.mlsgkm_bin:
+        bins = {n: mlsgkm_binary(n, args.mlsgkm_bin) for n in ("gkmpredict", "gkmexplain")}
+        missing = [n for n in need if not bins[n]]
+        if missing:
+            sys.exit(f"{', '.join(missing)} not found in {args.mlsgkm_bin}")
+        c_impls[MLSGKM] = (bins, {n: cpu_threads for n in bins})
+    for impl, (bins, thr) in c_impls.items():
+        print(f"{impl}: {bins}  threads: {thr}")
 
     work = Path(tempfile.mkdtemp(prefix="timing_variants_"))
     print(f"Work dir: {work}")
     info = _prepare(args, work)
     print(f"{info['n_variants']:,} variants, model {Path(info['model']).name}")
-
-    cpu_threads = ([int(t) for t in args.cpu_threads.split(",")] if args.cpu_threads
-                   else list(dict.fromkeys([lite_threads, 1])))
-    if any(t not in LSGKM_THREADS for t in cpu_threads):
-        parser.error(f"--cpu-threads must be from {LSGKM_THREADS}")
     # (device, CPU threads) for each gkmsvm-lite run
     lite_runs = [("cpu", t) for t in cpu_threads] + ([("cuda", lite_threads)]
                                                       if args.device == "cuda" else [])
@@ -329,29 +354,38 @@ def main():
         print(f"\n── {method} ──")
         ref_scores = None
         binary = "gkmexplain" if method == "GkmExplain" else "gkmpredict"
-        lsgkm_threads = ([] if args.no_lsgkm or method == "deltaSVM scoring"
-                         else cpu_threads if threads[binary] else [1])
-        for n_thr in lsgkm_threads:
+        c_runs = ([] if method == "deltaSVM scoring" else
+                  [(impl, bins, t) for impl, (bins, thr) in c_impls.items() for t in thr[binary]])
+        for impl, bins, n_thr in c_runs:
+            # Some C runs take an hour (LS-GKM -T 16 on the deltaSVM l-mers)
+            print(f"  {impl} ({n_thr} thread{'s' if n_thr > 1 else ''}) running...", flush=True)
             wall, peak, status = 0.0, 0.0, "ok"
-            for cmd, _ in _lsgkm_runs(method, bins, n_thr, work, info["model"]):
+            for cmd, _ in _lsgkm_runs(method, impl, bins, n_thr, work, info["model"]):
                 m = run_measured(cmd, timeout=args.timeout)
                 wall += m.wall_s
                 peak = max(peak, m.peak_rss_mb or 0.0)
                 if m.status != "ok":
                     status = m.status
-                    print(f"  LS-GKM {m.status}: {m.stderr[-300:]}")
+                    print(f"  {impl} {m.status}: {m.stderr[-300:]}")
                     break
-            if status == "ok" and ref_scores is None:
-                ref_scores = _lsgkm_scores(method, work, info["alt_base"])
+            diff = None
+            if status == "ok":
+                scores = _lsgkm_scores(method, work, info["alt_base"])
+                if ref_scores is None:  # the first C run is the reference
+                    ref_scores = scores
+                else:
+                    diff = float(np.abs(scores - ref_scores).max())
             n = len(_nonredundant_lmers()) if method == "deltaSVM" else info["n_variants"]
             rows.append({
-                "method": method, "implementation": "LS-GKM", "device": "cpu",
+                "method": method, "implementation": impl, "device": "cpu",
                 "threads": n_thr, "n_items": n, "status": status,
                 "wall_s": wall, "compute_s": wall, "peak_rss_mb": peak,
-                "gpu_pool_mb": None, "max_abs_diff": None,
+                "gpu_pool_mb": None, "max_abs_diff": diff,
             })
-            print(f"  LS-GKM ({n_thr} thread{'s' if n_thr > 1 else ''}): {wall:.1f}s  "
-                  f"peak {peak:.0f} MB  [{status}]")
+            print(f"  {impl} ({n_thr} thread{'s' if n_thr > 1 else ''}): {wall:.1f}s  "
+                  f"peak {peak:.0f} MB"
+                  + (f", max|Δ| vs first C run {diff:.1e}" if diff is not None else "")
+                  + f"  [{status}]")
 
         for device, n_thr in lite_runs:
             spec = {"method": method, "device": device, "model": info["model"],
@@ -392,7 +426,8 @@ def main():
               batch_size=args.batch_size,
               lite_cpu_threads=",".join(str(t) for t in cpu_threads),
               lsgkm=None if args.no_lsgkm else lsgkm_version(args.conda_env),
-              gkmpredict=bins.get("gkmpredict"), gkmexplain=bins.get("gkmexplain"))
+              mlsgkm=mlsgkm_version(args.mlsgkm_bin),
+              binaries=json.dumps({impl: bins for impl, (bins, _) in c_impls.items()}))
     if args.keep_work:
         print(f"Kept {work}")
     else:

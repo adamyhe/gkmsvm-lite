@@ -89,6 +89,25 @@ Running `gkmexplain` with no arguments prints its options. `timing_variants.py` 
 
 The benchmarks only execute LS-GKM binaries as separate processes and never link against them, so LS-GKM's GPL v3 license doesn't apply to gkmsvm-lite (MIT).
 
+## mLS-GKM baseline
+
+[mLS-GKM](https://github.com/harmstonlab/mLS-GKM) (Howard & Harmston 2026, [arXiv:2608.20576](https://arxiv.org/abs/2608.20576)) extends LS-GKM with multi-class models and, for prediction and `gkmexplain`, worker threads across sequences (`-t`). LS-GKM's `-T` instead splits each sequence's kernel sum, which gains little on short sequences (or loses: 3,773 s at `-T 16` against 684 s at `-T 1` for the deltaSVM build), so mLS-GKM is the multithreaded C baseline. It reads LS-GKM model files. Build it from source (the repository also holds prebuilt binaries; rebuild them):
+
+```bash
+git clone https://github.com/harmstonlab/mLS-GKM.git
+cd mLS-GKM/src
+make clean && make && make install   # binaries in ../bin
+```
+
+and pass its `bin` directory:
+
+```bash
+make -C benchmarks fig1b fig1c s2 MLSGKM_BIN=<path>/mLS-GKM/bin
+bash benchmarks/run.sh --mlsgkm-bin <path>/mLS-GKM/bin
+```
+
+With it, 1C adds mLS-GKM rows at every CPU thread count (`gkmpredict -D -t N -T 1`, `gkmexplain -D -m 5 -t N`), S2 adds its `gkmpredict` at `THREADS`, and 1B adds `t_mlsgkm_infer` (prediction with the LS-GKM-trained model). Training stays LS-GKM's `gkmtrain`. 1C's mLS-GKM rows record `max_abs_diff` against LS-GKM's output, a check that both compute the same scores.
+
 ## `dev/`
 
 Experiments that don't feed a figure: the CUDA masked-join ablation, the Nanog replication, and SVR and caQTL training. Finished experiments are deleted once their result is recorded (the earlier solver comparisons, the Nyström landmark sweep and the mask-join prototypes are in git history). Run them from the repo root, e.g. `python benchmarks/dev/replicate_nanog.py`.

@@ -134,3 +134,11 @@ def test_weighted_with_n_uses_onehot_path():
     ref = CenterWeightedGkmKernel(8, 5, M=3, H=2.0)
     ref.use_masked = False
     np.testing.assert_allclose(compute_gram(kernel, X), ref.pairwise(X, X), rtol=1e-10)
+
+
+def test_applies_dense_neighborhoods():
+    """Large neighborhoods qualify only over columns with >= 4 windows per l-mer."""
+    k = CenterWeightedGkmKernel(11, 7, M=3, H=2.0)  # 25,774 neighbors
+    assert not lmer_index.applies(k)
+    assert not lmer_index.applies(k, n_windows=3 * 4**11)
+    assert lmer_index.applies(k, n_windows=4 * 4**11)
