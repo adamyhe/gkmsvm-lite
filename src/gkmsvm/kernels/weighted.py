@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 from numba import njit, prange
 
-from gkmsvm.backend import get_array_module, get_strides, to_cpu
+from gkmsvm.backend import float_dtype, get_array_module, get_strides, to_cpu
 from gkmsvm.codec import reverse_complement
 from gkmsvm.kernels.packed import PackedGkmKernel
 from gkmsvm.kernels.rbf import RbfKernel
@@ -246,6 +246,7 @@ class CenterWeightedGkmKernel(PackedGkmKernel):
             self._pattern_weights(), self.l, True), bx)
 
     def _raw_pairwise_onehot(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        x, y = x.astype(float_dtype(x)), y.astype(float_dtype(y))
         xp = get_array_module(x)
         pw = xp.asarray(self._pos_weights).astype(x.dtype)
         y_rc = reverse_complement(y) if self.include_rc else None
@@ -265,6 +266,7 @@ class CenterWeightedGkmKernel(PackedGkmKernel):
         return parts[0] if len(parts) == 1 else xp.concatenate(parts, axis=1)
 
     def _raw_diagonal_onehot(self, x: np.ndarray) -> np.ndarray:
+        x = x.astype(float_dtype(x))
         xp = get_array_module(x)
         pw = xp.asarray(self._pos_weights).astype(x.dtype)
         wx = self._onehot_windows(x)

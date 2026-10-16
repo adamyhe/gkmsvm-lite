@@ -47,7 +47,7 @@ def load_r_gkmsvm_model(
         svseq_path: Path to ``_svseq.fa`` for the two-file format.
             If *path* ends with ``_svalpha.out`` and this is not given,
             the loader looks for a sibling ``_svseq.fa``.
-        dtype: Array dtype for model weights.
+        dtype: dtype of the one-hot support vectors. Coefficients are float64 (float32 on MLX) whatever it is.
         sv_chunk_size: ``sv_chunk_size`` of the model (SV chunks in GkmExplain).
         device: ``"cpu"`` (default), ``"cuda"``, ``"mlx"``, or ``"auto"``.
 

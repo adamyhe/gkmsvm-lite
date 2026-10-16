@@ -287,7 +287,7 @@ def _fit(X, y, solver, *, C, kernel_type, l, k, d, gamma, M, H, include_rc,
         sv_idx, coefs, bias = clf.support_, clf.dual_coef_[0], float(clf.intercept_[0])
 
     sv_seqs = to_cpu(X)[sv_idx]
-    coefs = np.asarray(coefs).astype(sv_seqs.dtype)
+    coefs = np.asarray(coefs, dtype=np.float64)
     if verbose:
         print(f"Training complete: {len(sv_idx)} support vectors "
               f"({int((coefs > 0).sum())} positive coefficients)")

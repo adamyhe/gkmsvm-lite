@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from gkmsvm.backend import get_array_module, to_cpu
+from gkmsvm.backend import float_dtype, get_array_module, is_mlx, to_cpu
 from gkmsvm.kernels.packed import PAD_WINDOW
 from gkmsvm.kernels.rbf import RbfKernel
 from gkmsvm.svm import GkmSVM
@@ -90,7 +90,7 @@ def _ism_packed(model, x):
     rows = max(1, rows)
     parts = [fn(model, x[s:s + rows], table) for s in range(0, B, rows)]
     out = parts[0] if len(parts) == 1 else xp.concatenate(parts, axis=0)
-    return out.astype(x.dtype)
+    return out.astype(float_dtype(out))
 
 
 # Mutant windows built per block of sequences
@@ -244,4 +244,4 @@ def _ism_mutants(model, x):
     scores = to_cpu(model(mut.reshape(B * 4 * L, C, L), batch_size=_MUTANT_BATCH))
     delta = scores.reshape(B, 4, L) - to_cpu(model(x_np)).reshape(B, 1, 1)
     delta[x_np.astype(bool)] = 0  # the reference base itself
-    return xp.asarray(delta.astype(x_np.dtype))
+    return xp.asarray(delta.astype(np.float32 if is_mlx(x) else np.float64))

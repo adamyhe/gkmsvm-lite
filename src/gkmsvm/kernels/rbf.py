@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from gkmsvm.backend import get_array_module
+from gkmsvm.backend import float_dtype, get_array_module
 from gkmsvm.kernels.base import GkmKernel
 from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
 
@@ -35,7 +35,7 @@ class RbfKernel(GkmKernel):
         self, x: np.ndarray, *, chunk_size: int | None = None
     ) -> np.ndarray:
         xp = get_array_module(x)
-        return xp.ones(x.shape[0], dtype=x.dtype)
+        return xp.ones(x.shape[0], dtype=float_dtype(x))
 
 
 class RbfGkmKernel(RbfKernel):

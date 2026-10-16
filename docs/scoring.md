@@ -143,7 +143,7 @@ rc_x = reverse_complement(x)
 
 score = model(x).item()
 rc_score = model(rc_x).item()
-assert abs(score - rc_score) < 1e-5  # float32 inputs
+assert abs(score - rc_score) < 1e-10  # float64 scores
 ```
 
 RC equivalence is on by default and matches LS-GKM's `norc=0` setting. Models loaded from LS-GKM files respect the `norc` header if present.

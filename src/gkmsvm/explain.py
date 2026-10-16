@@ -422,7 +422,7 @@ def gkmexplain(
             cpu_model.use_lmer_table = model.use_lmer_table
             model._sv_cache["cpu_model"] = cpu_model
         return to_mlx(gkmexplain(cpu_model, to_cpu(x), mode=resolved,
-                                 batch_size=batch_size, verbose=verbose))
+                                 batch_size=batch_size, verbose=verbose).astype(np.float32))
 
     if resolved == "importance":
         hyp = gkmexplain(
@@ -503,7 +503,7 @@ def gkmexplain(
                              result[b0:b0 + batch_size], s1 - s0, packed_sv.shape[0], l,
                              min_matches, is_perturbation)
 
-    return result.astype(x.dtype)
+    return result
 
 
 def _explain_lmer(model, x, table_a, table_b, dmax, perturbation, gamma, batch_size,
@@ -581,7 +581,7 @@ def _explain_lmer(model, x, table_a, table_b, dmax, perturbation, gamma, batch_s
         parts.append(_explain_index_cpu(packed_x, inv_dx, index.offsets, index.ids,
                                         np.ascontiguousarray(w), masks, levels, table_a,
                                         table_b, l, seqlen, perturbation, n_split))
-    out = np.concatenate(parts).astype(x_cpu.dtype)
+    out = np.concatenate(parts)
     return out if xp is np else xp.asarray(out)
 
 

@@ -56,7 +56,7 @@ src/gkmsvm/
 
 - Python >=3.10, NumPy, Numba >=0.57, scikit-learn, tqdm. CuPy >=12 optional (`[gpu]` extra). MLX >=0.10 optional (`[mlx]` extra)
 - Array format: `[batch, 4, length]` one-hot DNA, channel order A=0/C=1/G=2/T=3
-- Output: `[batch, 1]` floating-point margin scores
+- Output: `[batch, 1]` margin scores. Precision doesn't follow the input: scores, ISM, attributions, Gram matrices, coefficients, cached norms and deltaSVM weights are float64 on CPU and CUDA, float32 on MLX (`backend.float_dtype`; `DeviceModel._FLOAT_ARRAYS` keep that across device moves, so moving to MLX rounds them). One-hot arrays keep the caller's dtype (float32 by default), which only sets their memory
 - Arrays are numpy.ndarray (CPU), cupy.ndarray (NVIDIA GPU), or mlx.core.array (Apple GPU)
 - `model.cuda()` / `model.mlx()` / `model.cpu()` moves arrays between devices (`backend.DeviceModel`, shared by `GkmSVM` and `DeltaSVM`)
 - Kernel normalization on by default, RC equivalence on by default
@@ -106,6 +106,6 @@ src/gkmsvm/
 - Original gkmSVM (`.gkmmodel`) uses opposite sign convention for bias vs LS-GKM. Use `load_classic_model()` not `load_lsgkm_model()`.
 - `-t 4`/`-t 5` (wgkm/wgkmrbf) require M and H parameters. They use the masked join with per-mask weights; N agrees with nothing, which packing (N as A) can't express. Inputs with N positions use the per-position match path (chunked over columns to `_MATCH_BYTES`). SVs with N (`GkmSVM._sv_n_rows()`; ENCFF579AOX has 4) are split off: the other SVs stay packed, the N rows' columns come from `raw_packed_n` (a CPU pair loop over agreement bits with per-window N masks), and the `-t 4` l-mer table adds their windows only for masks that avoid their Ns.
 - LS-GKM C is GPL v3 — cannot wrap or link against it (gkmsvm-lite is MIT).
-- GPU float32 diagonal causes <3e-3 score difference vs CPU float64.
+- MLX computes in float32 (Metal has no float64), so its scores differ from CPU at the float32 level; MLX Gram tiles are normalized on the host in float64.
 - Beer lab `deltasvm.pl` drops the first weight-file line as a bias header; with gkmpredict output on `nrkmers.py` l-mers that gives AAAAAAAAAA/TTTTTTTTTT raw score 0 (bias included, so -bias in a `to_deltasvm` table). Published deltaSVM scores from that script (e.g. the GkmExplain paper) include this; `dsqtl_auprc.deltasvm_pl()` reproduces it.
 - The gkmexplain repo's summed deltaSVM AUPRCs (README 0.18943 / 0.18795) cover negsets 1, 3, 5 only (`combine_folds.sh` cuts the wrong columns). Five-model sums from its output files are 0.19021 / 0.18997 (`PAPER_SUM_AUPRC`). Reproduction write-up: `docs/validation.md`.

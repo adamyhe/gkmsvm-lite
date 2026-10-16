@@ -54,7 +54,7 @@ def load_lsgkm_model(
 
     Args:
         path: Path to the .model.txt or .model.txt.gz file.
-        dtype: Array dtype for model weights.
+        dtype: dtype of the one-hot support vectors. Coefficients are float64 (float32 on MLX) whatever it is.
         sv_chunk_size: ``sv_chunk_size`` of the model (SV chunks in GkmExplain).
         device: ``"cpu"`` (default), ``"cuda"``, ``"mlx"``, or ``"auto"``
             (CuPy if available, else MLX, else CPU).
