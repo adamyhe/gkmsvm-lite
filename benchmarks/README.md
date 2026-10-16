@@ -33,6 +33,7 @@ Timed runs each execute in their own process, so the reported peak memory is tha
 | S1 | Models trained with gkmsvm-lite vs the paper's LS-GKM models | `s1` | `dsqtl_auprc.py` | `dsqtl_retrained_*.tsv` |
 | S2 | Prediction throughput vs number of SVs (`-t 2` l-mer table, `-t 3` l-mer index, masked join, LS-GKM) | `s2` | `throughput_sweep.py` | `throughput.tsv` |
 | S3 | Training time, peak memory and held-out accuracy by solver (precomputed Gram, SMO, Nyström, LS-GKM), gkmsvm-lite on GPU and on CPU | `s3` | `training_memory.py` | `training_memory.tsv`, `training_memory_cpu.tsv` |
+| S3B | Large-N scaling on LS-GKM's own design (Lee 2016, Fig. 1): H1-hESC CTCF ChIP-seq vs GC/repeat-matched hg19 windows, 5k–90k, LS-GKM with 100 MB and 8 GB caches. Not part of `paper`: up to a day | `s3b` | `ctcf_data.py`, `training_memory.py --data ctcf` | `training_memory_ctcf.tsv` |
 | S4 | GkmExplain completeness | `s4` | `completeness.py` | `completeness.tsv` |
 | S5 | DART-Eval Tasks 4 and 5 with ENCODE models | `s5` | `dart_eval.py` | `dart_task4_*.tsv`, `dart_task5_dsqtl_*.tsv` |
 
@@ -88,6 +89,16 @@ bash benchmarks/run.sh --lsgkm-bin <path>/lsgkm/bin fig1c
 Running `gkmexplain` with no arguments prints its options. `timing_variants.py` passes `-T` only when that list includes it, otherwise LS-GKM runs single-threaded, and the thread count goes into the result file.
 
 The benchmarks only execute LS-GKM binaries as separate processes and never link against them, so LS-GKM's GPL v3 license doesn't apply to gkmsvm-lite (MIT).
+
+## Large-N scaling (S3B)
+
+LS-GKM's scaling figure (Lee 2016, *Bioinformatics* 32:2196, Fig. 1; Supplementary Methods 2–3) trained on eight subsamples of H1-hESC CTCF ChIP-seq from 5k to 90k sequences, with gkmtrain's default 100 MB and an 8 GB kernel cache. `ctcf_data.py` rebuilds that set:
+
+- **Positives:** ENCODE's January 2011 SPP optimal peaks for `wgEncodeBroadHistoneH1hescCtcf` (55,782 peaks on hg19; the other H1-hESC CTCF set, from HAIB, has too few for 90k), as 300 bp windows centered on each summit. LS-GKM trained on the variable-length peaks; gkmsvm-lite trains on fixed-length windows.
+- **Negatives:** random hg19 windows without N that overlap no peak, matched to the positives' joint GC and repeat-fraction distribution (soft-masked repeats), as in the paper.
+- **Split:** chr1 and chr2 held out for testing.
+
+`make -C benchmarks s3b` builds the data (downloading hg19 if `dsqtl_auprc.py` hasn't) and runs `training_memory.py --data ctcf`. The precomputed Gram and Nyström are skipped once N × N float64 exceeds 75% of RAM; SMO runs at every size. LS-GKM at 90k can take most of a day, so `s3b` is not part of `paper`; the per-run timeout is 48 h.
 
 ## mLS-GKM baseline
 
