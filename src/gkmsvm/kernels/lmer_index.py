@@ -14,9 +14,9 @@ where a neighbor's weight depends on its mismatch count, and to the
 center-weighted kernel (-t 4, and -t 5 through its base), where it is e_k of
 the position weights on the agreeing positions (dmax = l - k). The
 neighborhood sum_{m <= dmax} C(l, m) 3^m must be at most MAX_NEIGHBORS (e.g.
-4,984 for l=11 d=3; 3,676 for weighted l=10 k=7), with l <= MAX_L. Above
-that, the per-window neighbor lookups cost about as much as the masked
-join (weighted l=11 k=7, 25,774 neighbors, measured even at 16k SVs).
+4,984 for l=11 d=3; 3,676 for weighted l=10 k=7), or DENSE_MAX_NEIGHBORS
+when the columns are dense enough that lookups return many hits (see
+applies()), with l <= MAX_L.
 """
 
 from __future__ import annotations
@@ -30,6 +30,14 @@ from gkmsvm.backend import to_cpu
 
 # Neighbors per query window above which the masked join is used instead
 MAX_NEIGHBORS = 8192
+# Larger neighborhoods (e.g. weighted l=11 k=7, 25,774) when each neighbor
+# lookup returns many hits: the index is then bound by the matching window
+# pairs, as any exact per-column method is. Measured on 300 bp queries,
+# wgkmrbf: tie with the join at 0.6-2 column windows per l-mer (4k-16k SVs),
+# 15 vs 4 seq/s at 10 (72k SVs); SMO columns (one query row each, ~0.3 per
+# l-mer at N=2,000) were 4-8x slower than the join, so they keep MAX_NEIGHBORS
+DENSE_MAX_NEIGHBORS = 32768
+DENSE_WINDOWS_PER_LMER = 4
 # 4^12 + 1 int64 offsets = 128 MB
 MAX_L = 12
 
@@ -41,7 +49,12 @@ def neighbor_count(l: int, dmax: int) -> int:
 
 
 def neighbor_masks(l: int, table: np.ndarray, dmax: int):
-    """XOR masks for every l-mer within dmax mismatches, and their mismatch counts."""
+    """XOR masks for every l-mer within dmax mismatches, and their mismatch counts.
+
+    Sorted by mask, so a window's neighbors u ^ mask share high bits in runs and
+    their offsets lookups stay near each other (1.5x faster queries at 25,774
+    neighbors and 72k SVs).
+    """
     masks, levels = [], []
     for m in range(dmax + 1):
         if table[m] == 0:
@@ -53,7 +66,9 @@ def neighbor_masks(l: int, table: np.ndarray, dmax: int):
                     x |= dlt << (2 * p)
                 masks.append(x)
                 levels.append(m)
-    return np.array(masks, dtype=np.uint32), np.array(levels, dtype=np.int32)
+    masks, levels = np.array(masks, dtype=np.uint32), np.array(levels, dtype=np.int32)
+    order = np.argsort(masks, kind="stable")
+    return masks[order], levels[order]
 
 
 def _dmax(kernel) -> int | None:
@@ -65,11 +80,19 @@ def _dmax(kernel) -> int | None:
     return None
 
 
-def applies(kernel) -> bool:
-    """Whether the index can serve this (base) kernel."""
+def applies(kernel, n_windows: int | None = None) -> bool:
+    """Whether the index can serve this (base) kernel.
+
+    n_windows: windows to be indexed (columns x window count, fwd + RC); with
+    at least DENSE_WINDOWS_PER_LMER per l-mer, neighborhoods up to
+    DENSE_MAX_NEIGHBORS qualify.
+    """
     dmax = _dmax(kernel)
-    return (dmax is not None and kernel.l <= MAX_L
-            and neighbor_count(kernel.l, dmax) <= MAX_NEIGHBORS)
+    if dmax is None or kernel.l > MAX_L:
+        return False
+    count = neighbor_count(kernel.l, dmax)
+    dense = n_windows is not None and n_windows >= DENSE_WINDOWS_PER_LMER * 4**kernel.l
+    return count <= (DENSE_MAX_NEIGHBORS if dense else MAX_NEIGHBORS)
 
 
 def index_neighbors(kernel):

@@ -81,7 +81,7 @@ def _ism_packed(model, x):
     rows = _BLOCK_BYTES // (8 * L * W * 4)
     if table is not None:
         fn = _ism_table
-    elif xp is np and model._sv_index() is not None and not len(model._sv_n_rows()):
+    elif xp is np and model._sv_index() is not None:
         fn = _ism_index
         rows = min(rows, model._MAX_SCORE_BYTES // (8 * S))
     else:
@@ -120,28 +120,35 @@ def _ism_index(model, x, _table=None):
 
     One fused pass per (position, sequence) adds the changed windows' hits to
     the reference row and reduces over SVs, so no [mutants, S] block exists.
+    SVs with N (weighted kernels) are outside the index and add their part
+    densely: [4, L, B, S_N] for the few of them.
     """
     kernel = model.kernel
     base = kernel.base
     index = model._sv_index()
     bx, bx_rc = base.pack_both(x)
     old, new, diag_ref, mut_diag = _mutants(base, x, bx, bx_rc)
-    ref = index.pairwise(bx)  # [B, S]
-    S = model.num_support_vectors
-
-    def inv_sqrt(d):
-        return 1 / np.sqrt(np.clip(np.asarray(d, dtype=np.float64), 1e-20, None))
-
-    if base.normalize:
-        inv_ds = inv_sqrt(model._sv_diag())
-        inv_dx = inv_sqrt(diag_ref)
-        inv_dmut = inv_sqrt(mut_diag)
-    else:
-        inv_ds, inv_dx, inv_dmut = np.ones(S), np.ones(x.shape[0]), np.ones(new.shape[:3])
+    inv_dx, inv_ds = model._inv_norms(diag_ref, x.shape[0])
+    inv_dmut = (np.ones(new.shape[:3]) if mut_diag is None
+                else 1 / np.sqrt(np.clip(np.asarray(mut_diag, dtype=np.float64), 1e-20, None)))
     gamma = kernel.gamma if isinstance(kernel, RbfKernel) else np.nan
-    ref_score = index.reduce(bx, inv_dx, inv_ds, model.coefficients, gamma)
-    out = index.mutants(old, new, ref, ref_score, inv_dx, inv_dmut, inv_ds, model.coefficients,
-                        gamma)
+    packed, n_rows = model._sv_split()
+    coef = model.coefficients
+    ref = index.pairwise(bx)  # [B, S_packed]
+    ref_score = index.reduce(bx, inv_dx, inv_ds[packed], coef[packed], gamma)
+    out = index.mutants(old, new, ref, ref_score, inv_dx, inv_dmut, inv_ds[packed],
+                        coef[packed], gamma)
+    if len(n_rows):
+        L, B, l = old.shape
+        windows = model._sv_n_windows()
+        ref_n = base.raw_packed_n(bx, *windows)  # [B, S_N]
+        old_n = base.raw_packed_n(old.reshape(L * B, l), *windows).reshape(L, B, -1)
+        new_n = base.raw_packed_n(new.reshape(4 * L * B, l), *windows).reshape(4, L, B, -1)
+        c_n, ds_n = coef[n_rows], inv_ds[n_rows]
+        k_mut = (ref_n + (new_n - old_n[None])) * inv_dmut[..., None] * ds_n
+        k_ref = ref_n * inv_dx[:, None] * ds_n
+        out = out + ((kernel.finish(k_mut) * c_n).sum(axis=3)
+                     - (kernel.finish(k_ref) * c_n).sum(axis=1))
     return out.transpose(2, 0, 1)
 
 

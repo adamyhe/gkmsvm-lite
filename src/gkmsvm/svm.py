@@ -316,6 +316,19 @@ class GkmSVM(DeviceModel):
             c["n_windows"] = tuple(parts)
         return c["n_windows"]
 
+    def _sv_split(self):
+        """(SV indices in the packed SVs' column order, _sv_n_rows()), on CPU."""
+        n_rows = self._sv_n_rows()
+        return self._sv_order()[:self.num_support_vectors - len(n_rows)], n_rows
+
+    def _inv_norms(self, diag_x, B):
+        """1 / sqrt(K(x, x)) [B] and 1 / sqrt(K(sv, sv)) [S] on CPU (ones without
+        normalization)."""
+        if diag_x is None:
+            return np.ones(B), np.ones(self.num_support_vectors)
+        return (1 / np.sqrt(np.clip(np.asarray(diag_x, dtype=np.float64), 1e-20, None)),
+                1 / np.sqrt(np.clip(to_cpu(self._sv_diag()).astype(np.float64), 1e-20, None)))
+
     def _join_sv_columns(self, packed_part, n_part):
         """[B, S] in SV order from the packed SVs' columns and the N rows' columns."""
         if not len(self._sv_n_rows()):
@@ -354,7 +367,8 @@ class GkmSVM(DeviceModel):
 
             packed = self._sv_packed()
             base = self.kernel.base
-            use = packed is not None and packed[0].shape[0] > 0 and lmer_index.applies(base)
+            n_windows = 0 if packed is None else sum(p.size for p in packed if p is not None)
+            use = n_windows > 0 and lmer_index.applies(base, n_windows)
             c["index"] = lmer_index.LmerIndex(base, *packed) if use else None
         return c["index"]
 
@@ -384,14 +398,14 @@ class GkmSVM(DeviceModel):
         diag_x = base.raw_diag_packed(bx, bx_rc) if base.normalize else None
         gamma = kernel.gamma if isinstance(kernel, RbfKernel) else np.nan
         index = self._sv_index()
-        if xp is np and index is not None and not len(self._sv_n_rows()):
+        if xp is np and index is not None:
             # Fused index query + reduction: no [B, S] block at all
-            if diag_x is None:
-                inv_dx, inv_ds = np.ones(x.shape[0]), np.ones(self.num_support_vectors)
-            else:
-                inv_dx = 1 / np.sqrt(np.clip(diag_x.astype(np.float64), 1e-20, None))
-                inv_ds = 1 / np.sqrt(np.clip(self._sv_diag().astype(np.float64), 1e-20, None))
-            out = index.reduce(bx, inv_dx, inv_ds, self.coefficients, gamma)
+            inv_dx, inv_ds = self._inv_norms(diag_x, x.shape[0])
+            packed, n_rows = self._sv_split()
+            out = index.reduce(bx, inv_dx, inv_ds[packed], self.coefficients[packed], gamma)
+            if len(n_rows):  # the few SVs with N, densely
+                k = base.raw_packed_n(bx, *self._sv_n_windows()) * inv_dx[:, None] * inv_ds[n_rows]
+                out = out + (kernel.finish(k) * self.coefficients[n_rows]).sum(axis=1)
             return out[:, None]
         raw = self._sv_raw(bx)
         if xp is np:
