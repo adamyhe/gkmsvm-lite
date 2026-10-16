@@ -59,7 +59,7 @@ def test_applies():
     assert lmer_index.applies(EstTruncGkmKernel(11, 7, d=3))
     assert not lmer_index.applies(DirectGkmKernel(11, 7))  # 31,714 neighbors per window
     assert not lmer_index.applies(EstTruncGkmKernel(13, 7, d=2))  # l > MAX_L
-    assert not lmer_index.applies(CenterWeightedGkmKernel(8, 5, M=3, H=2.0))
+    assert lmer_index.applies(CenterWeightedGkmKernel(8, 5, M=3, H=2.0))  # 1,000 neighbors
 
 
 MODELS = [
