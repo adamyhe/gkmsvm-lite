@@ -173,3 +173,37 @@ def test_ism_scores_mutants_without_index_path(kernel_type, params):
         mut[v, p] = 1
         expected = model(mut[None]) - model(X[b:b + 1])
         np.testing.assert_allclose(d[b, v, p], expected[0, 0], rtol=1e-9, atol=1e-12)
+
+
+@pytest.mark.parametrize("kernel_type, path", [
+    ("gkm_esttrunc", "table"), ("gkm_esttrunc", "index"), ("gkm_esttrunc", "masked"),
+    ("gkmrbf", "index"), ("gkmrbf", "masked"),
+])
+def test_ism_paths_match_mutant_scores(kernel_type, path, monkeypatch):
+    """Table, fused index and per-SV block paths equal score(mutant) - score(ref),
+    with RC, an N in the input, and blocks of one sequence and one position."""
+    import importlib
+
+    ism_mod = importlib.import_module("gkmsvm.ism")  # the package re-exports ism()
+
+    rng = np.random.default_rng(7)
+    sv = np.eye(4)[rng.integers(0, 4, (40, 30))].transpose(0, 2, 1)
+    model = GkmSVM(sv, rng.normal(size=40), 0.1, kernel_type,
+                   {"L": 8, "k": 5, "d": 2, "gamma": 1.5, "include_rc": True})
+    model.use_lmer_table = path == "table"
+    model.use_lmer_index = path != "masked"
+    x = np.eye(4)[rng.integers(0, 4, (3, 25))].transpose(0, 2, 1)
+    x[1, :, 12] = 0  # N
+    full = ism(model, x)
+    monkeypatch.setattr(ism_mod, "_BLOCK_BYTES", 1)
+    monkeypatch.setattr(GkmSVM, "_MAX_SCORE_BYTES", 1)
+    np.testing.assert_allclose(ism(model, x), full, rtol=1e-12, atol=1e-14)
+    monkeypatch.undo()
+
+    L = x.shape[2]
+    mut = np.broadcast_to(x[:, None, None], (3, 4, L, 4, L)).copy()
+    for p in range(L):
+        mut[:, :, p, :, p] = np.eye(4)
+    expected = (model(mut.reshape(-1, 4, L)).reshape(3, 4, L)
+                - model(x).reshape(3, 1, 1))
+    np.testing.assert_allclose(full, expected, rtol=1e-9, atol=1e-12)

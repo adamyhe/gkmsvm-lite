@@ -138,6 +138,64 @@ def _query_reduce_cpu(bx, offsets, ids, masks, weights, n_lmers, inv_dx, inv_ds,
     return out
 
 
+@njit(inline="always")
+def _add_hits(acc, row, sign, offsets, ids, masks, weights, n_lmers):
+    """acc[s] += sign * K_raw(row, s) for the packed windows in row."""
+    for i in range(row.shape[0]):
+        w = row[i]
+        for t in range(masks.shape[0]):
+            v = np.int64(w ^ masks[t])
+            if v >= n_lmers:  # padding window
+                continue
+            wt = sign * weights[t]
+            for e in range(offsets[v], offsets[v + 1]):
+                acc[ids[e]] += wt
+
+
+@njit(parallel=True, cache=True, fastmath={"nsz", "arcp", "contract", "reassoc"})
+def _query_mutants_cpu(old, new, ref, ref_score, offsets, ids, masks, weights, n_lmers,
+                       inv_dx, inv_dmut, inv_ds, coef, gamma, n_tasks):
+    """[4, L, B] ISM deltas: f(mutant) - ref_score[b], with
+    f = sum_s coef_s f(K_raw(mutant, s) inv_dmut inv_ds[s]) as in _query_reduce_cpu.
+
+    K_raw(mutant, s) = ref[b, s] + K_raw(new[v, p, b], s) - K_raw(old[p, b], s): old
+    [L, B, l] and new [4, L, B, l] hold the windows covering position p. A base
+    with the reference's windows and norm (the reference base) gets 0; an N
+    replaced by A keeps the forward windows (N packs as A) but not the norm.
+    """
+    L, B = old.shape[0], old.shape[1]
+    S = inv_ds.shape[0]
+    rbf = not np.isnan(gamma)
+    floor = np.exp(-gamma) if rbf else 1.0
+    out = np.zeros((4, L, B))
+    for task in prange(n_tasks):
+        d_old = np.zeros(S)
+        tmp = np.empty(S)
+        for item in range(task, L * B, n_tasks):
+            p, b = item // B, item % B
+            _add_hits(d_old, old[p, b], -1.0, offsets, ids, masks, weights, n_lmers)
+            for v in range(4):
+                # Window 0 always covers p
+                if new[v, p, b, 0] == old[p, b, 0] and inv_dmut[v, p, b] == inv_dx[b]:
+                    continue
+                tmp[:] = d_old
+                _add_hits(tmp, new[v, p, b], 1.0, offsets, ids, masks, weights, n_lmers)
+                scale = inv_dmut[v, p, b]
+                total = 0.0
+                if rbf:
+                    g = gamma * scale
+                    for j in range(S):
+                        total += coef[j] * np.exp(g * (ref[b, j] + tmp[j]) * inv_ds[j])
+                    total *= floor
+                else:
+                    for j in range(S):
+                        total += coef[j] * (ref[b, j] + tmp[j]) * inv_ds[j]
+                    total *= scale
+                out[v, p, b] = total - ref_score[b]
+            d_old[:] = 0.0
+    return out
+
+
 _CUDA_SRC = r"""
 extern "C" __global__ void lmer_index_query(
     const unsigned int* __restrict__ bx, int W, long long n_items,
@@ -238,6 +296,21 @@ class LmerIndex:
                                  np.ascontiguousarray(inv_ds, dtype=np.float64),
                                  np.ascontiguousarray(coef, dtype=np.float64), float(gamma),
                                  max(1, min(bx.shape[0], 4 * numba.get_num_threads())))
+
+    def mutants(self, old, new, ref, ref_score, inv_dx, inv_dmut, inv_ds, coef, gamma=np.nan):
+        """ISM deltas [4, L, B] on CPU (see _query_mutants_cpu), without [rows, S] blocks."""
+        import numba
+
+        L, B = old.shape[:2]
+        def f64(a):
+            return np.ascontiguousarray(a, dtype=np.float64)
+
+        return _query_mutants_cpu(
+            np.ascontiguousarray(old), np.ascontiguousarray(new), f64(ref), f64(ref_score),
+            self.offsets, self.ids, self.masks, self.weights, self.n_lmers, f64(inv_dx),
+            f64(inv_dmut),
+            f64(inv_ds), f64(coef), float(gamma),
+            max(1, min(L * B, 4 * numba.get_num_threads())))
 
     def _arrays(self, dev):
         if dev not in self._dev:

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from gkmsvm.backend import get_array_module, is_mlx, to_cpu
+from gkmsvm.backend import get_array_module, is_mlx, to_cpu, to_gpu, to_mlx
 from gkmsvm.codec import reverse_complement
 from gkmsvm.kernels.base import GkmKernel
 
@@ -121,6 +121,33 @@ class PackedGkmKernel(GkmKernel):
     def _brute_cross_diag(self, bx, by, dev):
         """[B]: sum of g over row b of bx against row b of by."""
         raise NotImplementedError
+
+    def raw_diag_mutants(self, bx, bx_rc, new, new_rc, diag):
+        """K_raw(mutant, mutant) [4, L, B] for every single-base substitution of bx.
+
+        new [4, L, B, l] (CPU): the forward windows covering position p after
+        substituting base v, padded with PAD_WINDOW (ism._packed_mutations).
+        new_rc: the same for the RC windows covering L-1-p, indexed by the
+        forward base v (None without RC). diag: K_raw(x, x) [B] of the
+        reference. This default builds every mutant's windows and calls
+        raw_diag_packed; the result is on bx's device.
+        """
+        fwd = to_cpu(bx)
+        B, W = fwd.shape
+        L = new.shape[1]
+        l = self.l
+
+        def mutate(ref, windows, flip):
+            mut = np.broadcast_to(ref, (4, L, B, W)).copy()
+            for p in range(L):
+                q = L - 1 - p if flip else p
+                a_s, a_e = max(0, q - l + 1), min(q + 1, W)
+                mut[:, p, :, a_s:a_e] = windows[:, p, :, : a_e - a_s]
+            return mut.reshape(4 * L * B, W)
+
+        dev = {"cpu": np.asarray, "cuda": to_gpu, "mlx": to_mlx}[device_of(bx)]
+        mut_rc = None if new_rc is None else dev(mutate(to_cpu(bx_rc), new_rc, True))
+        return self.raw_diag_packed(dev(mutate(fwd, new, False)), mut_rc).reshape(4, L, B)
 
     # -- GkmKernel interface --------------------------------------------------
 

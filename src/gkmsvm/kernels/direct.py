@@ -5,7 +5,7 @@ from math import comb
 import numpy as np
 from numba import njit, prange
 
-from gkmsvm.kernels.packed import PackedGkmKernel
+from gkmsvm.kernels.packed import PackedGkmKernel, device_of
 
 # ---------------------------------------------------------------------------
 # Numba-accelerated kernels
@@ -130,6 +130,49 @@ def _self_diagonal_packed_numba(bx, by, table, l):
             acc += _block_sum(fwd, rev, paired, table)
         result[b] = acc
     return result
+
+
+@njit(inline="always")
+def _block_delta(f, nf, a_s, a_e, c, nc, c_s, c_e, table):
+    """sum over i, j of g(f'_i, c'_j) - g(f_i, c_j), where f' is f with windows
+    a_s..a_e replaced by nf and c' is c with windows c_s..c_e replaced by nc."""
+    d = 0.0
+    for i in range(a_s, a_e):  # changed rows, every column
+        u, u_new = f[i], nf[i - a_s]
+        for j in range(c.shape[0]):
+            cj = c[j]
+            cj_new = nc[j - c_s] if c_s <= j < c_e else cj
+            d += _g(u_new, cj_new, table) - _g(u, cj, table)
+    for i in range(f.shape[0]):  # unchanged rows, changed columns
+        if a_s <= i < a_e:
+            continue
+        u = f[i]
+        for j in range(c_s, c_e):
+            d += _g(u, nc[j - c_s], table) - _g(u, c[j], table)
+    return d
+
+
+@njit(parallel=True, cache=True, fastmath=True)
+def _mutant_diag_numba(fwd, rc, new, new_rc, diag, table, l):
+    """K_raw(mutant, mutant) [4, L, B]: the reference's plus the pairs touching a
+    changed window (see PackedGkmKernel.raw_diag_mutants; rc has 0 columns
+    without RC)."""
+    B, W = fwd.shape
+    L = new.shape[1]
+    has_rc = rc.shape[1] > 0
+    out = np.empty((4, L, B))
+    for item in prange(L * B):
+        p, b = item // B, item % B
+        a_s, a_e = max(0, p - l + 1), min(p + 1, W)
+        q = L - 1 - p
+        r_s, r_e = max(0, q - l + 1), min(q + 1, W)
+        for v in range(4):
+            nf = new[v, p, b]
+            d = _block_delta(fwd[b], nf, a_s, a_e, fwd[b], nf, a_s, a_e, table)
+            if has_rc:
+                d += _block_delta(fwd[b], nf, a_s, a_e, rc[b], new_rc[v, p, b], r_s, r_e, table)
+            out[v, p, b] = diag[b] + d
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -492,6 +535,19 @@ class DirectGkmKernel(PackedGkmKernel):
         if dev == "cuda":
             return _fused_pairwise_packed_gpu(bx, by, *args)
         return _fused_pairwise_packed_mlx(bx, by, *args)
+
+    def raw_diag_mutants(self, bx, bx_rc, new, new_rc, diag):
+        """See PackedGkmKernel.raw_diag_mutants; on CPU only pairs touching a
+        changed window are visited (about 4 l W per mutant instead of W^2)."""
+        if device_of(bx) != "cpu":
+            return super().raw_diag_mutants(bx, bx_rc, new, new_rc, diag)
+        B = bx.shape[0]
+        rc = np.zeros((B, 0), np.uint32) if bx_rc is None else np.ascontiguousarray(bx_rc)
+        new_rc = np.zeros((4, 1, 1, 1), np.uint32) if new_rc is None else new_rc
+        return _mutant_diag_numba(np.ascontiguousarray(bx), rc, np.ascontiguousarray(new),
+                                  np.ascontiguousarray(new_rc),
+                                  np.asarray(diag, dtype=np.float64),
+                                  self._mismatch_table, self.l)
 
     def _brute_cross_diag(self, bx, by, dev):
         args = (self._mismatch_table, self.l, self._min_matches)
