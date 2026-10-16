@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from numba import njit, prange
 
-from gkmsvm.backend import DeviceModel, get_array_module, to_cpu
+from gkmsvm.backend import DeviceModel, float_dtype, get_array_module, to_cpu
 from gkmsvm.codec import reverse_complement
 from gkmsvm.kernels.direct import DirectGkmKernel
 from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
@@ -151,6 +151,7 @@ class GkmSVM(DeviceModel):
     """
 
     _DEVICE_ARRAYS = ("support_sequences", "coefficients")
+    _FLOAT_ARRAYS = ("coefficients",)
 
     def __init__(
         self,
@@ -178,7 +179,8 @@ class GkmSVM(DeviceModel):
             )
 
         self.support_sequences = support_sequences
-        self.coefficients = coefficients
+        # One-hot SVs keep the caller's dtype; coefficients are float64 (float32 on MLX)
+        self.coefficients = coefficients.astype(float_dtype(coefficients))
         self.bias = bias
         self.kernel_type = resolve_kernel_type(kernel_type)
         self._kernel_params = kernel_params
@@ -338,7 +340,7 @@ class GkmSVM(DeviceModel):
                     base.raw_diag_packed(*packed)[None], n_diag[None])[0]
             else:
                 diag = base.raw_diag_packed(*packed)
-            c["diag"] = diag.astype(self.support_sequences.dtype)
+            c["diag"] = diag.astype(float_dtype(diag))
         return c["diag"]
 
     def _sv_index(self):
@@ -352,22 +354,23 @@ class GkmSVM(DeviceModel):
 
             packed = self._sv_packed()
             base = self.kernel.base
-            use = packed is not None and lmer_index.applies(base)
+            use = packed is not None and packed[0].shape[0] > 0 and lmer_index.applies(base)
             c["index"] = lmer_index.LmerIndex(base, *packed) if use else None
         return c["index"]
 
     def _sv_raw(self, bx):
         """Base-kernel K_raw [B, S] of packed query rows bx against the SVs."""
         index = self._sv_index()
-        if index is not None:
-            return index.pairwise(bx)
         base = self.kernel.base
         packed = self._sv_packed()
+
+        def packed_raw():
+            return index.pairwise(bx) if index is not None else base.raw_packed(bx, *packed)
+
         if not len(self._sv_n_rows()):
-            return base.raw_packed(bx, *packed)
+            return packed_raw()
         n_part = base.raw_packed_n(bx, *self._sv_n_windows())
-        packed_part = base.raw_packed(bx, *packed) if packed[0].shape[0] else None
-        return self._join_sv_columns(packed_part, n_part)
+        return self._join_sv_columns(packed_raw() if packed[0].shape[0] else None, n_part)
 
     def _sv_scores(self, x):
         """sum_s coef_s K(x, sv_s) [B, 1] of one-hot x (on the model's device)."""
@@ -381,7 +384,7 @@ class GkmSVM(DeviceModel):
         diag_x = base.raw_diag_packed(bx, bx_rc) if base.normalize else None
         gamma = kernel.gamma if isinstance(kernel, RbfKernel) else np.nan
         index = self._sv_index()
-        if xp is np and index is not None:
+        if xp is np and index is not None and not len(self._sv_n_rows()):
             # Fused index query + reduction: no [B, S] block at all
             if diag_x is None:
                 inv_dx, inv_ds = np.ones(x.shape[0]), np.ones(self.num_support_vectors)
@@ -389,7 +392,7 @@ class GkmSVM(DeviceModel):
                 inv_dx = 1 / np.sqrt(np.clip(diag_x.astype(np.float64), 1e-20, None))
                 inv_ds = 1 / np.sqrt(np.clip(self._sv_diag().astype(np.float64), 1e-20, None))
             out = index.reduce(bx, inv_dx, inv_ds, self.coefficients, gamma)
-            return out.astype(x.dtype)[:, None]
+            return out[:, None]
         raw = self._sv_raw(bx)
         if xp is np:
             # Normalize, finish and reduce in one parallel pass, no [B, S] temporaries
@@ -399,10 +402,11 @@ class GkmSVM(DeviceModel):
                 diag_x.astype(np.float64) if norm else np.ones(1),
                 self._sv_diag().astype(np.float64) if norm else np.ones(1),
                 norm, self.coefficients.astype(np.float64), float(gamma))
-            return out.astype(x.dtype)[:, None]
-        k = raw.astype(x.dtype)
+            return out[:, None]
+        k = raw.astype(float_dtype(x))
         if diag_x is not None:
-            k = k / xp.clip(xp.sqrt(diag_x.astype(x.dtype)[:, None] * self._sv_diag()[None, :]),
+            k = k / xp.clip(xp.sqrt(diag_x.astype(float_dtype(x))[:, None]
+                                    * self._sv_diag()[None, :]),
                             1e-10, None)
         return (kernel.finish(k) * self.coefficients).sum(axis=1, keepdims=True)
 
@@ -519,7 +523,7 @@ class GkmSVM(DeviceModel):
         if kernel.normalize:
             diag_x = kernel.raw_diag_packed(packed, packed_rc).astype(raw.dtype)
             raw = raw / xp.sqrt(xp.clip(diag_x, 1e-10, None))
-        return raw.astype(x.dtype)[:, None] + self.bias
+        return raw[:, None] + self.bias
 
     def _score_unbatched(self, x: np.ndarray) -> np.ndarray:
         """Score one batch on the model's device."""
@@ -573,7 +577,7 @@ class GkmSVM(DeviceModel):
             f"method must be 'kernel' or 'gkmexplain', got {method!r}"
         )
 
-    # Largest l to_deltasvm() accepts: 4^14 float32 weights = 1 GB
+    # Largest l to_deltasvm() accepts: 4^14 float64 weights = 2 GB
     _MAX_DELTASVM_L = 14
 
     def _deltasvm_weights_from_table(self, table, query_norm: bool) -> np.ndarray:
@@ -589,7 +593,7 @@ class GkmSVM(DeviceModel):
         w = table.reshape((4,) * l).transpose(tuple(range(l - 1, -1, -1))).ravel()
         if query_norm and kernel.normalize:
             w = w / np.sqrt(np.clip(self._lmer_self_kernels(), 1e-10, None))
-        return w.astype(np.float32)
+        return w.astype(np.float64)
 
     def _lmer_self_kernels(self) -> np.ndarray:
         """K_raw(u, u) for every l-mer u, in DeltaSVM index order.
@@ -687,15 +691,14 @@ class GkmSVM(DeviceModel):
         digits = (idx_all[:, None] // powers) % 4
         rc = ((3 - digits[:, ::-1]) * powers).sum(axis=1)
         todo = idx_all[idx_all <= rc] if base.include_rc else idx_all
-        weights = np.empty(4**l, dtype=np.float32)
-        dtype = to_cpu(self.coefficients).dtype
+        weights = np.empty(4**l, dtype=np.float64)
         starts = range(0, len(todo), self._DELTASVM_CHUNK)
         if verbose:
             from tqdm import tqdm
             starts = tqdm(starts, desc="to_deltasvm", total=len(starts))
         for start in starts:
             idx = todo[start:start + self._DELTASVM_CHUNK]
-            x = np.eye(4, dtype=dtype)[digits[idx]].transpose(0, 2, 1)
+            x = np.eye(4, dtype=np.float32)[digits[idx]].transpose(0, 2, 1)
             x = self._match_device(np.ascontiguousarray(x))
             w = to_cpu(self._score_unbatched(x)).ravel().astype(np.float64) - self.bias
             if unnorm:

@@ -394,7 +394,7 @@ def masked_pairwise_gpu(bx_packed, by_packed, plan, by_rc_packed=None):
 
 
 # ---------------------------------------------------------------------------
-# Center-weighted kernel (-t 4) and self-kernels
+# Center-weighted kernel (-t 4)
 # ---------------------------------------------------------------------------
 
 
@@ -413,57 +413,6 @@ def weighted_mask_plan(l: int, k: int, pos_weights: np.ndarray):
         coef = float(np.prod(np.sort(w[list(T)])))
         groups.setdefault(coef, []).append(T)
     return [(k, coef, np.array(Ts, dtype=np.int64)) for coef, Ts in groups.items()]
-
-
-@njit(parallel=True, cache=True)
-def _self_join_counts(bx, brc, runs, coef, out):
-    """out[b] += coef * #(window pairs of b, and of b vs rc(b), agreeing on a mask).
-
-    brc has zero columns when there is no RC term.
-    """
-    B, W = bx.shape
-    Wr = brc.shape[1]
-    M = runs.shape[0]
-    for b in prange(B):
-        keys = np.empty(W, dtype=np.uint32)
-        rkeys = np.empty(Wr, dtype=np.uint32)
-        acc = 0
-        for m in range(M):
-            mr = runs[m]
-            for i in range(W):
-                keys[i] = _masked_key(bx[b, i], mr)
-            for i in range(Wr):
-                rkeys[i] = _masked_key(brc[b, i], mr)
-            keys.sort()
-            rkeys.sort()
-            # sum over keys of n_fwd * (n_fwd + n_rc), by merging sorted runs
-            i = 0
-            r = 0
-            while i < W:
-                key = keys[i]
-                n = 0
-                while i < W and keys[i] == key:
-                    n += 1
-                    i += 1
-                while r < Wr and rkeys[r] < key:
-                    r += 1
-                nr = 0
-                while r < Wr and rkeys[r] == key:
-                    nr += 1
-                    r += 1
-                acc += n * (n + nr)
-        out[b] += coef * acc
-
-
-def masked_self_kernel(bx_packed, plan, bx_rc_packed=None):
-    """K_raw(x, x) for each row (CPU): forward block plus the RC cross block."""
-    bx = np.ascontiguousarray(bx_packed)
-    brc = (np.ascontiguousarray(bx_rc_packed) if bx_rc_packed is not None
-           else np.zeros((bx.shape[0], 0), dtype=np.uint32))
-    out = np.zeros(bx.shape[0], dtype=np.float64)
-    for j, coef, positions in plan:
-        _self_join_counts(bx, brc, mask_runs(positions), coef, out)
-    return out
 
 
 # ---------------------------------------------------------------------------

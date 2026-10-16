@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from gkmsvm.backend import get_array_module, is_mlx, to_cpu, to_gpu, to_mlx
+from gkmsvm.backend import float_dtype, get_array_module, is_mlx, to_cpu, to_gpu, to_mlx
 from gkmsvm.codec import reverse_complement
 from gkmsvm.kernels.base import GkmKernel
 
@@ -154,7 +154,7 @@ class PackedGkmKernel(GkmKernel):
     def _raw_pairwise(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
         if self.packs(x) and self.packs(y):
             by, by_rc = self.pack_both(y)
-            return self.raw_packed(self.pack(x), by, by_rc).astype(x.dtype)
+            return self.raw_packed(self.pack(x), by, by_rc).astype(float_dtype(x))
         return self._raw_pairwise_onehot(x, y)
 
     def _raw_diagonal(self, x: np.ndarray, *, chunk_size: int | None = None) -> np.ndarray:
@@ -164,7 +164,7 @@ class PackedGkmKernel(GkmKernel):
             return xp.concatenate([self._raw_diagonal(x[s:s + chunk_size])
                                    for s in range(0, B, chunk_size)])
         if self.packs(x):
-            return self.raw_diag_packed(*self.pack_both(x)).astype(x.dtype)
+            return self.raw_diag_packed(*self.pack_both(x)).astype(float_dtype(x))
         return self._raw_diagonal_onehot(x)
 
     def _raw_pairwise_onehot(self, x, y):

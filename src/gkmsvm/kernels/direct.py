@@ -60,13 +60,27 @@ def _rc_window(w, l):
 
 
 @njit(inline="always")
-def _g(u, v, table):
-    # Branch-free: table is zero past the mismatch cutoff
+def _mismatch_pattern(u, v):
+    """l-bit pattern of the positions where packed windows u and v differ."""
+    x = u ^ v
+    x = (x | (x >> np.uint32(1))) & np.uint32(0x55555555)
+    x = (x | (x >> np.uint32(1))) & np.uint32(0x33333333)
+    x = (x | (x >> np.uint32(2))) & np.uint32(0x0F0F0F0F)
+    x = (x | (x >> np.uint32(4))) & np.uint32(0x00FF00FF)
+    return (x | (x >> np.uint32(8))) & np.uint32(0x0000FFFF)
+
+
+@njit(inline="always")
+def _g(u, v, table, by_pattern):
+    """Pair weight: table[mismatch count], or table[mismatch pattern] (2^l
+    entries, weighted kernels). Branch-free: zero past the cutoff."""
+    if by_pattern:
+        return table[_mismatch_pattern(u, v)]
     return table[_packed_mismatches(u, v)]
 
 
 @njit(inline="always")
-def _block_sum(a, c, symmetric, table):
+def _block_sum(a, c, symmetric, table, by_pattern):
     """sum over i, j of g(a[i], c[j]); for a symmetric matrix only pairs j >= i are visited.
 
     Rows go in blocks of 4 so that each pass over c serves four rows (a loop
@@ -82,30 +96,30 @@ def _block_sum(a, c, symmetric, table):
             u0, u1, u2, u3 = a[i0], a[i0 + 1], a[i0 + 2], a[i0 + 3]
             for j in range(W):
                 v = c[j]
-                off += _g(u0, v, table) + _g(u1, v, table) + _g(u2, v, table) + _g(u3, v, table)
+                off += _g(u0, v, table, by_pattern) + _g(u1, v, table, by_pattern) + _g(u2, v, table, by_pattern) + _g(u3, v, table, by_pattern)
         elif n == 4:
             u0, u1, u2, u3 = a[i0], a[i0 + 1], a[i0 + 2], a[i0 + 3]
-            diag += (_g(u0, c[i0], table) + _g(u1, c[i0 + 1], table)
-                     + _g(u2, c[i0 + 2], table) + _g(u3, c[i0 + 3], table))
-            off += (_g(u0, c[i0 + 1], table) + _g(u0, c[i0 + 2], table)
-                    + _g(u0, c[i0 + 3], table) + _g(u1, c[i0 + 2], table)
-                    + _g(u1, c[i0 + 3], table) + _g(u2, c[i0 + 3], table))
+            diag += (_g(u0, c[i0], table, by_pattern) + _g(u1, c[i0 + 1], table, by_pattern)
+                     + _g(u2, c[i0 + 2], table, by_pattern) + _g(u3, c[i0 + 3], table, by_pattern))
+            off += (_g(u0, c[i0 + 1], table, by_pattern) + _g(u0, c[i0 + 2], table, by_pattern)
+                    + _g(u0, c[i0 + 3], table, by_pattern) + _g(u1, c[i0 + 2], table, by_pattern)
+                    + _g(u1, c[i0 + 3], table, by_pattern) + _g(u2, c[i0 + 3], table, by_pattern))
             for j in range(i0 + 4, W):
                 v = c[j]
-                off += _g(u0, v, table) + _g(u1, v, table) + _g(u2, v, table) + _g(u3, v, table)
+                off += _g(u0, v, table, by_pattern) + _g(u1, v, table, by_pattern) + _g(u2, v, table, by_pattern) + _g(u3, v, table, by_pattern)
         else:
             for i in range(i0, W):
                 for j in range(i if symmetric else 0, W):
                     if symmetric and j == i:
-                        diag += _g(a[i], c[j], table)
+                        diag += _g(a[i], c[j], table, by_pattern)
                     else:
-                        off += _g(a[i], c[j], table)
+                        off += _g(a[i], c[j], table, by_pattern)
         i0 += n
     return diag + 2.0 * off if symmetric else off
 
 
 @njit(parallel=True, cache=True, fastmath=True)
-def _self_diagonal_packed_numba(bx, by, table, l):
+def _self_diagonal_packed_numba(bx, by, table, l, by_pattern=False):
     """K_raw(x, x) [B] from packed windows; by is bx, or bx followed by its RC windows.
 
     Both blocks are symmetric, so each unordered pair is visited once: the
@@ -118,7 +132,7 @@ def _self_diagonal_packed_numba(bx, by, table, l):
     result = np.empty(B, dtype=np.float64)
     for b in prange(B):
         fwd = bx[b]
-        acc = _block_sum(fwd, fwd, True, table)
+        acc = _block_sum(fwd, fwd, True, table, by_pattern)
         if has_rc:
             # RC windows in forward order: rev[k] = rc(fwd[k]) when paired
             rev = by[b, W:][::-1].copy()
@@ -127,13 +141,13 @@ def _self_diagonal_packed_numba(bx, by, table, l):
                 if rev[k] != _rc_window(fwd[k], l):
                     paired = False
                     break
-            acc += _block_sum(fwd, rev, paired, table)
+            acc += _block_sum(fwd, rev, paired, table, by_pattern)
         result[b] = acc
     return result
 
 
 @njit(inline="always")
-def _block_delta(f, nf, a_s, a_e, c, nc, c_s, c_e, table):
+def _block_delta(f, nf, a_s, a_e, c, nc, c_s, c_e, table, by_pattern):
     """sum over i, j of g(f'_i, c'_j) - g(f_i, c_j), where f' is f with windows
     a_s..a_e replaced by nf and c' is c with windows c_s..c_e replaced by nc."""
     d = 0.0
@@ -142,18 +156,18 @@ def _block_delta(f, nf, a_s, a_e, c, nc, c_s, c_e, table):
         for j in range(c.shape[0]):
             cj = c[j]
             cj_new = nc[j - c_s] if c_s <= j < c_e else cj
-            d += _g(u_new, cj_new, table) - _g(u, cj, table)
+            d += _g(u_new, cj_new, table, by_pattern) - _g(u, cj, table, by_pattern)
     for i in range(f.shape[0]):  # unchanged rows, changed columns
         if a_s <= i < a_e:
             continue
         u = f[i]
         for j in range(c_s, c_e):
-            d += _g(u, nc[j - c_s], table) - _g(u, c[j], table)
+            d += _g(u, nc[j - c_s], table, by_pattern) - _g(u, c[j], table, by_pattern)
     return d
 
 
 @njit(parallel=True, cache=True, fastmath=True)
-def _mutant_diag_numba(fwd, rc, new, new_rc, diag, table, l):
+def _mutant_diag_numba(fwd, rc, new, new_rc, diag, table, l, by_pattern=False):
     """K_raw(mutant, mutant) [4, L, B]: the reference's plus the pairs touching a
     changed window (see PackedGkmKernel.raw_diag_mutants; rc has 0 columns
     without RC)."""
@@ -168,9 +182,10 @@ def _mutant_diag_numba(fwd, rc, new, new_rc, diag, table, l):
         r_s, r_e = max(0, q - l + 1), min(q + 1, W)
         for v in range(4):
             nf = new[v, p, b]
-            d = _block_delta(fwd[b], nf, a_s, a_e, fwd[b], nf, a_s, a_e, table)
+            d = _block_delta(fwd[b], nf, a_s, a_e, fwd[b], nf, a_s, a_e, table, by_pattern)
             if has_rc:
-                d += _block_delta(fwd[b], nf, a_s, a_e, rc[b], new_rc[v, p, b], r_s, r_e, table)
+                d += _block_delta(fwd[b], nf, a_s, a_e, rc[b], new_rc[v, p, b], r_s, r_e, table,
+                                  by_pattern)
             out[v, p, b] = diag[b] + d
     return out
 

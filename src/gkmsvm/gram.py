@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from gkmsvm.backend import get_array_module, to_cpu
+from gkmsvm.backend import float_dtype, get_array_module, is_mlx, to_cpu
 from gkmsvm.kernels.base import GkmKernel
 from gkmsvm.kernels.packed import PackedGkmKernel
 
@@ -71,10 +71,15 @@ def compute_gram(
     if packed:
         bx, bx_rc = base.pack_both(X)
         by, by_rc = (bx, bx_rc) if symmetric else base.pack_both(Y)
+        # MLX tiles are normalized on the host in float64 (Metal has no float64)
+        txp = np if xp is not np and is_mlx(X) else xp
+
+        def tile_float(a):
+            return to_cpu(a).astype(np.float64) if txp is np else a.astype(float_dtype(a))
+
         if base.normalize:
-            # In the input dtype, as kernel.pairwise normalizes
-            diag_x = base.raw_diag_packed(bx, bx_rc).astype(X.dtype)
-            diag_y = diag_x if symmetric else base.raw_diag_packed(by, by_rc).astype(Y.dtype)
+            diag_x = tile_float(base.raw_diag_packed(bx, bx_rc))
+            diag_y = diag_x if symmetric else tile_float(base.raw_diag_packed(by, by_rc))
 
     for r_start, c_start in tiles:
         c_end = min(c_start + chunk_size, M)
@@ -82,13 +87,13 @@ def compute_gram(
 
         if packed:
             diag_offset = c_start if symmetric and panels and get_array_module(bx) is np else None
-            tile = base.raw_packed(
+            tile = tile_float(base.raw_packed(
                 bx[r_start:r_end], by[c_start:c_end],
                 None if by_rc is None else by_rc[c_start:c_end], diag_offset=diag_offset,
-            ).astype(X.dtype)
+            ))
             if base.normalize:
-                norm = xp.sqrt(diag_x[r_start:r_end, None] * diag_y[c_start:c_end][None, :])
-                tile = tile / xp.clip(norm, 1e-10, None)
+                norm = txp.sqrt(diag_x[r_start:r_end, None] * diag_y[c_start:c_end][None, :])
+                tile = tile / txp.clip(norm, 1e-10, None)
             tile = kernel.finish(tile)
         else:
             tile = kernel.pairwise(X[r_start:r_end], Y[c_start:c_end])

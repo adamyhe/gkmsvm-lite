@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 from numba import njit, prange
 
-from gkmsvm.backend import get_array_module, get_strides, to_cpu
+from gkmsvm.backend import float_dtype, get_array_module, get_strides, to_cpu
 from gkmsvm.codec import reverse_complement
 from gkmsvm.kernels.packed import PackedGkmKernel
 from gkmsvm.kernels.rbf import RbfKernel
@@ -114,6 +114,18 @@ def _agreement_weights(pos_weights: np.ndarray, k: int) -> np.ndarray:
     return dp[:, k]
 
 
+def _on_device(out: np.ndarray, like):
+    """CPU result out on like's device (float32 on MLX)."""
+    from gkmsvm.kernels.packed import device_of
+
+    dev = device_of(like)
+    if dev == "mlx":
+        import mlx.core as mx
+
+        return mx.array(out.astype(np.float32))
+    return out if dev == "cpu" else get_array_module(like).asarray(out)
+
+
 class CenterWeightedGkmKernel(PackedGkmKernel):
     """Center-weighted gapped k-mer kernel (-t 4 / wgkm).
 
@@ -190,8 +202,6 @@ class CenterWeightedGkmKernel(PackedGkmKernel):
         A brute-force CPU pair loop, for the few SVs that contain N; the result
         is on bx's device.
         """
-        from gkmsvm.kernels.packed import device_of
-
         if getattr(self, "_agree_g", None) is None:
             self._agree_g = _agreement_weights(self._pos_weights, self.k)
         q = np.ascontiguousarray(to_cpu(bx))
@@ -200,28 +210,43 @@ class CenterWeightedGkmKernel(PackedGkmKernel):
         if by_rc is not None:
             out += _brute_nmask_numba(q, np.ascontiguousarray(by_rc),
                                       np.ascontiguousarray(by_rc_n), self._agree_g, self.l)
-        dev = device_of(bx)
-        if dev == "mlx":
-            import mlx.core as mx
+        return _on_device(out, bx)
 
-            return mx.array(out.astype(np.float32))
-        return out if dev == "cpu" else get_array_module(bx).asarray(out)
+    def _pattern_weights(self) -> np.ndarray:
+        """[2^l] pair weight by mismatch pattern: e_k over the agreeing positions."""
+        if getattr(self, "_pattern_g", None) is None:
+            if getattr(self, "_agree_g", None) is None:
+                self._agree_g = _agreement_weights(self._pos_weights, self.k)
+            self._pattern_g = self._agree_g[~np.arange(2**self.l) & (2**self.l - 1)]
+        return self._pattern_g
 
     def raw_diag_packed(self, bx, bx_rc=None):
-        """K_raw(x, x) via the masked self-join (on CPU, returned on bx's device)."""
-        from gkmsvm.kernels.masked import masked_self_kernel
-        from gkmsvm.kernels.packed import device_of
+        """K_raw(x, x): each pair of the symmetric forward and RC blocks once, by
+        mismatch pattern (direct._self_diagonal_packed_numba). On CPU; the
+        result is on bx's device."""
+        from gkmsvm.kernels.direct import _self_diagonal_packed_numba
 
-        brc = None if bx_rc is None else to_cpu(bx_rc)
-        out = masked_self_kernel(to_cpu(bx), self._join_plan(), brc)
-        dev = device_of(bx)
-        if dev == "mlx":
-            import mlx.core as mx
+        fwd = np.ascontiguousarray(to_cpu(bx))
+        by = fwd if bx_rc is None else np.concatenate([fwd, to_cpu(bx_rc)], axis=1)
+        return _on_device(_self_diagonal_packed_numba(
+            fwd, np.ascontiguousarray(by), self._pattern_weights(), self.l, True), bx)
 
-            return mx.array(out.astype(np.float32))
-        return out if dev == "cpu" else get_array_module(bx).asarray(out)
+    def raw_diag_mutants(self, bx, bx_rc, new, new_rc, diag):
+        """See PackedGkmKernel.raw_diag_mutants: only pairs touching a changed
+        window, by mismatch pattern. On CPU; the result is on bx's device."""
+        from gkmsvm.kernels.direct import _mutant_diag_numba
+
+        B = bx.shape[0]
+        rc = (np.zeros((B, 0), np.uint32) if bx_rc is None
+              else np.ascontiguousarray(to_cpu(bx_rc)))
+        new_rc = np.zeros((4, 1, 1, 1), np.uint32) if new_rc is None else new_rc
+        return _on_device(_mutant_diag_numba(
+            np.ascontiguousarray(to_cpu(bx)), rc, np.ascontiguousarray(new),
+            np.ascontiguousarray(new_rc), np.asarray(to_cpu(diag), dtype=np.float64),
+            self._pattern_weights(), self.l, True), bx)
 
     def _raw_pairwise_onehot(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        x, y = x.astype(float_dtype(x)), y.astype(float_dtype(y))
         xp = get_array_module(x)
         pw = xp.asarray(self._pos_weights).astype(x.dtype)
         y_rc = reverse_complement(y) if self.include_rc else None
@@ -241,6 +266,7 @@ class CenterWeightedGkmKernel(PackedGkmKernel):
         return parts[0] if len(parts) == 1 else xp.concatenate(parts, axis=1)
 
     def _raw_diagonal_onehot(self, x: np.ndarray) -> np.ndarray:
+        x = x.astype(float_dtype(x))
         xp = get_array_module(x)
         pw = xp.asarray(self._pos_weights).astype(x.dtype)
         wx = self._onehot_windows(x)

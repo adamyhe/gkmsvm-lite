@@ -319,3 +319,24 @@ def test_svs_with_n_keep_onehot_semantics(kernel_type, table):
     np.testing.assert_allclose(
         d, model(mut.reshape(-1, 4, 30)).reshape(1, 4, 30) - model(x[:1])[0, 0],
         rtol=1e-9, atol=1e-12)
+
+
+@pytest.mark.parametrize("include_rc", [True, False])
+def test_self_kernel_and_mutant_norms(include_rc):
+    """Pattern-table self-kernels equal the one-hot definition; incremental mutant
+    norms equal recomputing every mutant."""
+    from gkmsvm.ism import _packed_mutations
+    from gkmsvm.kernels.packed import PackedGkmKernel
+
+    kernel = CenterWeightedGkmKernel(8, 5, M=2, H=1.5, include_rc=include_rc)
+    rng = np.random.default_rng(3)
+    x = np.eye(4)[rng.integers(0, 4, (5, 30))].transpose(0, 2, 1)
+    bx, brc = kernel.pack_both(x)
+    diag = kernel.raw_diag_packed(bx, brc)
+    np.testing.assert_allclose(diag, kernel._raw_diagonal_onehot(x), rtol=1e-12)
+    L, W = 30, bx.shape[1]
+    _, new = _packed_mutations(bx, L, W, kernel.l)
+    new_rc = None if brc is None else _packed_mutations(brc, L, W, kernel.l)[1][::-1, ::-1]
+    np.testing.assert_allclose(
+        kernel.raw_diag_mutants(bx, brc, new, new_rc, diag),
+        PackedGkmKernel.raw_diag_mutants(kernel, bx, brc, new, new_rc, diag), rtol=1e-12)

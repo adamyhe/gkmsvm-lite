@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from gkmsvm.backend import get_array_module, is_mlx, to_cpu
+from gkmsvm.backend import float_dtype, get_array_module, is_mlx, to_cpu
 from gkmsvm.kernels.base import GkmKernel
 from gkmsvm.kernels.packed import PackedGkmKernel
 
@@ -30,7 +30,7 @@ class KernelColumnCache:
         if self._use_fast:
             self._packed, self._packed_rc = base.pack_both(X)
             self._X = None
-            diag = base.raw_diag_packed(self._packed, self._packed_rc).astype(X.dtype)
+            diag = base.raw_diag_packed(self._packed, self._packed_rc).astype(float_dtype(X))
             from gkmsvm.kernels import lmer_index
 
             self._index = (lmer_index.LmerIndex(base, self._packed, self._packed_rc)

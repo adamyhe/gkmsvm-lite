@@ -90,7 +90,7 @@ def build_model(
             kernel_params[key] = header[key]
     return GkmSVM(
         support_sequences=np.stack(encoded),
-        coefficients=np.array(coefficients, dtype=dtype),
+        coefficients=np.array(coefficients, dtype=np.float64),
         bias=bias,
         kernel_type=kernel_type,
         kernel_params=kernel_params,

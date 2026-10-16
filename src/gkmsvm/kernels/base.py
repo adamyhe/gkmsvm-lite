@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 
-from gkmsvm.backend import get_array_module
+from gkmsvm.backend import float_dtype, get_array_module
 
 
 class GkmKernel(ABC):
@@ -96,5 +96,5 @@ class GkmKernel(ABC):
         """
         xp = get_array_module(x)
         if self.normalize:
-            return xp.ones(x.shape[0], dtype=x.dtype)
+            return xp.ones(x.shape[0], dtype=float_dtype(x))
         return self._raw_diagonal(x)

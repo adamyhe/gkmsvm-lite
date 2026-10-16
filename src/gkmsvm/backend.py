@@ -69,6 +69,13 @@ def to_cpu(x: Any) -> np.ndarray:
     return np.asarray(x)
 
 
+def float_dtype(x: Any) -> Any:
+    """Floating dtype for results and model parameters on x's device: float64,
+    or float32 on MLX (Metal has no float64)."""
+    xp = get_array_module(x)
+    return xp.float32 if is_mlx(x) else xp.float64
+
+
 def is_gpu(x: Any) -> bool:
     """Check if an array lives on a GPU backend."""
     if HAS_CUPY and isinstance(x, cp.ndarray):
@@ -92,6 +99,9 @@ class DeviceModel:
     """
 
     _DEVICE_ARRAYS: tuple[str, ...] = ()
+    # The floating-point parameters among them: float64 on CPU and CUDA,
+    # float32 on MLX (moving to MLX rounds them)
+    _FLOAT_ARRAYS: tuple[str, ...] = ()
     _on_gpu = False
     _on_mlx = False
 
@@ -100,7 +110,10 @@ class DeviceModel:
 
     def _move(self, convert, on_gpu: bool, on_mlx: bool):
         for name in self._DEVICE_ARRAYS:
-            setattr(self, name, convert(getattr(self, name)))
+            a = getattr(self, name)
+            if name in self._FLOAT_ARRAYS:
+                a = to_cpu(a).astype(np.float32 if on_mlx else np.float64)
+            setattr(self, name, convert(a))
         self._on_device_move()
         self._on_gpu, self._on_mlx = on_gpu, on_mlx
         return self

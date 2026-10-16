@@ -14,7 +14,7 @@ from itertools import combinations
 import numpy as np
 from numba import njit, prange
 
-from gkmsvm.backend import DeviceModel, get_array_module, get_strides
+from gkmsvm.backend import DeviceModel, float_dtype, get_array_module, get_strides
 from gkmsvm.codec import reverse_complement
 
 
@@ -74,6 +74,7 @@ class DeltaSVM(DeviceModel):
     """
 
     _DEVICE_ARRAYS = ("weights",)
+    _FLOAT_ARRAYS = ("weights",)
 
     def __init__(
         self,
@@ -91,7 +92,7 @@ class DeltaSVM(DeviceModel):
         if k > l:
             raise ValueError(f"k ({k}) must be <= l ({l})")
 
-        self.weights = weights
+        self.weights = weights.astype(float_dtype(weights))  # float32 on MLX
         self.bias = bias
         self.l = l
         self.k = k
@@ -135,7 +136,7 @@ class DeltaSVM(DeviceModel):
         B, C, L = x.shape
         W = L - self.l + 1
         if W < 1:
-            return xp.zeros((B, 1), dtype=x.dtype)
+            return xp.zeros((B, 1), dtype=float_dtype(x))
 
         if not self._on_gpu and not self._on_mlx:
             return self._score_strand_cpu(x, verbose=verbose)
@@ -162,7 +163,7 @@ class DeltaSVM(DeviceModel):
             scores = _score_strand_numba(
                 x64, self._combos, self._powers, weights64, self.l
             )
-        return scores[:, None].astype(x.dtype)
+        return scores[:, None].astype(float_dtype(x))
 
     def _score_strand_array(
         self, x: np.ndarray, *, verbose: bool = False,

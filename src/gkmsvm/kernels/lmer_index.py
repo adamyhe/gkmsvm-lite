@@ -9,9 +9,14 @@ precomputed mask) and adds table[m] to every column in that row. Each
 matching window pair is visited once, and a call's cost depends only on the
 queries.
 
-Applies to the count-table kernels (-t 0/1/2) whose neighborhood
-sum_{m <= dmax} C(l, m) 3^m is at most MAX_NEIGHBORS (e.g. 4,984 for l=11
-d=3), with l <= MAX_L.
+Applies to the count-table kernels (-t 0/1/2, and -t 3 through its base),
+where a neighbor's weight depends on its mismatch count, and to the
+center-weighted kernel (-t 4, and -t 5 through its base), where it is e_k of
+the position weights on the agreeing positions (dmax = l - k). The
+neighborhood sum_{m <= dmax} C(l, m) 3^m must be at most MAX_NEIGHBORS (e.g.
+4,984 for l=11 d=3; 3,676 for weighted l=10 k=7), with l <= MAX_L. Above
+that, the per-window neighbor lookups cost about as much as the masked
+join (weighted l=11 k=7, 25,774 neighbors, measured even at 16k SVs).
 """
 
 from __future__ import annotations
@@ -51,12 +56,39 @@ def neighbor_masks(l: int, table: np.ndarray, dmax: int):
     return np.array(masks, dtype=np.uint32), np.array(levels, dtype=np.int32)
 
 
+def _dmax(kernel) -> int | None:
+    """Most mismatches with a non-zero pair weight, or None for kernels without an index."""
+    if getattr(kernel, "_mismatch_table", None) is not None:
+        return kernel.l - kernel._min_matches
+    if getattr(kernel, "_pos_weights", None) is not None:  # -t 4: k agreeing positions
+        return kernel.l - kernel.k
+    return None
+
+
 def applies(kernel) -> bool:
     """Whether the index can serve this (base) kernel."""
+    dmax = _dmax(kernel)
+    return (dmax is not None and kernel.l <= MAX_L
+            and neighbor_count(kernel.l, dmax) <= MAX_NEIGHBORS)
+
+
+def index_neighbors(kernel):
+    """XOR masks of every l-mer within the kernel's cutoff and their pair weights.
+
+    Count-table kernels weight a neighbor by its mismatch count; the
+    center-weighted kernel by e_k of the position weights where it agrees.
+    """
+    l, dmax = kernel.l, _dmax(kernel)
     table = getattr(kernel, "_mismatch_table", None)
-    if table is None or kernel.l > MAX_L:
-        return False
-    return neighbor_count(kernel.l, kernel.l - kernel._min_matches) <= MAX_NEIGHBORS
+    if table is not None:
+        masks, levels = neighbor_masks(l, np.asarray(table, dtype=np.float64), dmax)
+        return masks, np.asarray(table, dtype=np.float64)[levels]
+    from gkmsvm.kernels.weighted import _agreement_weights
+
+    masks, _ = neighbor_masks(l, np.ones(l + 1), dmax)
+    fields = (masks[:, None] >> (2 * np.arange(l, dtype=np.uint32))) & np.uint32(3)
+    agree = ((fields == 0) << np.arange(l)).sum(axis=1)
+    return masks, _agreement_weights(kernel._pos_weights, kernel.k)[agree]
 
 
 @njit(cache=True)
@@ -235,6 +267,8 @@ _cuda_fn = None
 _metal_fn = None
 # Rows per Metal launch: caps the int32 [levels, rows, S] counts
 _METAL_COUNT_BYTES = 256 * 2**20
+# Above this many distinct pair weights, MLX queries on CPU
+_METAL_MAX_LEVELS = 16
 
 
 class LmerIndex:
@@ -244,11 +278,12 @@ class LmerIndex:
         l = kernel.l
         self.S = by.shape[0]
         self.n_lmers = 4**l
-        table = np.asarray(kernel._mismatch_table, dtype=np.float64)
-        self.masks, self.levels = neighbor_masks(l, table, l - kernel._min_matches)
-        self.weights = table[self.levels]
-        self.level_values = np.unique(self.levels)
-        self.table = table
+        masks, weights = index_neighbors(kernel)
+        keep = weights != 0
+        self.masks, self.weights = masks[keep], weights[keep]
+        # Metal counts hits per distinct weight (level) and combines them on the CPU
+        self.table, self.levels = np.unique(self.weights, return_inverse=True)
+        self.levels = self.levels.astype(np.int32)
         blocks = [to_cpu(by)] + ([to_cpu(by_rc)] if by_rc is not None else [])
         keys = np.concatenate([b.ravel() for b in blocks]).astype(np.int64)
         W = blocks[0].shape[1]
@@ -355,12 +390,16 @@ class LmerIndex:
                 name="gkm_lmer_index_query",
                 input_names=["bx", "offsets", "ids", "masks", "levels", "params"],
                 output_names=["counts"], source=_METAL_SRC, atomic_outputs=True)
+        if len(self.table) > _METAL_MAX_LEVELS:
+            # One int32 [rows, S] block per level: weighted kernels (hundreds of
+            # distinct weights) query on CPU, which shares memory with the GPU
+            return mx.array(self.pairwise(np.asarray(to_cpu(bx))).astype(np.float32))
         if self.offsets[-1] >= 2**31:
             raise ValueError("l-mer index too large for the Metal kernel")
         offsets, ids, masks, levels = self._arrays("mlx")
         bx_np = np.ascontiguousarray(to_cpu(bx), dtype=np.uint32)
         B, W = bx_np.shape
-        n_lev = int(self.levels.max()) + 1
+        n_lev = len(self.table)
         rows = max(1, _METAL_COUNT_BYTES // (4 * n_lev * self.S))
         out = np.zeros((B, self.S), dtype=np.float64)
         n_items = W * len(self.masks)
@@ -373,6 +412,6 @@ class LmerIndex:
                 output_shapes=[(n_lev * nb * self.S,)], output_dtypes=[mx.int32],
                 init_value=0)[0]
             counts = np.array(counts).reshape(n_lev, nb, self.S)
-            for m in self.level_values:
+            for m in range(n_lev):
                 out[b0:b0 + nb] += self.table[m] * counts[m]
         return mx.array(out.astype(np.float32))

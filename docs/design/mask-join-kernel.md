@@ -159,7 +159,7 @@ Steps, cheapest first:
 
    The CPU combines `Σ coef_level × counts_level` in float64. That keeps results exact and identical to the CPU and CUDA paths. With 4 levels for `-t 2` (14 for `-t 4`), a 1,000×1,000 tile needs 16–56 MB of int32 counts.
 3. **Move the index build to Metal**, if profiling shows it matters. Histogram and scatter use atomic outputs with `atomic_fetch_add_explicit`, and the prefix sum uses `mx.cumsum`.
-4. **Self-kernel diagonals.** Keep them on CPU (`masked_self_kernel` for `-t 4`, the packed diagonal for `-t 0`–`-t 2`); they're O(B·W log W) per call.
+4. **Self-kernel diagonals.** Keep them on CPU: the packed pair loop over the symmetric half (`direct._self_diagonal_packed_numba`), by mismatch count for `-t 0`–`-t 2` and by mismatch pattern for `-t 4`.
 
 Validation: `tests/test_mlx.py` patterns plus exactness against the CPU masked join (integer counts make bitwise equality achievable). Benchmark: a dev check script (since removed) run on an M-series Mac, against the CPU masked path on the same machine. The CPU path is already fast there (1,000-sequence Gram in 1.3 s on an M4), so ship the Metal join only if it is clearly faster.
 
