@@ -12,6 +12,7 @@ import numpy as np
 
 from gkmsvm.backend import get_array_module, to_cpu
 from gkmsvm.kernels.packed import PAD_WINDOW
+from gkmsvm.kernels.rbf import RbfKernel
 from gkmsvm.svm import GkmSVM
 
 
@@ -59,33 +60,146 @@ def ism(
 
 
 def _ism_packed(model, x):
-    """ISM from the base kernel's packed windows (any kernel whose SVs pack)."""
+    """ISM from the base kernel's packed windows (any kernel whose SVs pack).
+
+    Kernels with an l-mer table add table weights over the windows covering
+    each position (_ism_table). On CPU with the l-mer index, a fused pass per
+    (position, sequence) reduces each mutant over the SVs (_ism_index).
+    Otherwise per-SV kernel values for each mutant are computed in blocks
+    that hold at most ``GkmSVM._MAX_SCORE_BYTES`` of them (_ism_kernel).
+    """
     xp = get_array_module(x)
-    B, C, L = x.shape
+    B, _, L = x.shape
+    base = model.kernel.base
+    W = L - base.l + 1
+    S = model.num_support_vectors
+    # ism() checked that x packs; a table exists only for non-RBF kernels
+    table = model._lmer_table_for(xp)
+    # Sequences per block: the mutant windows stay near _BLOCK_BYTES, and the
+    # [rows, S] kernel values within _MAX_SCORE_BYTES (the reference rows for
+    # the index path, those and a block of positions' mutants otherwise)
+    rows = _BLOCK_BYTES // (8 * L * W * 4)
+    if table is not None:
+        fn = _ism_table
+    elif xp is np and model._sv_index() is not None:
+        fn = _ism_index
+        rows = min(rows, model._MAX_SCORE_BYTES // (8 * S))
+    else:
+        fn = _ism_kernel
+        rows = min(rows, model._MAX_SCORE_BYTES // (6 * L * 8 * S))
+    rows = max(1, rows)
+    parts = [fn(model, x[s:s + rows], table) for s in range(0, B, rows)]
+    out = parts[0] if len(parts) == 1 else xp.concatenate(parts, axis=0)
+    return out.astype(x.dtype)
+
+
+# Mutant windows built per block of sequences
+_BLOCK_BYTES = 256 * 2**20
+
+
+def _ism_table(model, x, table):
+    """f(mutant) - f(x) from the l-mer table: [B, 4, L]."""
+    xp = get_array_module(x)
+    base = model.kernel
+    bx, bx_rc = base.pack_both(x)
+    old, new, diag_ref, mut_diag = _mutants(base, x, bx, bx_rc)
+    dev = (lambda a: a) if xp is np else xp.asarray
+    # Padding (identical in old and new) reads entry 0, which cancels in new - old
+    old = dev(np.where(old == PAD_WINDOW, 0, old))
+    new = dev(np.where(new == PAD_WINDOW, 0, new))
+    ref = table[bx].sum(axis=1)  # [B]
+    k_new = ref + (table[new].sum(axis=3) - table[old].sum(axis=2)[None])  # [4, L, B]
+    if base.normalize:
+        k_new = k_new / xp.sqrt(xp.clip(mut_diag.astype(ref.dtype), 1e-10, None))
+        ref = ref / xp.sqrt(xp.clip(diag_ref.astype(ref.dtype), 1e-10, None))
+    return (k_new - ref).transpose(2, 0, 1)
+
+
+def _ism_index(model, x, _table=None):
+    """f(mutant) - f(x) on CPU through the l-mer index: [B, 4, L].
+
+    One fused pass per (position, sequence) adds the changed windows' hits to
+    the reference row and reduces over SVs, so no [mutants, S] block exists.
+    """
     kernel = model.kernel
     base = kernel.base
-    l = base.l
-    W = L - l + 1
-    S = model.num_support_vectors
-    coefs = model.coefficients
-
+    index = model._sv_index()
     bx, bx_rc = base.pack_both(x)
-    ref_raw = model._sv_raw(bx)  # [B, S]
-    old, new = _packed_mutations(to_cpu(bx), L, W, l)
-    dev = (lambda a: a) if xp is np else xp.asarray
-    old_pw = model._sv_raw(dev(old.reshape(L * B, l))).reshape(L, B, S)
-    new_pw = model._sv_raw(dev(new.reshape(4 * L * B, l))).reshape(4, L, B, S)
-    k_new = ref_raw + (new_pw - old_pw[None])  # [4, L, B, S]
+    old, new, diag_ref, mut_diag = _mutants(base, x, bx, bx_rc)
+    ref = index.pairwise(bx)  # [B, S]
+    S = model.num_support_vectors
+
+    def inv_sqrt(d):
+        return 1 / np.sqrt(np.clip(np.asarray(d, dtype=np.float64), 1e-20, None))
 
     if base.normalize:
+        inv_ds = inv_sqrt(model._sv_diag())
+        inv_dx = inv_sqrt(diag_ref)
+        inv_dmut = inv_sqrt(mut_diag)
+    else:
+        inv_ds, inv_dx, inv_dmut = np.ones(S), np.ones(x.shape[0]), np.ones(new.shape[:3])
+    gamma = kernel.gamma if isinstance(kernel, RbfKernel) else np.nan
+    ref_score = index.reduce(bx, inv_dx, inv_ds, model.coefficients, gamma)
+    out = index.mutants(old, new, ref, ref_score, inv_dx, inv_dmut, inv_ds, model.coefficients,
+                        gamma)
+    return out.transpose(2, 0, 1)
+
+
+def _ism_kernel(model, x, _table=None):
+    """f(mutant) - f(x) from per-SV kernel values: [B, 4, L]."""
+    xp = get_array_module(x)
+    B, _, L = x.shape
+    kernel = model.kernel
+    base = kernel.base
+    S = model.num_support_vectors
+    coefs = model.coefficients
+    bx, bx_rc = base.pack_both(x)
+    old, new, diag_ref, mut_diag = _mutants(base, x, bx, bx_rc)
+    dev = (lambda a: a) if xp is np else xp.asarray
+    ref_raw = model._sv_raw(bx)  # [B, S]
+    if base.normalize:
         diag_sv = model._sv_diag()
-        diag_ref = base.raw_diag_packed(bx, bx_rc)
-        diag_new = _mutated_diagonals(base, x, xp)
-        k_new = k_new / xp.clip(xp.sqrt(diag_new[..., None] * diag_sv), 1e-10, None)
-        ref_raw = ref_raw / xp.clip(xp.sqrt(diag_ref[:, None] * diag_sv[None, :]), 1e-10, None)
-    scores = (kernel.finish(k_new) * coefs).sum(axis=3)  # [4, L, B]
-    ref_score = (kernel.finish(ref_raw) * coefs).sum(axis=1)
-    return (scores - ref_score).transpose(2, 0, 1).astype(x.dtype)
+        ref_k = ref_raw / xp.clip(xp.sqrt(diag_ref[:, None] * diag_sv[None, :]), 1e-10, None)
+    else:
+        ref_k = ref_raw
+    ref_score = (kernel.finish(ref_k) * coefs).sum(axis=1)  # [B]
+    l = base.l
+    # Positions per block: [5, P, B, S] kernel values within _MAX_SCORE_BYTES
+    P = max(1, model._MAX_SCORE_BYTES // (5 * B * S * 8))
+    scores = []
+    for p0 in range(0, L, P):
+        p1 = min(p0 + P, L)
+        n = p1 - p0
+        old_pw = model._sv_raw(dev(old[p0:p1].reshape(n * B, l))).reshape(n, B, S)
+        new_pw = model._sv_raw(dev(new[:, p0:p1].reshape(4 * n * B, l))).reshape(4, n, B, S)
+        k_new = ref_raw + (new_pw - old_pw[None])  # [4, n, B, S]
+        if base.normalize:
+            k_new = k_new / xp.clip(xp.sqrt(mut_diag[:, p0:p1, :, None] * diag_sv), 1e-10, None)
+        scores.append((kernel.finish(k_new) * coefs).sum(axis=3))  # [4, n, B]
+    scores = scores[0] if len(scores) == 1 else xp.concatenate(scores, axis=1)
+    return (scores - ref_score).transpose(2, 0, 1)
+
+
+def _mutants(base, x, bx, bx_rc):
+    """Packed windows covering each position before and after each substitution,
+    and the self-kernels of the reference and of every mutant.
+
+    Returns old [L, B, l], new [4, L, B, l] (uint32, on CPU), K_raw(x, x) [B]
+    and K_raw(mutant, mutant) [4, L, B] on x's device (both None without
+    normalization).
+    """
+    L = x.shape[2]
+    l = base.l
+    W = L - l + 1
+    old, new = _packed_mutations(to_cpu(bx), L, W, l)
+    if not base.normalize:
+        return old, new, None, None
+    new_rc = None
+    if bx_rc is not None:
+        # In the reverse complement the substitution sits at L-1-p, as base 3-v
+        new_rc = _packed_mutations(to_cpu(bx_rc), L, W, l)[1][::-1, ::-1]
+    diag = base.raw_diag_packed(bx, bx_rc)
+    return old, new, diag, base.raw_diag_mutants(bx, bx_rc, new, new_rc, diag)
 
 
 def _packed_mutations(bx, L, W, l):
@@ -107,24 +221,6 @@ def _packed_mutations(bx, L, W, l):
         for v in range(4):
             new[v, p, :, : a_e - a_s] = cleared | (np.uint32(v) << shift)
     return old, new
-
-
-def _mutated_diagonals(kernel, x, xp):
-    """Self-kernel diagonals for all single-base mutations.
-
-    Only 4*L*B sequences — trivially fast even for large models.
-    Mutations are built on CPU then moved to device for diagonal computation.
-    """
-    B, C, L = x.shape
-    x_np = x if xp is np else to_cpu(x)
-    x_exp = x_np[None, None]  # [1, 1, B, 4, L]
-    mut_x = np.broadcast_to(x_exp, (4, L, B, C, L)).copy()
-    for p in range(L):
-        mut_x[:, p, :, :, p] = 0
-        for vi in range(4):
-            mut_x[vi, p, :, vi, p] = 1
-    mut_flat = xp.asarray(mut_x.reshape(4 * L * B, C, L))
-    return kernel._raw_diagonal(mut_flat).reshape(4, L, B)
 
 
 # -----------------------------------------------------------------------
