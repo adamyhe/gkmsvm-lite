@@ -207,6 +207,16 @@ class GkmSVM(DeviceModel):
     def kernel_params(self) -> dict:
         return dict(self._kernel_params)
 
+    def clear_caches(self) -> None:
+        """Drop the packed SVs, self-kernels, l-mer index and l-mer table.
+
+        They are rebuilt on the next call. Frees their memory, and lets a
+        timing include building them.
+        """
+        self._sv_cache = {}
+        self._lmer_table = None
+        self._lmer_table_dev = None
+
     def _on_device_move(self) -> None:
         """Drop device caches and free the old device's memory pool."""
         self._sv_cache = {}
@@ -280,14 +290,17 @@ class GkmSVM(DeviceModel):
         return c["diag"]
 
     def _sv_index(self):
-        """Cached l-mer index over the SVs, or None when it doesn't apply."""
+        """Cached l-mer index over the SVs, or None when it doesn't apply or
+        ``use_lmer_index`` is off (checked on every call)."""
+        if not self.use_lmer_index:
+            return None
         c = self._sv_cache
         if "index" not in c:
             from gkmsvm.kernels import lmer_index
 
             packed = self._sv_packed()
             base = self.kernel.base
-            use = self.use_lmer_index and packed is not None and lmer_index.applies(base)
+            use = packed is not None and lmer_index.applies(base)
             c["index"] = lmer_index.LmerIndex(base, *packed) if use else None
         return c["index"]
 
@@ -307,12 +320,22 @@ class GkmSVM(DeviceModel):
                     * self.coefficients).sum(axis=1, keepdims=True)
         xp = get_array_module(x)
         bx, bx_rc = base.pack_both(x)
-        raw = self._sv_raw(bx)
         diag_x = base.raw_diag_packed(bx, bx_rc) if base.normalize else None
+        gamma = kernel.gamma if isinstance(kernel, RbfKernel) else np.nan
+        index = self._sv_index()
+        if xp is np and index is not None:
+            # Fused index query + reduction: no [B, S] block at all
+            if diag_x is None:
+                inv_dx, inv_ds = np.ones(x.shape[0]), np.ones(self.num_support_vectors)
+            else:
+                inv_dx = 1 / np.sqrt(np.clip(diag_x.astype(np.float64), 1e-20, None))
+                inv_ds = 1 / np.sqrt(np.clip(self._sv_diag().astype(np.float64), 1e-20, None))
+            out = index.reduce(bx, inv_dx, inv_ds, self.coefficients, gamma)
+            return out.astype(x.dtype)[:, None]
+        raw = self._sv_raw(bx)
         if xp is np:
             # Normalize, finish and reduce in one parallel pass, no [B, S] temporaries
             norm = diag_x is not None
-            gamma = kernel.gamma if isinstance(kernel, RbfKernel) else np.nan
             out = _normalized_dot(
                 np.ascontiguousarray(raw, dtype=np.float64),
                 diag_x.astype(np.float64) if norm else np.ones(1),
@@ -587,25 +610,35 @@ class GkmSVM(DeviceModel):
     _DELTASVM_CHUNK = 65536
 
     def _deltasvm_weights_from_kernel(self, query_norm: bool, verbose: bool) -> np.ndarray:
-        """DeltaSVM weights by scoring every l-mer (DeltaSVM index order)."""
+        """DeltaSVM weights by scoring every l-mer (DeltaSVM index order).
+
+        With RC, an l-mer and its reverse complement score the same, so only
+        canonical l-mers (index <= RC index) are scored, as lsgkm's deltaSVM
+        pipeline does with nrkmers.py.
+        """
         base = self.kernel.base
         unnorm = not query_norm and base.normalize and base is self.kernel  # not RBF
         l = self.kernel.l
-        n_lmers = 4**l
+        idx_all = np.arange(4**l, dtype=np.int64)
         powers = 4 ** np.arange(l - 1, -1, -1)  # first base most significant
-        weights = np.empty(n_lmers, dtype=np.float32)
+        digits = (idx_all[:, None] // powers) % 4
+        rc = ((3 - digits[:, ::-1]) * powers).sum(axis=1)
+        todo = idx_all[idx_all <= rc] if base.include_rc else idx_all
+        weights = np.empty(4**l, dtype=np.float32)
         dtype = to_cpu(self.coefficients).dtype
-        starts = range(0, n_lmers, self._DELTASVM_CHUNK)
+        starts = range(0, len(todo), self._DELTASVM_CHUNK)
         if verbose:
             from tqdm import tqdm
             starts = tqdm(starts, desc="to_deltasvm", total=len(starts))
         for start in starts:
-            idx = np.arange(start, min(start + self._DELTASVM_CHUNK, n_lmers))
-            x = np.eye(4, dtype=dtype)[(idx[:, None] // powers) % 4].transpose(0, 2, 1)
+            idx = todo[start:start + self._DELTASVM_CHUNK]
+            x = np.eye(4, dtype=dtype)[digits[idx]].transpose(0, 2, 1)
             x = self._match_device(np.ascontiguousarray(x))
             w = to_cpu(self._score_unbatched(x)).ravel().astype(np.float64) - self.bias
             if unnorm:
                 diag = to_cpu(base._raw_diagonal(x)).astype(np.float64)
                 w *= np.sqrt(np.clip(diag, 1e-10, None))
             weights[idx] = w
+        if base.include_rc:
+            weights[rc[todo]] = weights[todo]
         return weights

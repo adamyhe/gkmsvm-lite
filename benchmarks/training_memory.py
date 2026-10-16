@@ -48,6 +48,7 @@ from _common import (
     read_seqs,
     run_measured,
     set_cpu_threads,
+    warm_jit_cache,
     worker_result,
     write_seqs,
     write_tsv,
@@ -111,11 +112,14 @@ def main():
                         help="SMO kernel-column cache (columns)")
     parser.add_argument("--conda-env", default="lsgkm")
     parser.add_argument("--lsgkm-bin", default=None,
-                        help="Directory with LS-GKM binaries (overrides --conda-env)")
+                        help="Directory with LS-GKM binaries the conda env lacks")
     parser.add_argument("--threads", type=int, default=lsgkm_default_threads(),
                         choices=LSGKM_THREADS,
                         help="LS-GKM -T and gkmsvm-lite CPU threads")
     parser.add_argument("--no-lsgkm", action="store_true")
+    parser.add_argument("--no-warm-jit", action="store_true",
+                        help="Skip compiling kernels before the timed runs (for smoke tests; "
+                        "the first run of each kernel then includes compiling it)")
     parser.add_argument("--timeout", type=float, default=6 * 3600,
                         help="Per-run timeout in seconds (default: 6 h)")
     parser.add_argument("--output", default=str(RESULTS / "training_memory.tsv"))
@@ -127,6 +131,8 @@ def main():
         return
     # Workers inherit this through the environment
     lite_threads = set_cpu_threads(args.threads)
+    if not args.no_warm_jit:
+        warm_jit_cache(args.device)
 
     solvers = [s for s in args.solvers.split(",") if not (args.no_lsgkm and s == "lsgkm")]
     bad = [s for s in solvers if s not in SOLVERS]

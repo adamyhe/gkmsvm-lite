@@ -53,12 +53,28 @@ def build_lmer_table(kernel, sv_packed, sv_rc_packed, sv_weights) -> np.ndarray 
     # Packed index = sum_k base_k 4^k, so in a C-order (4,)*l view axis a holds
     # position l - 1 - a
     V = V.reshape((4,) * l)
+
+    def marginal(S):
+        keep = {l - 1 - int(p) for p in S}
+        drop = tuple(a for a in range(l) if a not in keep)
+        return V.sum(axis=drop, keepdims=True) if drop else V
+
+    # With RC, V is RC-symmetric, so the marginal on the mirrored mask
+    # {l-1-p} is the marginal on S read at rc(u). Masks whose mirror has the
+    # same coefficient then cost one marginal per pair: w = w_self + w_pair
+    # + rc(w_pair).
+    coefs = {tuple(int(p) for p in S): coef for _, coef, positions in plan for S in positions}
     w = np.zeros_like(V)
-    for _, coef, positions in plan:
-        for S in positions:
-            keep = {l - 1 - int(p) for p in S}
-            drop = tuple(a for a in range(l) if a not in keep)
-            M = V.sum(axis=drop, keepdims=True) if drop else V
-            w += coef * M
+    w_pair = np.zeros_like(V)
+    for S, coef in coefs.items():
+        mirror = tuple(sorted(l - 1 - p for p in S))
+        if sv_rc_packed is None or coefs.get(mirror) != coef:
+            w += coef * marginal(S)
+        elif mirror == S:
+            w += coef * marginal(S)
+        elif S < mirror:
+            w_pair += coef * marginal(S)
+    # rc(u): reverse the positions (axes) and complement every base (flip)
+    w += w_pair + np.flip(w_pair.transpose(tuple(range(l - 1, -1, -1))))
     return w.ravel()
 

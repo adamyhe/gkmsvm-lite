@@ -179,3 +179,23 @@ class TestDirectGkmKernelEdgeCases:
         assert k.shape == (1, 1)
         assert np.isfinite(k).all()
         assert 0.0 <= float(k[0, 0]) <= 1.0
+
+
+@pytest.mark.parametrize("include_rc", [True, False])
+@pytest.mark.parametrize("l,k,d", [(6, 4, None), (10, 6, 3), (11, 7, 3)])
+def test_self_kernel_all_pairs(l, k, d, include_rc):
+    """raw_diag_packed (symmetric half, 4-row blocks) equals the sum over every window pair."""
+    from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
+
+    kernel = (DirectGkmKernel(l=l, k=k, include_rc=include_rc) if d is None
+              else EstTruncGkmKernel(l, k, d=d, include_rc=include_rc))
+    rng = np.random.default_rng(0)
+    x = np.eye(4)[rng.integers(0, 4, (12, 60))].transpose(0, 2, 1)
+    x[::3, :, rng.integers(0, 60, 5)] = 0  # rows with N take the unpaired RC path
+    bx, brc = kernel.pack_both(x)
+    by = bx if brc is None else np.concatenate([bx, brc], axis=1)
+    diff = bx[:, :, None] ^ by[:, None, :]
+    bits = ((diff >> 1) | diff) & np.uint32(0x55555555)
+    mism = np.unpackbits(bits.view(np.uint8), axis=-1).reshape(*bits.shape, 32).sum(-1)
+    expected = kernel._mismatch_table[mism].sum(axis=(1, 2))
+    np.testing.assert_allclose(kernel.raw_diag_packed(bx, brc), expected, rtol=1e-13)

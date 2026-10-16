@@ -1,207 +1,219 @@
-"""Throughput sweep: batch size × sequence length × device (Fig. S2).
+"""Prediction throughput vs number of support vectors (Fig. S2).
 
-Measures steady-state inference throughput for the ENCODE ENCFF579AOX model
-(72K SVs, esttrunc l=11 k=7 d=3). Separates model loading, warmup/JIT,
-and scoring time.
+Scores --n-seqs GM12878 DHS sequences (300 bp) with models of increasing size,
+built from nested random subsets of the ENCODE ENCFF579AOX model's support
+vectors (72,145 SVs, l=11 k=7 d=3):
+
+  -t 2  gkm_esttrunc, as trained. gkmsvm-lite scores through the exact
+        l-mer weight table, whose cost doesn't depend on the number of SVs.
+  -t 3  gkmrbf (gamma 1) on the same SVs and coefficients. gkmsvm-lite
+        scores through the cached l-mer index (per-SV kernel values for
+        the RBF), whose cost grows with the matching (window, SV) pairs.
+
+For both, path "masked join" turns the table and the index off, the kernel
+path before them (an SV index is built on every call), and LS-GKM's
+gkmpredict scores the same models at -T --threads. The -t 3 coefficients
+were trained for -t 2; only speed is measured.
+
+Each gkmsvm-lite run is a separate process. first_s is the first call on a
+freshly loaded model, including building its caches (packed SVs, table or
+index); steady_s is a second call. JIT compilation is excluded by first
+scoring with a small model of the same kernel. LS-GKM's time includes
+loading its model file, as in normal use.
 
 Usage:
-    python benchmarks/throughput_sweep.py              # CPU only
-    python benchmarks/throughput_sweep.py --device cuda # GPU
-    python benchmarks/throughput_sweep.py --device both # side-by-side
-    python benchmarks/throughput_sweep.py --device both \
-        --output benchmarks/results/throughput.tsv
+  python benchmarks/throughput_sweep.py --device cuda
+  python benchmarks/throughput_sweep.py --device cpu --sizes 1000,4000 --no-lsgkm
 """
 
 from __future__ import annotations
 
 import argparse
+import json
+import shutil
+import sys
+import tempfile
 import time
 from pathlib import Path
 
 import numpy as np
-from _common import write_tsv
 
-FIXTURE_DIR = Path(__file__).parent.parent / "tests" / "fixtures"
-MODEL_PATH = FIXTURE_DIR / "encode_ENCFF579AOX.model.txt.gz"
+from _common import (
+    LSGKM_THREADS,
+    REPO,
+    RESULTS,
+    SEQ_DIR,
+    emit_result,
+    gpu_sync,
+    lsgkm_binary,
+    lsgkm_default_threads,
+    lsgkm_has_option,
+    read_seqs,
+    run_measured,
+    set_cpu_threads,
+    worker_result,
+    write_seqs,
+    write_tsv,
+)
 
-SEQ_LENGTHS = [19, 50, 100, 200, 300]
-BATCH_SIZES = [1, 4, 16, 64, 256]
-MIN_SEQS = 64
-MIN_TIME = 2.0
+MODEL_PATH = REPO / "tests" / "fixtures" / "encode_ENCFF579AOX.model.txt.gz"
+DEFAULT_SIZES = "1000,4000,16000,max"
+KERNELS = {"t2": ("gkm_esttrunc", {}), "t3": ("gkmrbf", {"gamma": 1.0})}
+# Path a default model() call takes, per kernel
+DEFAULT_PATH = {"t2": "l-mer table", "t3": "l-mer index"}
+WARMUP_SVS = 600
 
 
-def _sync_gpu():
-    try:
-        import cupy as cp
-        cp.cuda.Stream.null.synchronize()
-    except ImportError:
-        pass
+def _subset_model(full, idx, kernel: str):
+    from gkmsvm import GkmSVM
+
+    kernel_type, extra = KERNELS[kernel]
+    # Positive-coefficient SVs first, as LIBSVM-format files list them by class
+    idx = idx[np.argsort(full.coefficients[idx] <= 0, kind="stable")]
+    return GkmSVM(full.support_sequences[idx], full.coefficients[idx], full.bias,
+                  kernel_type, {**full.kernel_params, **extra})
 
 
-def random_onehot(batch: int, length: int, xp=np) -> np.ndarray:
-    idx = xp.random.randint(0, 4, size=(batch, length))
-    x = xp.zeros((batch, 4, length), dtype=xp.float64)
-    for b in range(batch):
-        for p in range(length):
-            x[b, idx[b, p], p] = 1.0
-    return x
+# ── gkmsvm-lite worker (child process) ─────────────────────────────
 
 
-def bench_one(model, seq_len: int, batch_size: int, device: str) -> dict:
-    if device == "cuda":
-        import cupy as cp
-        xp = cp
-    else:
-        xp = np
+def _worker(spec: dict) -> None:
+    from gkmsvm import load_model, one_hot_encode
+    from gkmsvm.backend import to_cpu
 
-    x = random_onehot(batch_size, seq_len, xp)
+    X = np.stack([one_hot_encode(s) for s in read_seqs(spec["queries"])])
 
-    # Warmup (JIT + cache population)
-    _ = model(x)
-    _sync_gpu()
+    def prepare(path):
+        model = load_model(path)
+        if spec["path"] == "masked join":
+            model.use_lmer_table = False
+            model.use_lmer_index = False
+        if spec["device"] == "cuda":
+            model.cuda()
+        return model
 
-    # Score enough sequences to get a stable measurement
-    n_iters = max(1, MIN_SEQS // batch_size)
-    while True:
+    warm = prepare(spec["warmup_model"])  # compiles kernels on a small model
+    _ = to_cpu(warm(X[:32]))
+    gpu_sync()
+
+    model = prepare(spec["model"])
+    times = []
+    for _ in range(2):
         t0 = time.perf_counter()
-        for _ in range(n_iters):
-            _ = model(x)
-        _sync_gpu()
-        elapsed = time.perf_counter() - t0
-        if elapsed >= MIN_TIME or n_iters >= 1024:
-            break
-        n_iters = min(n_iters * 2, 1024)
-
-    total_seqs = n_iters * batch_size
-    seqs_per_sec = total_seqs / elapsed
-    ms_per_seq = elapsed / total_seqs * 1000
-
-    return {
-        "seq_len": seq_len,
-        "batch_size": batch_size,
-        "device": device,
-        "seqs_per_sec": seqs_per_sec,
-        "ms_per_seq": ms_per_seq,
-        "total_seqs": total_seqs,
-        "elapsed": elapsed,
-    }
+        _ = to_cpu(model(X, batch_size=spec["batch_size"]))
+        gpu_sync()
+        times.append(time.perf_counter() - t0)
+    emit_result(first_s=times[0], steady_s=times[1])
 
 
-def run_sweep(device: str):
-    from gkmsvm.importers.lsgkm import load_lsgkm_model
-
-    if not MODEL_PATH.exists():
-        print(f"ERROR: model not found at {MODEL_PATH}")
-        return []
-
-    print(f"\n{'='*70}")
-    print(f"  Throughput sweep — {device.upper()}")
-    print(f"  Model: ENCFF579AOX ({MODEL_PATH.name})")
-    print(f"{'='*70}")
-
-    print(f"\nLoading model...", end=" ", flush=True)
-    t0 = time.perf_counter()
-    model = load_lsgkm_model(str(MODEL_PATH))
-    load_time = time.perf_counter() - t0
-    print(f"{load_time:.1f}s ({model.num_support_vectors} SVs)")
-
-    if device == "cuda":
-        print("Moving to GPU...", end=" ", flush=True)
-        t0 = time.perf_counter()
-        model.cuda()
-        cuda_time = time.perf_counter() - t0
-        print(f"{cuda_time:.1f}s")
-
-    # JIT warmup
-    print("JIT warmup...", end=" ", flush=True)
-    if device == "cuda":
-        import cupy as cp
-        xp = cp
-    else:
-        xp = np
-    warmup = random_onehot(4, 50, xp)
-    t0 = time.perf_counter()
-    _ = model(warmup)
-    _sync_gpu()
-    jit_time = time.perf_counter() - t0
-    print(f"{jit_time:.1f}s")
-
-    # Header
-    print(f"\n{'len':>5} {'batch':>6}  {'seq/s':>10} {'ms/seq':>10} {'total':>6} {'time':>7}")
-    print("-" * 55)
-
-    results = []
-    for seq_len in SEQ_LENGTHS:
-        for batch_size in BATCH_SIZES:
-            r = bench_one(model, seq_len, batch_size, device)
-            results.append(r)
-            print(
-                f"{r['seq_len']:>5} {r['batch_size']:>6}"
-                f"  {r['seqs_per_sec']:>10.1f} {r['ms_per_seq']:>10.2f}"
-                f" {r['total_seqs']:>6} {r['elapsed']:>7.2f}s"
-            )
-        print()
-
-    # Summary: best batch size per sequence length
-    print(f"\nBest batch size per sequence length ({device}):")
-    print(f"{'len':>5} {'batch':>6} {'seq/s':>10}")
-    print("-" * 25)
-    for seq_len in SEQ_LENGTHS:
-        group = [r for r in results if r["seq_len"] == seq_len]
-        best = max(group, key=lambda r: r["seqs_per_sec"])
-        print(f"{seq_len:>5} {best['batch_size']:>6} {best['seqs_per_sec']:>10.1f}")
-
-    return results
+# ── Main ───────────────────────────────────────────────────────────
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument(
-        "--device", default="cpu", choices=["cpu", "cuda", "both"],
-    )
-    parser.add_argument("--output", default=None, help="Save the sweep to TSV")
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--device", default="cuda", choices=["cpu", "cuda"],
+                        help="cuda: run gkmsvm-lite on CPU and CUDA (default: cuda)")
+    parser.add_argument("--sizes", default=DEFAULT_SIZES,
+                        help="SV counts, comma separated; 'max' = all 72,145")
+    parser.add_argument("--kernels", default="t2,t3")
+    parser.add_argument("--n-seqs", type=int, default=1000, help="Query sequences")
+    parser.add_argument("--batch-size", type=int, default=1000)
+    parser.add_argument("--conda-env", default="lsgkm")
+    parser.add_argument("--lsgkm-bin", default=None,
+                        help="Directory with LS-GKM binaries the conda env lacks")
+    parser.add_argument("--threads", type=int, default=lsgkm_default_threads(),
+                        choices=LSGKM_THREADS,
+                        help="LS-GKM -T and gkmsvm-lite CPU threads")
+    parser.add_argument("--no-lsgkm", action="store_true")
+    parser.add_argument("--timeout", type=float, default=6 * 3600)
+    parser.add_argument("--output", default=str(RESULTS / "throughput.tsv"))
+    parser.add_argument("--worker", default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
 
-    all_results = {}
-    devices = ["cpu", "cuda"] if args.device == "both" else [args.device]
+    if args.worker:
+        _worker(json.loads(args.worker))
+        return
 
-    for device in devices:
-        if device == "cuda":
-            try:
-                import cupy  # noqa: F401
-            except ImportError:
-                print("SKIP: CuPy not available")
-                continue
-        all_results[device] = run_sweep(device)
+    import pandas as pd
+    from gkmsvm import load_lsgkm_model
 
-    if len(all_results) == 2 and "cpu" in all_results and "cuda" in all_results:
-        print(f"\n{'='*70}")
-        print(f"  GPU / CPU speedup")
-        print(f"{'='*70}")
-        print(f"{'len':>5} {'batch':>6} {'CPU seq/s':>10} {'GPU seq/s':>10} {'speedup':>8}")
-        print("-" * 45)
-        cpu_by_key = {(r["seq_len"], r["batch_size"]): r for r in all_results["cpu"]}
-        for r_gpu in all_results["cuda"]:
-            key = (r_gpu["seq_len"], r_gpu["batch_size"])
-            r_cpu = cpu_by_key.get(key)
-            if r_cpu:
-                speedup = r_gpu["seqs_per_sec"] / max(r_cpu["seqs_per_sec"], 0.001)
-                print(
-                    f"{key[0]:>5} {key[1]:>6}"
-                    f" {r_cpu['seqs_per_sec']:>10.1f} {r_gpu['seqs_per_sec']:>10.1f}"
-                    f" {speedup:>7.1f}x"
-                )
+    lite_threads = set_cpu_threads(args.threads)
+    gkmpredict = None if args.no_lsgkm else lsgkm_binary("gkmpredict", args.conda_env,
+                                                         args.lsgkm_bin)
+    if not args.no_lsgkm and gkmpredict is None:
+        sys.exit("gkmpredict not found; pass --lsgkm-bin or --no-lsgkm")
+    # Some builds' gkmpredict has no -T (single-threaded)
+    lsgkm_threads = (args.threads if gkmpredict and lsgkm_has_option(gkmpredict, "-T")
+                     else 1)
 
+    full = load_lsgkm_model(MODEL_PATH, dtype=np.float64)
+    S = full.num_support_vectors
+    sizes = sorted({S if s == "max" else min(int(s), S) for s in args.sizes.split(",")})
+    order = np.random.default_rng(0).permutation(S)
+    kernels = args.kernels.split(",")
+    devices = ["cpu", "cuda"] if args.device == "cuda" else ["cpu"]
 
-    if args.output:
-        import pandas as pd
+    work = Path(tempfile.mkdtemp(prefix="throughput_"))
+    queries = work / "queries.fa"
+    write_seqs(queries, read_seqs(SEQ_DIR / "gm12878_shared.fa")[:args.n_seqs], "q")
+    print(f"Work dir: {work}\n{args.n_seqs} queries, SV counts {sizes}, "
+          f"{lite_threads} CPU threads")
 
-        rows = [{"device": d, **r} for d, res in all_results.items() for r in res]
-        write_tsv(args.output, pd.DataFrame(rows), "Inference throughput sweep",
-                  args.device, model=MODEL_PATH.name)
+    rows = []
+    try:
+        for kernel in kernels:
+            warm_npz = work / f"{kernel}_warmup.npz"
+            _subset_model(full, order[:WARMUP_SVS], kernel).save(str(warm_npz))
+            for n_sv in sizes:
+                model = _subset_model(full, order[:n_sv], kernel)
+                npz = work / f"{kernel}_{n_sv}.npz"
+                model.save(str(npz))
+                print(f"\n── {kernel}, {n_sv:,} SVs ──")
+                base = {"kernel": kernel, "n_sv": n_sv, "n_seqs": args.n_seqs}
+
+                if gkmpredict is not None:
+                    txt = work / f"{kernel}_{n_sv}.model.txt"
+                    model.save(str(txt), fmt="lsgkm")
+                    opts = ["-T", str(lsgkm_threads)] if lsgkm_threads > 1 else []
+                    m = run_measured([gkmpredict, *opts, str(queries), str(txt),
+                                      str(work / "pred.txt")], timeout=args.timeout)
+                    if m.status != "ok":
+                        print(f"  LS-GKM {m.status}: {(m.stderr or m.stdout)[-500:]}")
+                    rows.append({**base, "implementation": "LS-GKM", "path": "gkmpredict",
+                                 "device": "cpu", "threads": lsgkm_threads,
+                                 "status": m.status, "first_s": m.wall_s,
+                                 "steady_s": m.wall_s, "peak_rss_mb": m.peak_rss_mb})
+                    print(f"  LS-GKM: {m.wall_s:.1f}s [{m.status}]")
+
+                for path in (DEFAULT_PATH[kernel], "masked join"):
+                    for device in devices:
+                        spec = {"model": str(npz), "warmup_model": str(warm_npz),
+                                "queries": str(queries), "path": path, "device": device,
+                                "batch_size": args.batch_size}
+                        m = run_measured([sys.executable, __file__, "--worker",
+                                          json.dumps(spec)], timeout=args.timeout)
+                        res = worker_result(m.stdout) or {}
+                        if m.status != "ok":
+                            print(f"  {path} {device} {m.status}: {m.stderr[-300:]}")
+                        rows.append({**base, "implementation": "gkmsvm-lite", "path": path,
+                                     "device": device,
+                                     "threads": lite_threads if device == "cpu" else None,
+                                     "status": m.status, "first_s": res.get("first_s"),
+                                     "steady_s": res.get("steady_s"),
+                                     "peak_rss_mb": m.peak_rss_mb})
+                        if res:
+                            print(f"  {path}, {device}: first {res['first_s']:.2f}s, "
+                                  f"steady {res['steady_s']:.2f}s "
+                                  f"({args.n_seqs / res['steady_s']:,.0f} seq/s)")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+    df = pd.DataFrame(rows)
+    df["seqs_per_sec"] = df["n_seqs"] / df["steady_s"]
+    write_tsv(args.output, df, "Prediction throughput vs number of SVs", args.device,
+              model=MODEL_PATH.name, lsgkm_threads=lsgkm_threads if gkmpredict else None,
+              lite_cpu_threads=lite_threads)
 
 
 if __name__ == "__main__":

@@ -50,21 +50,84 @@ def _fused_pairwise_packed_numba(bx, by, table, l, min_matches):
     return result
 
 
+@njit(inline="always")
+def _rc_window(w, l):
+    """Packed reverse complement of one packed l-mer."""
+    out = np.uint32(0)
+    for k in range(l):
+        out |= (np.uint32(3) - ((w >> np.uint32(2 * k)) & np.uint32(3))) << np.uint32(2 * (l - 1 - k))
+    return out
+
+
+@njit(inline="always")
+def _g(u, v, table):
+    # Branch-free: table is zero past the mismatch cutoff
+    return table[_packed_mismatches(u, v)]
+
+
+@njit(inline="always")
+def _block_sum(a, c, symmetric, table):
+    """sum over i, j of g(a[i], c[j]); for a symmetric matrix only pairs j >= i are visited.
+
+    Rows go in blocks of 4 so that each pass over c serves four rows (a loop
+    pass, not a pair, is the cost on short rows).
+    """
+    W = a.shape[0]
+    diag = 0.0  # j == i, symmetric only
+    off = 0.0  # j > i when symmetric, every j otherwise
+    i0 = 0
+    while i0 < W:
+        n = min(4, W - i0)
+        if n == 4 and not symmetric:
+            u0, u1, u2, u3 = a[i0], a[i0 + 1], a[i0 + 2], a[i0 + 3]
+            for j in range(W):
+                v = c[j]
+                off += _g(u0, v, table) + _g(u1, v, table) + _g(u2, v, table) + _g(u3, v, table)
+        elif n == 4:
+            u0, u1, u2, u3 = a[i0], a[i0 + 1], a[i0 + 2], a[i0 + 3]
+            diag += (_g(u0, c[i0], table) + _g(u1, c[i0 + 1], table)
+                     + _g(u2, c[i0 + 2], table) + _g(u3, c[i0 + 3], table))
+            off += (_g(u0, c[i0 + 1], table) + _g(u0, c[i0 + 2], table)
+                    + _g(u0, c[i0 + 3], table) + _g(u1, c[i0 + 2], table)
+                    + _g(u1, c[i0 + 3], table) + _g(u2, c[i0 + 3], table))
+            for j in range(i0 + 4, W):
+                v = c[j]
+                off += _g(u0, v, table) + _g(u1, v, table) + _g(u2, v, table) + _g(u3, v, table)
+        else:
+            for i in range(i0, W):
+                for j in range(i if symmetric else 0, W):
+                    if symmetric and j == i:
+                        diag += _g(a[i], c[j], table)
+                    else:
+                        off += _g(a[i], c[j], table)
+        i0 += n
+    return diag + 2.0 * off if symmetric else off
+
+
 @njit(parallel=True, cache=True, fastmath=True)
-def _fused_cross_diagonal_packed_numba(bx, bx_rc, table, l, min_matches):
-    """Cross-kernel diagonal (fwd vs RC) from packed uint32 windows."""
-    B = bx.shape[0]
-    W = bx.shape[1]
-    W_rc = bx_rc.shape[1]
+def _self_diagonal_packed_numba(bx, by, table, l):
+    """K_raw(x, x) [B] from packed windows; by is bx, or bx followed by its RC windows.
+
+    Both blocks are symmetric, so each unordered pair is visited once: the
+    forward block as (i, j), the RC block as (i, W-1-j), since its column j is
+    rc(window W-1-j). A row where that pairing fails (N positions pack as A on
+    both strands) visits every RC pair.
+    """
+    B, W = bx.shape
+    has_rc = by.shape[1] > W
     result = np.empty(B, dtype=np.float64)
     for b in prange(B):
-        acc = 0.0
-        for i in range(W):
-            bx_val = bx[b, i]
-            for j in range(W_rc):
-                matches = l - _packed_mismatches(bx_val, bx_rc[b, j])
-                if matches >= min_matches:
-                    acc += table[l - matches]
+        fwd = bx[b]
+        acc = _block_sum(fwd, fwd, True, table)
+        if has_rc:
+            # RC windows in forward order: rev[k] = rc(fwd[k]) when paired
+            rev = by[b, W:][::-1].copy()
+            paired = True
+            for k in range(W):
+                if rev[k] != _rc_window(fwd[k], l):
+                    paired = False
+                    break
+            acc += _block_sum(fwd, rev, paired, table)
         result[b] = acc
     return result
 
@@ -433,8 +496,8 @@ class DirectGkmKernel(PackedGkmKernel):
     def _brute_cross_diag(self, bx, by, dev):
         args = (self._mismatch_table, self.l, self._min_matches)
         if dev == "cpu":
-            return _fused_cross_diagonal_packed_numba(
-                np.ascontiguousarray(bx), np.ascontiguousarray(by), *args)
+            return _self_diagonal_packed_numba(
+                np.ascontiguousarray(bx), np.ascontiguousarray(by), *args[:2])
         if dev == "cuda":
             import cupy as cp
 

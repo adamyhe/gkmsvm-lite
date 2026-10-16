@@ -34,7 +34,8 @@ RETRAINED     := l10k6
 COMPL_ARGS    := --n-random 20
 VARIANT_ARGS  := --n-variants 500
 SOLVER_ARGS   := --sizes 500,1000,2000 --n-test 200
-SOLVER_CPU_ARGS := --sizes 500,1000 --n-test 200
+SOLVER_CPU_ARGS := --sizes 500,1000,2000 --n-test 200
+SWEEP_ARGS    := --sizes 1000,4000 --n-seqs 200
 DART_ARGS     := --max-variants 200
 DART4_ARGS    := --max-seqs 2000
 else
@@ -47,21 +48,16 @@ RETRAINED     := l10k6,l10k6_rbf
 COMPL_ARGS    :=
 VARIANT_ARGS  :=
 SOLVER_ARGS   :=
-# CPU SMO costs ~N^2 kernel values; 10k is hours on a 16-core Xeon
-SOLVER_CPU_ARGS := --sizes 1000,2000,5000,10000
+# CPU SMO with a 2,048-column cache: ~2 min at N=10k on an M4
+SOLVER_CPU_ARGS := --sizes 1000,2000,5000,10000,20000
+SWEEP_ARGS    :=
 DART_ARGS     :=
 DART4_ARGS    :=
 endif
 
-ifeq ($(DEVICE),cpu)
-SWEEP_DEVICE  := cpu
-else
-SWEEP_DEVICE  := both
-endif
-
 COMMON := _common.py
 THR    := $(if $(THREADS),--threads $(THREADS))
-# gkmexplain may be missing from conda's ls-gkm; point LSGKM_BIN at a source build
+# gkmexplain is not in conda's ls-gkm: point LSGKM_BIN at a kundajelab/lsgkm source build
 LSGKM  := --conda-env $(LSGKM_ENV) $(if $(LSGKM_BIN),--lsgkm-bin $(LSGKM_BIN))
 DSQTL  := dsqtl_auprc.py $(COMMON)
 
@@ -111,7 +107,7 @@ $(OUT)/dsqtl_retrained_per_model.tsv: $(DSQTL)
 	    --output $(OUT)/dsqtl_retrained_summed.tsv --per-model-output $@
 
 $(OUT)/throughput.tsv: throughput_sweep.py $(COMMON)
-	$(PY) throughput_sweep.py --device $(SWEEP_DEVICE) --output $@
+	$(PY) throughput_sweep.py --device $(DEVICE) $(LSGKM) $(THR) $(SWEEP_ARGS) --output $@
 
 $(OUT)/training_memory.tsv: training_memory.py $(DSQTL)
 	$(PY) training_memory.py --device $(DEVICE) $(LSGKM) $(THR) $(SOLVER_ARGS) \

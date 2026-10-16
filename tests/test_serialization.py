@@ -93,6 +93,18 @@ class TestLsgkmRoundTrip:
         assert loaded.bias == pytest.approx(model.bias, abs=1e-6)
         assert loaded.num_support_vectors == model.num_support_vectors
 
+    @pytest.mark.parametrize("include_rc", [True, False])
+    def test_norc_only_when_rc_off(self, tmp_path, include_rc):
+        """kundajelab lsgkm rejects a norc line, so RC-on models (the default) omit it."""
+        m = _make_model()
+        model = GkmSVM(m.support_sequences, m.coefficients, m.bias, m.kernel_type,
+                       {**m.kernel_params, "include_rc": include_rc})
+        path = tmp_path / "model.txt"
+        model.save(str(path), fmt="lsgkm")
+        header = path.read_text().split("\nSV\n")[0].splitlines()
+        assert [h for h in header if h.startswith("norc")] == ([] if include_rc else ["norc 1"])
+        assert load_lsgkm_model(str(path)).kernel.include_rc == include_rc
+
     def test_save_load_gz(self, tmp_path):
         model = _make_model()
         path = tmp_path / "model.txt.gz"

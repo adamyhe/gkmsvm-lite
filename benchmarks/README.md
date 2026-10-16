@@ -18,9 +18,9 @@ Per-host settings go in `benchmarks/local.mk`, which make reads if it exists and
 LSGKM_BIN = /path/to/lsgkm/bin
 ```
 
-Panel 1C needs LS-GKM's `gkmexplain`, which some `ls-gkm` conda builds lack. The other targets use the `lsgkm` conda env (`LSGKM_ENV`). See [Building LS-GKM with gkmexplain](#building-ls-gkm-with-gkmexplain).
+Panel 1C needs LS-GKM's `gkmexplain`, which the Beer lab's LS-GKM and the bioconda `ls-gkm` package don't have; the kundajelab fork does. Every script takes each LS-GKM binary from the `lsgkm` conda env (`LSGKM_ENV`) when the env has it, and from `LSGKM_BIN` otherwise: the kundajelab source build's `gkmpredict` has no `-T`, so it would run single-threaded. 1C times both implementations' CPU code at `THREADS` and at 1 thread (LS-GKM binaries without `-T` at 1 only), so every LS-GKM bar has a gkmsvm-lite CPU bar at its thread count. LS-GKM's `-T` splits each sequence's kernel sum across threads, so it slows down the deltaSVM build (524,800 10-mers): on one 16-core server, 3,773 s at `-T 16` against 684 s at `-T 1`. See [Building LS-GKM with gkmexplain](#building-ls-gkm-with-gkmexplain).
 
-Timed runs each execute in their own process, so the reported peak memory is that run's alone. LS-GKM's `-T` accepts only 1, 4 or 16; scripts default to the largest the process has usable cores for (16 on a 16+ core server; override with `THREADS=`), run gkmsvm-lite's CPU code on the same number of threads, and record both.
+Timed runs each execute in their own process, so the reported peak memory is that run's alone. Scripts that time whole processes (`timing_variants.py`, `training_memory.py`) first run an untimed process that compiles gkmsvm-lite's kernels into the on-disk Numba and CuPy caches (`_common.warm_jit_cache`; about 10 s per device after an install or a kernel edit, 2 s otherwise), so no timed run includes compiling; `--no-warm-jit` skips it for smoke tests. LS-GKM's `-T` accepts only 1, 4 or 16; scripts default to the largest the process has usable cores for (16 on a 16+ core server; override with `THREADS=`), run gkmsvm-lite's CPU code on the same number of threads, and record both.
 
 ## Panels
 
@@ -28,10 +28,10 @@ Timed runs each execute in their own process, so the reported peak memory is tha
 |---|---|---|---|---|
 | 1A | Per-variant agreement with LS-GKM (ISM, GkmExplain, deltaSVM.pl) | `fig1a` | `agreement_lsgkm.py` | `agreement_dsqtl.tsv`, `agreement_checks.tsv` |
 | 1B | Training time vs N with each tool's default solver, both at `THREADS` and at 1 thread | `fig1b` | `timing_train.py` | `timing_train.tsv`, `timing_train_T1.tsv` |
-| 1C | Time and memory to score the 28,309 dsQTL variants (ISM, GkmExplain, deltaSVM table) | `fig1c` | `timing_variants.py` | `timing_variants.tsv` |
+| 1C | Time and memory to score the 28,309 dsQTL variants: ISM and GkmExplain per variant; deltaSVM as a one-time 10-mer table build, then scoring with the table | `fig1c` | `timing_variants.py` | `timing_variants.tsv` |
 | 1D | dsQTL AUPRC with the paper's models | `fig1d` | `dsqtl_auprc.py` | `dsqtl_summed.tsv`, `dsqtl_per_model.tsv` |
 | S1 | Models trained with gkmsvm-lite vs the paper's LS-GKM models | `s1` | `dsqtl_auprc.py` | `dsqtl_retrained_*.tsv` |
-| S2 | Prediction throughput, sequence length × batch size | `s2` | `throughput_sweep.py` | `throughput.tsv` |
+| S2 | Prediction throughput vs number of SVs (`-t 2` l-mer table, `-t 3` l-mer index, masked join, LS-GKM) | `s2` | `throughput_sweep.py` | `throughput.tsv` |
 | S3 | Training time, peak memory and held-out accuracy by solver (precomputed Gram, SMO, Nyström, LS-GKM), gkmsvm-lite on GPU and on CPU | `s3` | `training_memory.py` | `training_memory.tsv`, `training_memory_cpu.tsv` |
 | S4 | GkmExplain completeness | `s4` | `completeness.py` | `completeness.tsv` |
 | S5 | DART-Eval Tasks 4 and 5 with ENCODE models | `s5` | `dart_eval.py` | `dart_task4_*.tsv`, `dart_task5_dsqtl_*.tsv` |

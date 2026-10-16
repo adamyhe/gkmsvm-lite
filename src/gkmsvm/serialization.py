@@ -111,8 +111,10 @@ def save_lsgkm(model, path: str | Path) -> None:
     if "H" in params:
         lines.append(f"H {params['H']}")
 
-    include_rc = params.get("include_rc", True)
-    lines.append(f"norc {0 if include_rc else 1}")
+    # Only builds that can turn RC off know the norc key (kundajelab's lsgkm
+    # rejects it), so write it only when RC is off
+    if not params.get("include_rc", True):
+        lines.append("norc 1")
     lines.append(f"nr_class 2")
     lines.append(f"total_sv {len(coefs)}")
     lines.append(f"rho {-model.bias}")
