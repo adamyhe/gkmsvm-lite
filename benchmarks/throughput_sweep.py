@@ -12,7 +12,8 @@ vectors (72,145 SVs, l=11 k=7 d=3):
 
 For both, path "masked join" turns the table and the index off, the kernel
 path before them (an SV index is built on every call), and LS-GKM's
-gkmpredict scores the same models at -T --threads. The -t 3 coefficients
+gkmpredict scores the same models at -T --threads (and mLS-GKM's at
+-t --threads -T 1 with --mlsgkm-bin). The -t 3 coefficients
 were trained for -t 2; only speed is measured.
 
 Each gkmsvm-lite run is a separate process. first_s is the first call on a
@@ -40,14 +41,18 @@ import numpy as np
 
 from _common import (
     LSGKM_THREADS,
+    MLSGKM,
     REPO,
     RESULTS,
     SEQ_DIR,
+    c_threads_opts,
     emit_result,
     gpu_sync,
     lsgkm_binary,
     lsgkm_default_threads,
     lsgkm_has_option,
+    mlsgkm_binary,
+    mlsgkm_version,
     read_seqs,
     run_measured,
     set_cpu_threads,
@@ -126,6 +131,9 @@ def main():
                         choices=LSGKM_THREADS,
                         help="LS-GKM -T and gkmsvm-lite CPU threads")
     parser.add_argument("--no-lsgkm", action="store_true")
+    parser.add_argument("--mlsgkm-bin", default=None,
+                        help="mLS-GKM bin directory (source build): also time its gkmpredict "
+                        "(-t --threads -T 1)")
     parser.add_argument("--timeout", type=float, default=6 * 3600)
     parser.add_argument("--output", default=str(RESULTS / "throughput.tsv"))
     parser.add_argument("--worker", default=None, help=argparse.SUPPRESS)
@@ -139,13 +147,20 @@ def main():
     from gkmsvm import load_lsgkm_model
 
     lite_threads = set_cpu_threads(args.threads)
-    gkmpredict = None if args.no_lsgkm else lsgkm_binary("gkmpredict", args.conda_env,
-                                                         args.lsgkm_bin)
-    if not args.no_lsgkm and gkmpredict is None:
-        sys.exit("gkmpredict not found; pass --lsgkm-bin or --no-lsgkm")
-    # Some builds' gkmpredict has no -T (single-threaded)
-    lsgkm_threads = (args.threads if gkmpredict and lsgkm_has_option(gkmpredict, "-T")
-                     else 1)
+    # C gkmpredict runs: (implementation, binary, CPU threads)
+    c_runs = []
+    if not args.no_lsgkm:
+        gkmpredict = lsgkm_binary("gkmpredict", args.conda_env, args.lsgkm_bin)
+        if gkmpredict is None:
+            sys.exit("gkmpredict not found; pass --lsgkm-bin or --no-lsgkm")
+        # Some builds' gkmpredict has no -T (single-threaded)
+        c_runs.append(("LS-GKM", gkmpredict,
+                       args.threads if lsgkm_has_option(gkmpredict, "-T") else 1))
+    if args.mlsgkm_bin:
+        gkmpredict = mlsgkm_binary("gkmpredict", args.mlsgkm_bin)
+        if gkmpredict is None:
+            sys.exit(f"gkmpredict not found in {args.mlsgkm_bin}")
+        c_runs.append((MLSGKM, gkmpredict, args.threads))
 
     full = load_lsgkm_model(MODEL_PATH, dtype=np.float64)
     S = full.num_support_vectors
@@ -172,19 +187,19 @@ def main():
                 print(f"\n── {kernel}, {n_sv:,} SVs ──")
                 base = {"kernel": kernel, "n_sv": n_sv, "n_seqs": args.n_seqs}
 
-                if gkmpredict is not None:
-                    txt = work / f"{kernel}_{n_sv}.model.txt"
+                txt = work / f"{kernel}_{n_sv}.model.txt"
+                if c_runs:
                     model.save(str(txt), fmt="lsgkm")
-                    opts = ["-T", str(lsgkm_threads)] if lsgkm_threads > 1 else []
-                    m = run_measured([gkmpredict, *opts, str(queries), str(txt),
-                                      str(work / "pred.txt")], timeout=args.timeout)
+                for impl, gkmpredict, n_thr in c_runs:
+                    m = run_measured([gkmpredict, *c_threads_opts(impl, n_thr), str(queries),
+                                      str(txt), str(work / "pred.txt")], timeout=args.timeout)
                     if m.status != "ok":
-                        print(f"  LS-GKM {m.status}: {(m.stderr or m.stdout)[-500:]}")
-                    rows.append({**base, "implementation": "LS-GKM", "path": "gkmpredict",
-                                 "device": "cpu", "threads": lsgkm_threads,
+                        print(f"  {impl} {m.status}: {(m.stderr or m.stdout)[-500:]}")
+                    rows.append({**base, "implementation": impl, "path": "gkmpredict",
+                                 "device": "cpu", "threads": n_thr,
                                  "status": m.status, "first_s": m.wall_s,
                                  "steady_s": m.wall_s, "peak_rss_mb": m.peak_rss_mb})
-                    print(f"  LS-GKM: {m.wall_s:.1f}s [{m.status}]")
+                    print(f"  {impl} ({n_thr} threads): {m.wall_s:.1f}s [{m.status}]")
 
                 for path in (DEFAULT_PATH[kernel], "masked join"):
                     for device in devices:
@@ -212,8 +227,9 @@ def main():
     df = pd.DataFrame(rows)
     df["seqs_per_sec"] = df["n_seqs"] / df["steady_s"]
     write_tsv(args.output, df, "Prediction throughput vs number of SVs", args.device,
-              model=MODEL_PATH.name, lsgkm_threads=lsgkm_threads if gkmpredict else None,
-              lite_cpu_threads=lite_threads)
+              model=MODEL_PATH.name,
+              c_threads=",".join(f"{impl}:{t}" for impl, _, t in c_runs) or None,
+              mlsgkm=mlsgkm_version(args.mlsgkm_bin), lite_cpu_threads=lite_threads)
 
 
 if __name__ == "__main__":

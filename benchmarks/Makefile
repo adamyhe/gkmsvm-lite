@@ -17,6 +17,8 @@ PY            ?= python
 DEVICE        ?= cuda
 LSGKM_ENV     ?= lsgkm
 LSGKM_BIN     ?=
+# mLS-GKM source build's bin directory: adds it as a baseline in 1B, 1C and S2
+MLSGKM_BIN    ?=
 # CPU threads for LS-GKM -T and gkmsvm-lite (1, 4 or 16); empty = largest
 # the host's usable cores allow (16 on a 16+ core server)
 THREADS       ?=
@@ -59,6 +61,7 @@ COMMON := _common.py
 THR    := $(if $(THREADS),--threads $(THREADS))
 # gkmexplain is not in conda's ls-gkm: point LSGKM_BIN at a kundajelab/lsgkm source build
 LSGKM  := --conda-env $(LSGKM_ENV) $(if $(LSGKM_BIN),--lsgkm-bin $(LSGKM_BIN))
+MLS    := $(if $(MLSGKM_BIN),--mlsgkm-bin $(MLSGKM_BIN))
 DSQTL  := dsqtl_auprc.py $(COMMON)
 
 # ── Figure 1 ────────────────────────────────────────────────────────
@@ -73,15 +76,15 @@ $(OUT)/agreement_dsqtl.tsv: agreement_lsgkm.py $(DSQTL)
 	    --output $(OUT)/agreement_checks.tsv --dump $@
 
 $(OUT)/timing_train.tsv: timing_train.py $(COMMON)
-	$(PY) timing_train.py $(LSGKM) --device $(DEVICE) $(THR) \
+	$(PY) timing_train.py $(LSGKM) $(MLS) --device $(DEVICE) $(THR) \
 	    --sizes $(TIMING_SIZES) --output $@
 
 $(OUT)/timing_train_T1.tsv: timing_train.py $(COMMON)
-	$(PY) timing_train.py $(LSGKM) --device $(DEVICE) \
+	$(PY) timing_train.py $(LSGKM) $(MLS) --device $(DEVICE) \
 	    --sizes $(TIMING_SIZES) --threads 1 --output $@
 
 $(OUT)/timing_variants.tsv: timing_variants.py $(DSQTL)
-	$(PY) timing_variants.py --device $(DEVICE) $(LSGKM) $(THR) $(VARIANT_ARGS) \
+	$(PY) timing_variants.py --device $(DEVICE) $(LSGKM) $(MLS) $(THR) $(VARIANT_ARGS) \
 	    --output $@
 
 $(OUT)/dsqtl_per_model.tsv: $(DSQTL)
@@ -107,7 +110,7 @@ $(OUT)/dsqtl_retrained_per_model.tsv: $(DSQTL)
 	    --output $(OUT)/dsqtl_retrained_summed.tsv --per-model-output $@
 
 $(OUT)/throughput.tsv: throughput_sweep.py $(COMMON)
-	$(PY) throughput_sweep.py --device $(DEVICE) $(LSGKM) $(THR) $(SWEEP_ARGS) --output $@
+	$(PY) throughput_sweep.py --device $(DEVICE) $(LSGKM) $(MLS) $(THR) $(SWEEP_ARGS) --output $@
 
 $(OUT)/training_memory.tsv: training_memory.py $(DSQTL)
 	$(PY) training_memory.py --device $(DEVICE) $(LSGKM) $(THR) $(SOLVER_ARGS) \
@@ -156,7 +159,7 @@ help:
 	@echo "Figure 1:   fig1a fig1b fig1c fig1d"
 	@echo "Supplement: s1 s2 s3 s4 s5"
 	@echo "All:        paper (results), figures (PDFs), quick (small run)"
-	@echo "Options:    DEVICE=$(DEVICE) QUICK=1 PY=$(PY) THREADS=1|4|16 LSGKM_ENV=$(LSGKM_ENV) LSGKM_BIN=<dir>"
+	@echo "Options:    DEVICE=$(DEVICE) QUICK=1 PY=$(PY) THREADS=1|4|16 LSGKM_ENV=$(LSGKM_ENV) LSGKM_BIN=<dir> MLSGKM_BIN=<dir>"
 	@echo "            DART_WORK_DIR=$(DART_WORK_DIR) DART_MODELS=$(DART_MODELS)"
 
 .DEFAULT_GOAL := help

@@ -36,12 +36,16 @@ import numpy as np
 
 from _common import (
     LSGKM_THREADS,
+    MLSGKM,
     RESULTS,
     SEQ_DIR,
+    c_threads_opts,
     lsgkm_binary,
     lsgkm_default_threads,
     lsgkm_has_option,
     lsgkm_version,
+    mlsgkm_binary,
+    mlsgkm_version,
     set_cpu_threads,
     write_header,
     write_seqs,
@@ -151,12 +155,10 @@ def run_gkmtrain(
 
 def run_gkmpredict(
     binary: str, test_fa: Path, model_path: Path, output_path: Path,
-    threads: int | None = None,
+    opts: list[str] = (),
 ) -> tuple[float | None, np.ndarray | None]:
-    cmd = [binary]
-    if threads is not None:
-        cmd += ["-T", str(threads)]
-    cmd += [str(test_fa), str(model_path), str(output_path)]
+    """Time one gkmpredict run (LS-GKM or mLS-GKM; opts from c_threads_opts)."""
+    cmd = [binary, *opts, str(test_fa), str(model_path), str(output_path)]
     t0 = time.perf_counter()
     r = subprocess.run(cmd, capture_output=True, text=True)
     elapsed = time.perf_counter() - t0
@@ -366,6 +368,9 @@ def main():
                         help="Conda env containing ls-gkm (default: lsgkm)")
     parser.add_argument("--lsgkm-bin", default=None,
                         help="Directory with LS-GKM binaries the conda env lacks")
+    parser.add_argument("--mlsgkm-bin", default=None,
+                        help="mLS-GKM bin directory (source build): also time its gkmpredict "
+                        "(-t --threads -T 1) on the LS-GKM models")
     parser.add_argument("--setup", action="store_true",
                         help="Create the conda env before benchmarking")
     parser.add_argument("--device", default="cpu", choices=["cpu", "cuda", "mlx"],
@@ -415,6 +420,11 @@ def main():
     print(f"Kernel:             -t 2 -l {args.l} -k {args.k} -d {args.d}")
     predict_threads = args.threads if lsgkm_has_option(gkmpredict_bin, "-T") else None
     print(f"LS-GKM threads:     {args.threads} (gkmpredict: {predict_threads or 1})")
+    mlsgkm_predict = mlsgkm_binary("gkmpredict", args.mlsgkm_bin)
+    if args.mlsgkm_bin and mlsgkm_predict is None:
+        sys.exit(f"gkmpredict not found in {args.mlsgkm_bin}")
+    if mlsgkm_predict:
+        print(f"mLS-GKM gkmpredict: {mlsgkm_predict} (-t {args.threads})")
     print(f"gkmsvm-lite CPU threads: {lite_threads}")
     print(f"Inference repeats:  {args.repeats}")
 
@@ -571,7 +581,7 @@ def main():
                     out_c = tmpdir / f"pred_c_{N}_{rep}.txt"
                     t, sc = run_gkmpredict(
                         gkmpredict_bin, test_fa, model_c_path, out_c,
-                        threads=predict_threads,
+                        c_threads_opts("LS-GKM", predict_threads or 1),
                     )
                     if t is not None:
                         times_c.append(t)
@@ -580,6 +590,23 @@ def main():
                     t_infer_c = float(np.median(times_c))
                     print(f"    LS-GKM C:        {t_infer_c:.2f}s  "
                           f"({len(test_seqs) / t_infer_c:.0f} seq/s)")
+
+            # mLS-GKM gkmpredict on the LS-GKM model, -t threads
+            t_infer_m = None
+            if t_train_c is not None and mlsgkm_predict:
+                times_m, scores_m = [], None
+                for rep in range(args.repeats):
+                    t, scores_m = run_gkmpredict(
+                        mlsgkm_predict, test_fa, model_c_path, tmpdir / f"pred_m_{N}_{rep}.txt",
+                        c_threads_opts(MLSGKM, args.threads))
+                    if t is not None:
+                        times_m.append(t)
+                if times_m:
+                    t_infer_m = float(np.median(times_m))
+                    same = (f", max|Δ| vs LS-GKM {np.abs(scores_m - scores_c).max():.1e}"
+                            if scores_c is not None else "")
+                    print(f"    mLS-GKM:         {t_infer_m:.2f}s  "
+                          f"({len(test_seqs) / t_infer_m:.0f} seq/s{same})")
 
             # gkmsvm-lite CPU
             times_cpu = []
@@ -612,7 +639,7 @@ def main():
                 "N_train": N, "n_sv": n_sv_lite,
                 "n_test": len(test_seqs),
                 "t_lsgkm": t_infer_c, "t_lite_cpu": t_infer_cpu,
-                "t_lite_gpu": t_infer_gpu,
+                "t_lite_gpu": t_infer_gpu, "t_mlsgkm": t_infer_m,
             })
 
             print()
@@ -694,6 +721,7 @@ def main():
             lsgkm=(lsgkm_version(args.conda_env) if not args.lsgkm_bin
                    else f"built from source ({args.lsgkm_bin})"),
             lsgkm_threads=args.threads,
+            mlsgkm=mlsgkm_version(args.mlsgkm_bin),
             lsgkm_cache_mb=args.lsgkm_cache or "100 (default)",
             lite_cpu_threads=lite_threads,
             test_sequences=args.n_test,
@@ -731,13 +759,14 @@ def main():
 
         f.write("\n## Inference\n")
         f.write("N_train\tn_sv\tn_test\tt_lsgkm_infer\t"
-                "t_lite_cpu_infer\tt_lite_gpu_infer\n")
+                "t_lite_cpu_infer\tt_lite_gpu_infer\tt_mlsgkm_infer\n")
         for r in infer_results:
             vals = [
                 str(r["N_train"]), str(r["n_sv"]), str(r["n_test"]),
                 f"{r['t_lsgkm']:.3f}" if r["t_lsgkm"] else "NA",
                 f"{r['t_lite_cpu']:.3f}",
                 f"{r['t_lite_gpu']:.3f}" if r["t_lite_gpu"] else "NA",
+                f"{r['t_mlsgkm']:.3f}" if r["t_mlsgkm"] else "NA",
             ]
             f.write("\t".join(vals) + "\n")
 

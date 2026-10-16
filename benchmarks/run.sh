@@ -12,6 +12,7 @@
 #   bash benchmarks/run.sh --quick            # small settings, results/quick/
 #   bash benchmarks/run.sh --cpu-only fig1b
 #   bash benchmarks/run.sh --lsgkm-bin <lsgkm>/bin fig1c   # source build with gkmexplain
+#   bash benchmarks/run.sh --mlsgkm-bin <mLS-GKM>/bin       # add the mLS-GKM baseline
 #
 # Prerequisites: conda or mamba, make, CUDA driver (for GPU)
 set -euo pipefail
@@ -28,6 +29,7 @@ while [[ $# -gt 0 ]]; do
         --quick)     MAKE_VARS+=(QUICK=1); shift ;;
         --cpu-only)  DEVICE="cpu"; shift ;;
         --lsgkm-bin) MAKE_VARS+=("LSGKM_BIN=$2"); shift 2 ;;
+        --mlsgkm-bin) MAKE_VARS+=("MLSGKM_BIN=$2"); shift 2 ;;
         --lsgkm-env) LSGKM_ENV="$2"; shift 2 ;;
         --env)       LITE_ENV="$2"; shift 2 ;;
         -*)          echo "Unknown option: $1"; exit 1 ;;

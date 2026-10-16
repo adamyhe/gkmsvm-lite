@@ -202,6 +202,40 @@ def lsgkm_has_option(binary: str, option: str) -> bool:
                      re.MULTILINE) is not None
 
 
+# mLS-GKM (Howard & Harmston 2026, github.com/harmstonlab/mLS-GKM): LS-GKM with
+# multi-class models and worker threads across sequences (-t). Built from
+# source; it reads LS-GKM model files and, for binary models with -D, writes
+# gkmpredict/gkmexplain output in LS-GKM's format
+MLSGKM = "mLS-GKM"
+
+
+def mlsgkm_binary(name: str, bin_dir: str | None) -> str | None:
+    """Path to an mLS-GKM binary in bin_dir, or None."""
+    path = Path(bin_dir) / name if bin_dir else None
+    return str(path) if path is not None and path.exists() else None
+
+
+def c_threads_opts(impl: str, n_threads: int) -> list[str]:
+    """Options running LS-GKM or mLS-GKM gkmpredict/gkmexplain on n_threads CPU threads.
+
+    LS-GKM's -T splits each sequence's kernel sum (callers pass it only to
+    binaries that list -T); mLS-GKM's -t runs that many worker threads over
+    sequences with -T 1, as its README advises for many sequences, and -D
+    selects binary decision values (it requires an output mode).
+    """
+    if impl == MLSGKM:
+        return ["-D", "-t", str(n_threads), "-T", "1"]
+    return ["-T", str(n_threads)] if n_threads > 1 else []
+
+
+def mlsgkm_version(bin_dir: str | None) -> str | None:
+    """git commit of an mLS-GKM checkout (bin_dir is <checkout>/bin), if any."""
+    if not bin_dir:
+        return None
+    commit = _run(["git", "rev-parse", "--short", "HEAD"], cwd=Path(bin_dir).resolve().parent)
+    return f"mLS-GKM {commit}" if commit else "mLS-GKM"
+
+
 def lsgkm_version(conda_env: str = "lsgkm") -> str | None:
     """Version of the bioconda ``ls-gkm`` package in ``conda_env``, if any."""
     out = _run(["conda", "list", "-n", conda_env, "ls-gkm", "--json"])
