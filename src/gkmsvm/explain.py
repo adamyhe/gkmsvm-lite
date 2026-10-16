@@ -163,6 +163,53 @@ def _explain_cpu(packed_x, packed_y, table_a, table_b, eff_coef, l, min_matches,
     return result
 
 
+@njit(parallel=True, cache=True, fastmath=True)
+def _explain_lmer_cpu(packed_x, inv_dx, V, masks, levels, table_a, table_b, l, seqlen,
+                      perturbation, n_split):
+    """[B, 4, seqlen] attributions from the SVs' l-mer weights V (see _explain_lmer).
+
+    Each query window u visits every l-mer v = u ^ mask within the mismatch
+    cutoff and adds V[v] times the alpha/kappa (or perturbation) weight of
+    their mismatch count to each of its positions, as _explain_cpu does for
+    every SV window equal to v. Rows are split into n_split window chunks.
+    """
+    B, W = packed_x.shape
+    n_lmers = V.shape[0]
+    part = np.zeros((B * n_split, 4, seqlen))
+    step = (W + n_split - 1) // n_split
+    for task in prange(B * n_split):
+        b, c = task // n_split, task % n_split
+        acc = part[task]
+        for i in range(c * step, min(W, (c + 1) * step)):
+            u = packed_x[b, i]
+            for t in range(masks.shape[0]):
+                mask = masks[t]
+                v = u ^ mask
+                if np.int64(v) >= n_lmers:
+                    continue
+                wv = V[v]
+                if wv == 0.0:
+                    continue
+                av = wv * table_a[levels[t]]
+                bv = wv * table_b[levels[t]]
+                for k in range(l):
+                    v_k = int((v >> np.uint32(2 * k)) & np.uint32(3))
+                    same = ((mask >> np.uint32(2 * k)) & np.uint32(3)) == 0
+                    pos = k + i
+                    if not perturbation:
+                        acc[v_k, pos] += av if same else bv
+                    elif same:
+                        for h in range(4):
+                            if h != v_k:
+                                acc[h, pos] += av
+                    else:
+                        acc[v_k, pos] += bv
+    out = part.reshape(B, n_split, 4, seqlen).sum(axis=1)
+    for b in range(B):
+        out[b] *= inv_dx[b]
+    return out
+
+
 @njit(parallel=True, cache=True)
 def _impact_cpu(k_both, diag_r, diag_sv, norm, coef, gamma):
     """[n] mutation impact from raw K [ref rows; alt rows] against the SVs.
@@ -354,6 +401,10 @@ def gkmexplain(
         table_a = _build_alpha_table(kernel._mismatch_table, l, d)
         table_b = _build_kappa_table(kernel._mismatch_table, l, d)
     min_matches = _explain_min_matches(table_a, table_b, l)
+    lmer = _explain_lmer(model, x, table_a, table_b, l - min_matches, is_perturbation,
+                         batch_size, verbose)
+    if lmer is not None:
+        return lmer
 
     S = model.num_support_vectors
     coefs = model.coefficients
@@ -392,6 +443,67 @@ def gkmexplain(
                              s1 - s0, packed_sv.shape[0], l, min_matches, is_perturbation)
 
     return result.astype(x.dtype)
+
+
+def _explain_lmer(model, x, table_a, table_b, dmax, perturbation, batch_size, verbose):
+    """GkmExplain through the SVs' l-mer weights, or None when it doesn't apply.
+
+    The attribution is linear in the SVs: with normalization each SV window
+    v contributes coef_s / sqrt(K(sv, sv) K(x, x)) times a weight that
+    depends only on the query window u and v. Summing over SVs first gives
+    V[v] = sum_s coef_s / sqrt(K(sv, sv)) * (occurrences of v in sv_s and its
+    RC), and a query window then visits only the l-mers within dmax
+    mismatches. A call costs nothing per SV; V (4^l float64) is cached.
+    Runs on CPU; results go back to x's device.
+    """
+    import numba
+
+    from gkmsvm.backend import to_cpu
+    from gkmsvm.kernels import lmer_index
+
+    kernel = model.kernel
+    l = kernel.l
+    if (l > lmer_index.MAX_L or dmax < 0
+            or lmer_index.neighbor_count(l, dmax) > lmer_index.MAX_NEIGHBORS):
+        return None
+    c = model._sv_cache
+    if "explain_V" not in c:
+        coef = to_cpu(model.coefficients).astype(np.float64)
+        if kernel.normalize:
+            coef = coef / np.sqrt(np.clip(to_cpu(model._sv_diag()).astype(np.float64),
+                                          1e-20, None))
+        V = np.zeros(4**l)
+        for packed in model._sv_packed():
+            if packed is not None:
+                packed = to_cpu(packed)
+                V += np.bincount(packed.ravel().astype(np.int64),
+                                 weights=np.repeat(coef, packed.shape[1]), minlength=4**l)
+        c["explain_V"] = V
+    V = c["explain_V"]
+    nonzero = np.maximum(np.abs(table_a), np.abs(table_b))
+    masks, levels = lmer_index.neighbor_masks(l, nonzero, dmax)
+
+    xp = get_array_module(x)
+    x_cpu = to_cpu(x)
+    B, _, seqlen = x_cpu.shape
+    starts = range(0, B, batch_size)
+    if verbose:
+        from tqdm import tqdm
+        starts = tqdm(starts, desc="GkmExplain", total=(B + batch_size - 1) // batch_size)
+    parts = []
+    for b0 in starts:
+        x_b = x_cpu[b0:b0 + batch_size]
+        packed_x, packed_x_rc = kernel.pack_both(x_b)
+        inv_dx = (1 / np.sqrt(np.clip(kernel.raw_diag_packed(packed_x, packed_x_rc),
+                                      1e-20, None)) if kernel.normalize
+                  else np.ones(x_b.shape[0]))
+        W = packed_x.shape[1]
+        n_split = max(1, min(W, -(-numba.get_num_threads() // x_b.shape[0])))
+        parts.append(_explain_lmer_cpu(
+            np.ascontiguousarray(packed_x), inv_dx, V, masks, levels, table_a, table_b,
+            l, seqlen, perturbation, n_split))
+    out = np.concatenate(parts).astype(x_cpu.dtype)
+    return out if xp is np else xp.asarray(out)
 
 
 def mutation_impact(

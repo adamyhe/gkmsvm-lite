@@ -10,7 +10,8 @@ Every kernel works on windows packed 2 bits per base into uint32 (`PackedGkmKern
 | Scoring `-t 1/2/3` (d-cutoff, neighborhood <= 8,192 l-mers) | Cached l-mer index over the SVs (`kernels/lmer_index.py`): each query window visits its d-mismatch neighborhood | Proportional to the matching (window, SV) pairs; nothing per SV |
 | Other scoring, Gram tiles, SMO columns for `-t 0/4/5` | Masked join (`kernels/masked.py`) when both sides have 16+ sequences, else brute force (XOR + popcount over all window pairs) | Masked join indexes one side per call |
 | SMO columns for `-t 1/2/3` | l-mer index over the training set | One query row per column |
-| GkmExplain attribution | Fused packed kernel (CPU, CUDA), reducing over SVs in the inner loop | All window pairs within the mismatch cutoff |
+| GkmExplain attribution (l <= 12, d-cutoff neighborhood <= 8,192) | SVs' l-mer weights V (4^l, cached): each query window visits its d-mismatch neighborhood (CPU) | Nothing per SV; 3.5 ms per 300 bp sequence for ENCFF579AOX (72,145 SVs) on an M4, against 1.7 s for the pair loop |
+| Other GkmExplain attribution | Fused packed kernel (CPU, CUDA), reducing over SVs in the inner loop | All window pairs within the mismatch cutoff |
 | Inputs with N for `-t 4/5` | Per-position one-hot match path | Slow; chunked to `_MATCH_BYTES` |
 
 The model caches packed SV windows, their self-kernels, the l-mer table and the l-mer index per device (`GkmSVM._sv_cache`); the first call pays for building them (0.55 s and 81 MB for the l-mer index over 32,715 SVs at l=10).
