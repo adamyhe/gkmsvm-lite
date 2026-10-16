@@ -8,7 +8,7 @@ gkm-SVMs compute kernel values through discrete k-mer counting and mismatch tabl
 
 ## GkmExplain
 
-GkmExplain analytically decomposes the SVM decision function into per-base importance scores. It provides theoretically grounded attributions with connections to Integrated Gradients. Attribution modes need a count-table kernel (`-t 0/1/2`); for RBF and weighted models use `mutation_impact()` or ISM.
+GkmExplain analytically decomposes the SVM decision function into per-base importance scores. It provides theoretically grounded attributions with connections to Integrated Gradients. Attribution modes need a count-table base kernel (`-t 0/1/2`, or `-t 3` on top of one). For `-t 3`, as in lsgkm, each SV's contributions are scaled by (exp(γ(K−1)) − exp(−γ))/K of its kernel value K with the sequence, so importance scores sum to score − bias − exp(−γ)·Σcoef. For weighted models (`-t 4/5`) use `mutation_impact()` or ISM.
 
 ```python
 from gkmsvm import gkmexplain

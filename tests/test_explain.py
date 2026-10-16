@@ -488,3 +488,26 @@ def test_lmer_path_matches_pair_loop(kernel_type, params, mode, monkeypatch):
     fast = gkmexplain(model, x, mode=mode)
     monkeypatch.setattr(lmer_index, "MAX_NEIGHBORS", -1)  # forces the pair loop
     np.testing.assert_allclose(fast, gkmexplain(model, x, mode=mode), rtol=1e-12, atol=1e-15)
+
+
+@pytest.mark.parametrize("pair_loop", [False, True])
+def test_rbf_attribution(pair_loop, monkeypatch):
+    """-t 3: LS-GKM scales each SV's contributions by (exp(g(K-1)) - exp(-g)) / K, so
+    importance sums to score - bias - exp(-g) sum(coef); both paths agree."""
+    from gkmsvm.explain import gkmexplain
+    from gkmsvm.kernels import lmer_index
+    from gkmsvm.svm import GkmSVM
+
+    rng = np.random.default_rng(8)
+    sv = np.eye(4)[rng.integers(0, 4, (30, 25))].transpose(0, 2, 1)
+    coef = rng.normal(size=30)
+    model = GkmSVM(sv, coef, 0.2, "gkmrbf", {"L": 8, "k": 5, "d": 2, "gamma": 1.5})
+    x = np.eye(4)[rng.integers(0, 4, (3, 25))].transpose(0, 2, 1)
+    fast = gkmexplain(model, x, mode="hypothetical")
+    if pair_loop:
+        monkeypatch.setattr(lmer_index, "MAX_NEIGHBORS", -1)
+        np.testing.assert_allclose(gkmexplain(model, x, mode="hypothetical"), fast,
+                                   rtol=1e-12, atol=1e-15)
+    imp = gkmexplain(model, x, mode="importance")
+    expected = model(x).ravel() - 0.2 - np.exp(-1.5) * coef.sum()
+    np.testing.assert_allclose(imp.sum(axis=(1, 2)), expected, rtol=1e-10, atol=1e-12)

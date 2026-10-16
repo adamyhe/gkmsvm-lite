@@ -163,6 +163,27 @@ def _explain_cpu(packed_x, packed_y, table_a, table_b, eff_coef, l, min_matches,
     return result
 
 
+@njit(inline="always")
+def _distribute(acc, i, mask, v, wv, a, b, l, perturbation):
+    """Add one (query window i, l-mer v = u ^ mask) pair to acc [4, seqlen], as
+    _explain_cpu does for an SV window equal to v with effective coefficient wv;
+    a, b are table_a / table_b at the pair's mismatch count."""
+    av = wv * a
+    bv = wv * b
+    for k in range(l):
+        v_k = int((v >> np.uint32(2 * k)) & np.uint32(3))
+        same = ((mask >> np.uint32(2 * k)) & np.uint32(3)) == 0
+        pos = k + i
+        if not perturbation:
+            acc[v_k, pos] += av if same else bv
+        elif same:
+            for h in range(4):
+                if h != v_k:
+                    acc[h, pos] += av
+        else:
+            acc[v_k, pos] += bv
+
+
 @njit(parallel=True, cache=True, fastmath=True)
 def _explain_lmer_cpu(packed_x, inv_dx, V, masks, levels, table_a, table_b, l, seqlen,
                       perturbation, n_split):
@@ -183,31 +204,55 @@ def _explain_lmer_cpu(packed_x, inv_dx, V, masks, levels, table_a, table_b, l, s
         for i in range(c * step, min(W, (c + 1) * step)):
             u = packed_x[b, i]
             for t in range(masks.shape[0]):
-                mask = masks[t]
-                v = u ^ mask
-                if np.int64(v) >= n_lmers:
+                v = u ^ masks[t]
+                if np.int64(v) >= n_lmers or V[v] == 0.0:
                     continue
-                wv = V[v]
-                if wv == 0.0:
-                    continue
-                av = wv * table_a[levels[t]]
-                bv = wv * table_b[levels[t]]
-                for k in range(l):
-                    v_k = int((v >> np.uint32(2 * k)) & np.uint32(3))
-                    same = ((mask >> np.uint32(2 * k)) & np.uint32(3)) == 0
-                    pos = k + i
-                    if not perturbation:
-                        acc[v_k, pos] += av if same else bv
-                    elif same:
-                        for h in range(4):
-                            if h != v_k:
-                                acc[h, pos] += av
-                    else:
-                        acc[v_k, pos] += bv
+                _distribute(acc, i, masks[t], v, V[v], table_a[levels[t]],
+                            table_b[levels[t]], l, perturbation)
     out = part.reshape(B, n_split, 4, seqlen).sum(axis=1)
     for b in range(B):
         out[b] *= inv_dx[b]
     return out
+
+
+@njit(parallel=True, cache=True, fastmath=True)
+def _explain_index_cpu(packed_x, inv_dx, offsets, ids, w, masks, levels, table_a, table_b,
+                       l, seqlen, perturbation, n_split):
+    """As _explain_lmer_cpu with per-query SV weights w [B, S]: V[v] for row b is
+    the sum of w[b, s] over the index's entries for v (RBF models)."""
+    B, W = packed_x.shape
+    n_lmers = offsets.shape[0] - 1
+    part = np.zeros((B * n_split, 4, seqlen))
+    step = (W + n_split - 1) // n_split
+    for task in prange(B * n_split):
+        b, c = task // n_split, task % n_split
+        acc = part[task]
+        wb = w[b]
+        for i in range(c * step, min(W, (c + 1) * step)):
+            u = packed_x[b, i]
+            for t in range(masks.shape[0]):
+                v = u ^ masks[t]
+                if np.int64(v) >= n_lmers:
+                    continue
+                wv = 0.0
+                for e in range(offsets[v], offsets[v + 1]):
+                    wv += wb[ids[e]]
+                if wv == 0.0:
+                    continue
+                _distribute(acc, i, masks[t], v, wv, table_a[levels[t]],
+                            table_b[levels[t]], l, perturbation)
+    out = part.reshape(B, n_split, 4, seqlen).sum(axis=1)
+    for b in range(B):
+        out[b] *= inv_dx[b]
+    return out
+
+
+def _rbf_scale(k_norm, gamma, xp=np):
+    """LS-GKM's RBF attribution factor per SV: (exp(gamma (K - 1)) - exp(-gamma)) / K,
+    0 where K <= 0, for normalized base kernel values K."""
+    pos = k_norm > 0
+    safe = xp.where(pos, k_norm, 1.0)
+    return xp.where(pos, (xp.exp(gamma * (safe - 1)) - np.exp(-gamma)) / safe, 0.0)
 
 
 @njit(parallel=True, cache=True)
@@ -386,29 +431,32 @@ def gkmexplain(
         )
 
     kernel = model.kernel
-    if getattr(kernel, "_mismatch_table", None) is None:
+    base = kernel.base
+    if getattr(base, "_mismatch_table", None) is None:
         raise ValueError(
-            f"GkmExplain attribution supports -t 0/1/2 kernels, not {model.kernel_type!r}; "
+            f"GkmExplain attribution supports -t 0/1/2/3 kernels, not {model.kernel_type!r}; "
             "use mutation_impact() or ism()"
         )
+    # RBF (-t 3): each SV's contributions scale by _rbf_scale of its kernel value
+    gamma = kernel.gamma if base is not kernel else None
     xp = get_array_module(x)
     B, _, seqlen = x.shape
-    l = kernel.l
-    d = getattr(kernel, "d", l)
+    l = base.l
+    d = getattr(base, "d", l)
     if is_perturbation:
-        table_a, table_b = _build_perturbation_tables(kernel._mismatch_table, l, d)
+        table_a, table_b = _build_perturbation_tables(base._mismatch_table, l, d)
     else:
-        table_a = _build_alpha_table(kernel._mismatch_table, l, d)
-        table_b = _build_kappa_table(kernel._mismatch_table, l, d)
+        table_a = _build_alpha_table(base._mismatch_table, l, d)
+        table_b = _build_kappa_table(base._mismatch_table, l, d)
     min_matches = _explain_min_matches(table_a, table_b, l)
     lmer = _explain_lmer(model, x, table_a, table_b, l - min_matches, is_perturbation,
-                         batch_size, verbose)
+                         gamma, batch_size, verbose)
     if lmer is not None:
         return lmer
 
     S = model.num_support_vectors
     coefs = model.coefficients
-    diag_sv = model._sv_diag() if kernel.normalize else None
+    diag_sv = model._sv_diag() if base.normalize else None
     sv_fwd, sv_rc = model._sv_packed()
     packed_sv = sv_fwd if sv_rc is None else xp.concatenate([sv_fwd, sv_rc], axis=1)
     if xp is not np:
@@ -423,15 +471,21 @@ def gkmexplain(
 
     for b0 in starts:
         x_b = x[b0:b0 + batch_size]
-        packed_x, packed_x_rc = kernel.pack_both(x_b)
+        packed_x, packed_x_rc = base.pack_both(x_b)
         packed_x = xp.ascontiguousarray(packed_x)
-        diag_x = kernel.raw_diag_packed(packed_x, packed_x_rc) if kernel.normalize else None
+        diag_x = base.raw_diag_packed(packed_x, packed_x_rc) if base.normalize else None
+        if gamma is not None:
+            k_norm = model._sv_raw(packed_x) / xp.clip(
+                xp.sqrt(diag_x[:, None] * diag_sv[None, :]), 1e-10, None)
+            rbf = _rbf_scale(k_norm, gamma, xp)
         for s0 in range(0, S, cs):
             s1 = min(s0 + cs, S)
             eff_coef = xp.broadcast_to(coefs[None, s0:s1], (x_b.shape[0], s1 - s0))
             if diag_x is not None:
                 norm = xp.sqrt(diag_x[:, None] * diag_sv[None, s0:s1])
                 eff_coef = eff_coef / xp.clip(norm, 1e-10, None)
+            if gamma is not None:
+                eff_coef = eff_coef * rbf[:, s0:s1]
             if xp is np:
                 result[b0:b0 + batch_size] += _explain_cpu(
                     packed_x, np.ascontiguousarray(packed_sv[s0:s1]), table_a, table_b,
@@ -439,13 +493,15 @@ def gkmexplain(
                     seqlen, is_perturbation)
             else:
                 _explain_gpu(packed_x, xp.ascontiguousarray(packed_sv[:, s0:s1]),
-                             table_a, table_b, eff_coef, result[b0:b0 + batch_size],
-                             s1 - s0, packed_sv.shape[0], l, min_matches, is_perturbation)
+                             table_a, table_b, xp.ascontiguousarray(eff_coef, dtype=np.float64),
+                             result[b0:b0 + batch_size], s1 - s0, packed_sv.shape[0], l,
+                             min_matches, is_perturbation)
 
     return result.astype(x.dtype)
 
 
-def _explain_lmer(model, x, table_a, table_b, dmax, perturbation, batch_size, verbose):
+def _explain_lmer(model, x, table_a, table_b, dmax, perturbation, gamma, batch_size,
+                  verbose):
     """GkmExplain through the SVs' l-mer weights, or None when it doesn't apply.
 
     The attribution is linear in the SVs: with normalization each SV window
@@ -454,32 +510,42 @@ def _explain_lmer(model, x, table_a, table_b, dmax, perturbation, batch_size, ve
     V[v] = sum_s coef_s / sqrt(K(sv, sv)) * (occurrences of v in sv_s and its
     RC), and a query window then visits only the l-mers within dmax
     mismatches. A call costs nothing per SV; V (4^l float64) is cached.
-    Runs on CPU; results go back to x's device.
+
+    RBF models (gamma given) scale each SV by _rbf_scale of its kernel value
+    with the query, so V depends on the query: each neighbor sums the
+    per-query SV weights over the l-mer index's entries instead (about one
+    more index query per call). Runs on CPU; results go back to x's device.
     """
     import numba
 
     from gkmsvm.backend import to_cpu
     from gkmsvm.kernels import lmer_index
 
-    kernel = model.kernel
-    l = kernel.l
+    base = model.kernel.base
+    l = base.l
     if (l > lmer_index.MAX_L or dmax < 0
             or lmer_index.neighbor_count(l, dmax) > lmer_index.MAX_NEIGHBORS):
         return None
-    c = model._sv_cache
-    if "explain_V" not in c:
-        coef = to_cpu(model.coefficients).astype(np.float64)
-        if kernel.normalize:
-            coef = coef / np.sqrt(np.clip(to_cpu(model._sv_diag()).astype(np.float64),
-                                          1e-20, None))
-        V = np.zeros(4**l)
-        for packed in model._sv_packed():
-            if packed is not None:
-                packed = to_cpu(packed)
-                V += np.bincount(packed.ravel().astype(np.int64),
-                                 weights=np.repeat(coef, packed.shape[1]), minlength=4**l)
-        c["explain_V"] = V
-    V = c["explain_V"]
+    coef = to_cpu(model.coefficients).astype(np.float64)
+    inv_ds = (1 / np.sqrt(np.clip(to_cpu(model._sv_diag()).astype(np.float64), 1e-20, None))
+              if base.normalize else np.ones(len(coef)))
+    index = None
+    if gamma is not None:
+        index = model._sv_index()  # its arrays live on CPU whatever the model's device
+        if index is None:
+            return None
+    else:
+        c = model._sv_cache
+        if "explain_V" not in c:
+            V = np.zeros(4**l)
+            for packed in model._sv_packed():
+                if packed is not None:
+                    packed = to_cpu(packed)
+                    V += np.bincount(packed.ravel().astype(np.int64),
+                                     weights=np.repeat(coef * inv_ds, packed.shape[1]),
+                                     minlength=4**l)
+            c["explain_V"] = V
+        V = c["explain_V"]
     nonzero = np.maximum(np.abs(table_a), np.abs(table_b))
     masks, levels = lmer_index.neighbor_masks(l, nonzero, dmax)
 
@@ -493,15 +559,22 @@ def _explain_lmer(model, x, table_a, table_b, dmax, perturbation, batch_size, ve
     parts = []
     for b0 in starts:
         x_b = x_cpu[b0:b0 + batch_size]
-        packed_x, packed_x_rc = kernel.pack_both(x_b)
-        inv_dx = (1 / np.sqrt(np.clip(kernel.raw_diag_packed(packed_x, packed_x_rc),
-                                      1e-20, None)) if kernel.normalize
+        packed_x, packed_x_rc = base.pack_both(x_b)
+        packed_x = np.ascontiguousarray(packed_x)
+        inv_dx = (1 / np.sqrt(np.clip(base.raw_diag_packed(packed_x, packed_x_rc),
+                                      1e-20, None)) if base.normalize
                   else np.ones(x_b.shape[0]))
         W = packed_x.shape[1]
         n_split = max(1, min(W, -(-numba.get_num_threads() // x_b.shape[0])))
-        parts.append(_explain_lmer_cpu(
-            np.ascontiguousarray(packed_x), inv_dx, V, masks, levels, table_a, table_b,
-            l, seqlen, perturbation, n_split))
+        if index is None:
+            parts.append(_explain_lmer_cpu(packed_x, inv_dx, V, masks, levels, table_a,
+                                           table_b, l, seqlen, perturbation, n_split))
+            continue
+        k_norm = index.pairwise(packed_x) * inv_dx[:, None] * inv_ds[None, :]
+        w = coef * inv_ds * _rbf_scale(k_norm, gamma)
+        parts.append(_explain_index_cpu(packed_x, inv_dx, index.offsets, index.ids,
+                                        np.ascontiguousarray(w), masks, levels, table_a,
+                                        table_b, l, seqlen, perturbation, n_split))
     out = np.concatenate(parts).astype(x_cpu.dtype)
     return out if xp is np else xp.asarray(out)
 
