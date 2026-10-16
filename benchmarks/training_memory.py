@@ -16,6 +16,11 @@ training set. r_vs_exact is the Pearson correlation of held-out decision
 values with the exact gkmsvm-lite model at the same N (libsvm, else smo).
 libsvm runs whose Gram would not fit in RAM are recorded as "skipped".
 
+--data ctcf (Fig. S3B) trains on the H1-hESC CTCF sets from ctcf_data.py
+instead, LS-GKM's own scaling data (Lee 2016, Fig. 1: 5k-90k), with test
+sequences from the held-out chr1/chr2. --lsgkm-caches runs gkmtrain at each
+kernel cache size (-m, MB), as that study did with 100 MB and 8 GB.
+
 Usage:
   python benchmarks/training_memory.py --device cuda
   python benchmarks/training_memory.py --device cuda --sizes 1000,5000,max
@@ -102,6 +107,11 @@ def main():
                         "'max' = all sequences not held out")
     parser.add_argument("--solvers", default=",".join(SOLVERS),
                         help=f"Comma-separated subset of {', '.join(SOLVERS)}")
+    parser.add_argument("--data", default="gm12878", choices=["gm12878", "ctcf"],
+                        help="gm12878: Beer lab DHS sets (S3); ctcf: ctcf_data.py (S3B)")
+    parser.add_argument("--lsgkm-caches", default="100",
+                        help="Comma-separated gkmtrain kernel cache sizes in MB (-m; 100 is "
+                        "LS-GKM's default)")
     parser.add_argument("--n-test", type=int, default=500,
                         help="Held-out positives and negatives each (default: 500)")
     parser.add_argument("-l", type=int, default=10)
@@ -154,14 +164,29 @@ def main():
 
     import dsqtl_auprc as bench
 
-    bench.download_sequence_sets()
     rng = np.random.default_rng(0)
-    pos = read_seqs(SEQ_DIR / "gm12878_shared.fa")
-    neg = read_seqs(SEQ_DIR / "nullseqs_gm12878_shared.1.1.fa")
-    pos = [pos[i] for i in rng.permutation(len(pos))]
-    neg = [neg[i] for i in rng.permutation(len(neg))]
-    test_pos, pos = pos[: args.n_test], pos[args.n_test:]
-    test_neg, neg = neg[: args.n_test], neg[args.n_test:]
+
+    def shuffled(path):
+        seqs = read_seqs(path)
+        return [seqs[i] for i in rng.permutation(len(seqs))]
+
+    if args.data == "ctcf":
+        from ctcf_data import OUT as CTCF
+
+        if not (CTCF / "train_pos.fa").exists():
+            sys.exit("CTCF sets missing: run python benchmarks/ctcf_data.py")
+        pos, neg = shuffled(CTCF / "train_pos.fa"), shuffled(CTCF / "train_neg.fa")
+        test_pos = shuffled(CTCF / "test_pos.fa")[: args.n_test]
+        test_neg = shuffled(CTCF / "test_neg.fa")[: args.n_test]
+    else:
+        bench.download_sequence_sets()
+        pos = shuffled(SEQ_DIR / "gm12878_shared.fa")
+        neg = shuffled(SEQ_DIR / "nullseqs_gm12878_shared.1.1.fa")
+        test_pos, pos = pos[: args.n_test], pos[args.n_test:]
+        test_neg, neg = neg[: args.n_test], neg[args.n_test:]
+    caches = [float(c) for c in args.lsgkm_caches.split(",")]
+    # One run per (solver, LS-GKM cache)
+    runs = [(s, c) for s in solvers for c in (caches if s == "lsgkm" else [None])]
     n_max = 2 * min(len(pos), len(neg))
     sizes = sorted({n_max if s == "max" else min(int(s), n_max)
                     for s in args.sizes.split(",")})
@@ -179,20 +204,24 @@ def main():
         gram_gb = N * N * 8 / 1024**3
         print(f"\n── N = {N:,} (Gram {gram_gb:.1f} GB) ──")
         scores = {}
-        for solver in solvers:
+        for solver, cache in runs:
+            name = solver if cache is None or len(caches) == 1 else f"lsgkm_{cache:g}"
             row = {"N": N, "solver": solver, "gram_gb": gram_gb,
                    "device": "cpu" if solver == "lsgkm" else args.device,
                    "train_s": None, "gpu_pool_mb": None, "n_sv": None,
-                   "threads": lite_threads if args.device == "cpu" else None}
-            if solver == "libsvm" and not _gram_fits_on_cpu(N):
+                   "threads": lite_threads if args.device == "cpu" else None,
+                   "lsgkm_cache_mb": cache}
+            # Both build a dense N x N (approximate, for Nystrom) Gram in host RAM
+            if solver in ("libsvm", "nystrom") and not _gram_fits_on_cpu(N):
                 rows.append({**row, "status": "skipped", "wall_s": None, "peak_rss_mb": None})
                 print(f"  {solver}: skipped, Gram exceeds 75% of RAM")
                 continue
             if solver == "lsgkm":
-                prefix = work / f"lsgkm_{N}"
+                prefix = work / f"lsgkm_{N}_{cache:g}"
                 m = run_measured(
                     [bins["gkmtrain"], "-t", "2", "-l", str(args.l), "-k", str(args.k),
                      "-d", str(args.d), "-c", str(args.C), "-T", str(args.threads),
+                     "-m", f"{cache:g}",
                      str(work / f"pos_{N}.fa"), str(work / f"neg_{N}.fa"), str(prefix)],
                     timeout=args.timeout,
                 )
@@ -209,7 +238,7 @@ def main():
                     p = run_measured(cmd + [str(work / "test.fa"), str(model_file), str(out)])
                     if p.status == "ok":
                         with open(out) as f:
-                            scores[solver] = np.array([float(x.split("\t")[1]) for x in f])
+                            scores[name] = np.array([float(x.split("\t")[1]) for x in f])
             else:
                 spec = {"solver": solver, "N": N, "work": str(work), "device": args.device,
                         "l": args.l, "k": args.k, "d": args.d, "C": args.C,
@@ -222,15 +251,16 @@ def main():
                 if m.status == "ok":
                     scores[solver] = np.load(work / f"scores_{solver}_{N}.npy")
             if m.status != "ok":
-                print(f"  {solver} {m.status}: {m.stderr[-300:]}")
-            row.update(status=m.status, wall_s=m.wall_s, peak_rss_mb=m.peak_rss_mb)
+                print(f"  {name} {m.status}: {m.stderr[-300:]}")
+            row.update(status=m.status, wall_s=m.wall_s, peak_rss_mb=m.peak_rss_mb,
+                       run=name)
             rows.append(row)
 
         exact = scores.get("libsvm", scores.get("smo"))
         for row in rows:
-            if row["N"] != N or row["solver"] not in scores:
+            if row["N"] != N or row.get("run") not in scores:
                 continue
-            s = scores[row["solver"]]
+            s = scores[row["run"]]
             row["test_auroc"] = float(roc_auc_score(y_test, s))
             row["r_vs_exact"] = float(np.corrcoef(s, exact)[0, 1]) if exact is not None else None
         for row in (r for r in rows if r["N"] == N):
@@ -238,7 +268,7 @@ def main():
             mem = f"{row['peak_rss_mb']:.0f} MB" if row.get("peak_rss_mb") else "—"
             auc = f"AUROC {row['test_auroc']:.4f}" if row.get("test_auroc") else ""
             r = f"r {row['r_vs_exact']:.5f}" if row.get("r_vs_exact") else ""
-            print(f"  {row['solver']:<8s} {ts:>9s}  peak {mem:>9s}  "
+            print(f"  {row.get('run', row['solver']):<11s} {ts:>9s}  peak {mem:>9s}  "
                   f"SVs {row['n_sv'] or '—'}  {auc}  {r}  [{row['status']}]")
 
     import pandas as pd
@@ -247,7 +277,8 @@ def main():
     df = df.astype({c: "Int64" for c in ("n_sv", "threads") if c in df})
     write_tsv(args.output, df, "Training time and memory by solver", args.device,
               kernel=f"-t 2 -l {args.l} -k {args.k} -d {args.d} -c {args.C}",
-              smo_cache_columns=args.cache_size, held_out=2 * args.n_test,
+              smo_cache_columns=args.cache_size, held_out=2 * args.n_test, data=args.data,
+              lsgkm_caches_mb=args.lsgkm_caches if "lsgkm" in solvers else None,
               lite_cpu_threads=lite_threads,
               lsgkm=None if "lsgkm" not in solvers else (
                   lsgkm_version(args.conda_env) if not args.lsgkm_bin
