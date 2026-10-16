@@ -275,3 +275,47 @@ class TestCenterWeightedRbfGkmKernel:
         k_xy = kernel.pairwise(x, y)
         k_rcx_y = kernel.pairwise(x_rc, y)
         np.testing.assert_allclose(k_xy, k_rcx_y, atol=1e-5)
+
+
+@pytest.mark.parametrize("include_rc", [True, False])
+def test_raw_packed_n_matches_onehot(include_rc):
+    """The N-aware pair loop equals the one-hot path, where N agrees with nothing."""
+    kernel = CenterWeightedGkmKernel(8, 5, M=2, H=1.5, include_rc=include_rc)
+    rng = np.random.default_rng(0)
+    x = np.eye(4)[rng.integers(0, 4, (3, 30))].transpose(0, 2, 1)
+    y = np.eye(4)[rng.integers(0, 4, (4, 30))].transpose(0, 2, 1)
+    y[0, :, [5, 6, 20]] = 0
+    y[2, :, 0] = 0
+    y_rc = reverse_complement(y)
+    rc = ((kernel.pack(y_rc), kernel.pack_nmask(y_rc)) if include_rc else (None, None))
+    got = kernel.raw_packed_n(kernel.pack(x), kernel.pack(y), kernel.pack_nmask(y), *rc)
+    np.testing.assert_allclose(got, kernel._raw_pairwise_onehot(x, y), rtol=1e-12)
+
+
+@pytest.mark.parametrize("kernel_type", ["wgkm", "wgkmrbf"])
+@pytest.mark.parametrize("table", [True, False])
+def test_svs_with_n_keep_onehot_semantics(kernel_type, table):
+    """SVs with N go through raw_packed_n (and the table skips their N masks);
+    scores and ISM equal the one-hot definition."""
+    from gkmsvm.ism import ism
+    from gkmsvm.svm import GkmSVM
+
+    rng = np.random.default_rng(1)
+    sv = np.eye(4)[rng.integers(0, 4, (40, 30))].transpose(0, 2, 1)
+    sv[[3, 20, 39], :, 10] = 0
+    sv[20, :, 11:14] = 0
+    coef = rng.normal(size=40)
+    model = GkmSVM(sv, coef, 0.1, kernel_type, {"L": 8, "k": 5, "M": 2, "H": 1.5, "gamma": 1.0})
+    model.use_lmer_table = table
+    x = np.eye(4)[rng.integers(0, 4, (4, 30))].transpose(0, 2, 1)
+    expected = (model.kernel.pairwise(x, sv) * coef).sum(axis=1, keepdims=True) + 0.1
+    np.testing.assert_allclose(model(x), expected, rtol=1e-12, atol=1e-14)
+    assert len(model._sv_n_rows()) == 3
+
+    d = ism(model, x[:1])
+    mut = np.broadcast_to(x[:1, None, None], (1, 4, 30, 4, 30)).copy()
+    for p in range(30):
+        mut[:, :, p, :, p] = np.eye(4)
+    np.testing.assert_allclose(
+        d, model(mut.reshape(-1, 4, 30)).reshape(1, 4, 30) - model(x[:1])[0, 0],
+        rtol=1e-9, atol=1e-12)

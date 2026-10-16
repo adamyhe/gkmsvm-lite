@@ -29,12 +29,16 @@ import numpy as np
 MAX_TABLE_L = 12
 
 
-def build_lmer_table(kernel, sv_packed, sv_rc_packed, sv_weights) -> np.ndarray | None:
+def build_lmer_table(kernel, sv_packed, sv_rc_packed, sv_weights,
+                     sv_nmask=None, sv_rc_nmask=None) -> np.ndarray | None:
     """Table w over all 4^l packed l-mers, or None if the kernel has no plan.
 
     sv_packed, sv_rc_packed: [S, W] uint32 packed SV windows (forward and RC;
         sv_rc_packed is None when the kernel has no RC term).
     sv_weights: [S] c_sv as above.
+    sv_nmask, sv_rc_nmask: [S, W] N masks of those windows (0b11 at each N
+        position), for kernels where N agrees with nothing (-t 4). A window
+        with N is left out of V and added for the masks that avoid its Ns.
     """
     l = kernel.l
     if l > MAX_TABLE_L or not hasattr(kernel, "_join_plan"):
@@ -46,9 +50,19 @@ def build_lmer_table(kernel, sv_packed, sv_rc_packed, sv_weights) -> np.ndarray 
     n = 4 ** l
     W = sv_packed.shape[1]
     weights = np.repeat(np.asarray(sv_weights, dtype=np.float64), W)
-    V = np.bincount(sv_packed.ravel().astype(np.int64), weights=weights, minlength=n)
+    blocks = [(sv_packed, sv_nmask)]
     if sv_rc_packed is not None:
-        V += np.bincount(sv_rc_packed.ravel().astype(np.int64), weights=weights, minlength=n)
+        blocks.append((sv_rc_packed, sv_rc_nmask))
+    V = np.zeros(n)
+    with_n = []  # (windows, N masks, weights) of windows containing N
+    for packed, nmask in blocks:
+        keys = packed.ravel().astype(np.int64)
+        wts = weights
+        if nmask is not None:
+            has_n = nmask.ravel() != 0
+            with_n.append((packed.ravel()[has_n], nmask.ravel()[has_n], weights[has_n]))
+            wts = np.where(has_n, 0.0, weights)
+        V += np.bincount(keys, weights=wts, minlength=n)
 
     # Packed index = sum_k base_k 4^k, so in a C-order (4,)*l view axis a holds
     # position l - 1 - a
@@ -68,13 +82,30 @@ def build_lmer_table(kernel, sv_packed, sv_rc_packed, sv_weights) -> np.ndarray 
     w_pair = np.zeros_like(V)
     for S, coef in coefs.items():
         mirror = tuple(sorted(l - 1 - p for p in S))
-        if sv_rc_packed is None or coefs.get(mirror) != coef:
-            w += coef * marginal(S)
-        elif mirror == S:
+        if sv_rc_packed is None or coefs.get(mirror) != coef or mirror == S:
             w += coef * marginal(S)
         elif S < mirror:
             w_pair += coef * marginal(S)
     # rc(u): reverse the positions (axes) and complement every base (flip)
     w += w_pair + np.flip(w_pair.transpose(tuple(range(l - 1, -1, -1))))
-    return w.ravel()
+    w = w.ravel()
+    for win, nmask, wts in with_n:
+        _add_windows(w, win, nmask, wts, coefs, l)
+    return w
+
+
+def _add_windows(w, win, nmask, wts, coefs, l):
+    """w[u] += wts * coef_S for each window, mask S without its Ns, and u agreeing on S."""
+    for S, coef in coefs.items():
+        bits = np.uint32(sum(3 << (2 * p) for p in S))
+        ok = (nmask & bits) == 0
+        if not ok.any():
+            continue
+        # Every u agreeing with the window on S: its bases on S, anything elsewhere
+        free = [p for p in range(l) if p not in S]
+        offsets = np.zeros(1, dtype=np.int64)
+        for p in free:
+            offsets = (offsets[:, None] + np.arange(4) * 4**p).ravel()
+        idx = (win[ok] & bits).astype(np.int64)[:, None] + offsets[None, :]
+        np.add.at(w, idx.ravel(), np.repeat(coef * wts[ok], len(offsets)))
 

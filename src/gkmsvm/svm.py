@@ -6,6 +6,7 @@ import numpy as np
 from numba import njit, prange
 
 from gkmsvm.backend import DeviceModel, get_array_module, to_cpu
+from gkmsvm.codec import reverse_complement
 from gkmsvm.kernels.direct import DirectGkmKernel
 from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
 from gkmsvm.kernels.packed import PackedGkmKernel
@@ -262,19 +263,64 @@ class GkmSVM(DeviceModel):
         else:
             raise ValueError(f"Unknown format {fmt!r}. Use 'npz' or 'lsgkm'.")
 
-    def _sv_packed(self):
-        """(fwd, rc or None) packed SV windows of the base kernel, or None.
+    def _sv_n_rows(self) -> np.ndarray:
+        """Indices of the SVs the packed path can't represent (cached): those
+        with N under a kernel where N agrees with nothing (-t 4/5). They are
+        scored by ``base.raw_packed_n``; every other SV is packed."""
+        c = self._sv_cache
+        if "n_rows" not in c:
+            base = self.kernel.base
+            sv = to_cpu(self.support_sequences)
+            rows = np.zeros(0, dtype=np.int64)
+            if hasattr(base, "raw_packed_n") and not base.packs(sv):
+                rows = np.flatnonzero((sv.max(axis=1) == 0).any(axis=1))
+            c["n_rows"] = rows
+        return c["n_rows"]
 
-        None when the base kernel has no packed path for these SVs (weighted
-        kernels with N positions).
-        """
+    def _sv_packed(self):
+        """(fwd, rc or None) packed windows of the SVs without N rows (all SVs,
+        unless _sv_n_rows() is non-empty), or None when the base kernel has no
+        packed path."""
         c = self._sv_cache
         if "packed" not in c:
             base = self.kernel.base
             sv = self.support_sequences
+            n_rows = self._sv_n_rows()
+            if len(n_rows):
+                keep = self._sv_order()[:sv.shape[0] - len(n_rows)]
+                sv = sv[get_array_module(sv).asarray(keep)]
             ok = isinstance(base, PackedGkmKernel) and base.packs(sv)
             c["packed"] = base.pack_both(sv) if ok else None
         return c["packed"]
+
+    def _sv_order(self) -> np.ndarray:
+        """SV indices, packed SVs first, then _sv_n_rows()."""
+        S = self.num_support_vectors
+        n_rows = self._sv_n_rows()
+        return np.concatenate([np.setdiff1d(np.arange(S), n_rows), n_rows])
+
+    def _sv_n_windows(self):
+        """(fwd, fwd N masks, rc, rc N masks) of the _sv_n_rows() SVs, on CPU (cached)."""
+        c = self._sv_cache
+        if "n_windows" not in c:
+            base = self.kernel.base
+            sv = to_cpu(self.support_sequences)[self._sv_n_rows()]
+            parts = [base.pack(sv), base.pack_nmask(sv)]
+            if base.include_rc:
+                rc = reverse_complement(sv)
+                parts += [base.pack(rc), base.pack_nmask(rc)]
+            else:
+                parts += [None, None]
+            c["n_windows"] = tuple(parts)
+        return c["n_windows"]
+
+    def _join_sv_columns(self, packed_part, n_part):
+        """[B, S] in SV order from the packed SVs' columns and the N rows' columns."""
+        if not len(self._sv_n_rows()):
+            return packed_part
+        xp = get_array_module(n_part)
+        both = n_part if packed_part is None else xp.concatenate([packed_part, n_part], axis=1)
+        return both[:, xp.asarray(np.argsort(self._sv_order()))]
 
     def _sv_diag(self) -> np.ndarray:
         """Base-kernel K_raw(sv, sv) on the model's device (cached)."""
@@ -282,10 +328,16 @@ class GkmSVM(DeviceModel):
         if "diag" not in c:
             packed = self._sv_packed()
             base = self.kernel.base
-            if packed is not None:
-                diag = base.raw_diag_packed(*packed)
-            else:
+            n_rows = self._sv_n_rows()
+            if packed is None:
                 diag = base._raw_diagonal(self.support_sequences, chunk_size=1000)
+            elif len(n_rows):
+                sv = self.support_sequences
+                n_diag = base._raw_diagonal(sv[get_array_module(sv).asarray(n_rows)])
+                diag = self._join_sv_columns(
+                    base.raw_diag_packed(*packed)[None], n_diag[None])[0]
+            else:
+                diag = base.raw_diag_packed(*packed)
             c["diag"] = diag.astype(self.support_sequences.dtype)
         return c["diag"]
 
@@ -309,7 +361,13 @@ class GkmSVM(DeviceModel):
         index = self._sv_index()
         if index is not None:
             return index.pairwise(bx)
-        return self.kernel.base.raw_packed(bx, *self._sv_packed())
+        base = self.kernel.base
+        packed = self._sv_packed()
+        if not len(self._sv_n_rows()):
+            return base.raw_packed(bx, *packed)
+        n_part = base.raw_packed_n(bx, *self._sv_n_windows())
+        packed_part = base.raw_packed(bx, *packed) if packed[0].shape[0] else None
+        return self._join_sv_columns(packed_part, n_part)
 
     def _sv_scores(self, x):
         """sum_s coef_s K(x, sv_s) [B, 1] of one-hot x (on the model's device)."""
@@ -422,9 +480,14 @@ class GkmSVM(DeviceModel):
             fwd, rc = kernel.pack_both(sv)
             coef = to_cpu(self.coefficients).astype(np.float64)
             if kernel.normalize:
-                diag = kernel.raw_diag_packed(fwd, rc)
+                diag = to_cpu(self._sv_diag()).astype(np.float64)
                 coef = coef / np.sqrt(np.clip(diag, 1e-10, None))
-            table = build_lmer_table(kernel, fwd, rc, coef)
+            nmask = {}
+            if len(self._sv_n_rows()):  # N agrees with nothing
+                nmask = {"sv_nmask": kernel.pack_nmask(sv),
+                         "sv_rc_nmask": None if rc is None
+                         else kernel.pack_nmask(reverse_complement(sv))}
+            table = build_lmer_table(kernel, fwd, rc, coef, **nmask)
             self._lmer_table = False if table is None else table
         return None if self._lmer_table is False else self._lmer_table
 
