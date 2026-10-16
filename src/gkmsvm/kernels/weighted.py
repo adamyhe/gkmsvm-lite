@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+from numba import njit, prange
 
 from gkmsvm.backend import get_array_module, get_strides, to_cpu
 from gkmsvm.codec import reverse_complement
@@ -72,6 +73,47 @@ def _weighted_kernel_from_matches(
     return dp[..., k].sum(axis=(-2, -1))
 
 
+@njit(parallel=True, cache=True, fastmath=True)
+def _brute_nmask_numba(bx, by, by_n, g, l):
+    """[B, S]: sum over window pairs of g[agreement bits], N positions agreeing with nothing.
+
+    bx [B, Wx] packed query windows; by, by_n [S, Wy] packed column windows and
+    their N masks (0b11 at N positions); g [2^l] the pair weight of each set
+    of agreeing positions.
+    """
+    B, Wx = bx.shape
+    S, Wy = by.shape
+    even = np.uint32((1 << (2 * l)) - 1) & np.uint32(0x55555555)
+    out = np.zeros((B, S))
+    for item in prange(B * S):
+        b, s = item // S, item % S
+        acc = 0.0
+        for i in range(Wx):
+            u = bx[b, i]
+            for j in range(Wy):
+                x = u ^ by[s, j]
+                agree = ~((x | (x >> np.uint32(1))) | by_n[s, j]) & even
+                idx = 0
+                for p in range(l):
+                    idx |= ((agree >> np.uint32(2 * p)) & np.uint32(1)) << p
+                acc += g[idx]
+        out[b, s] = acc
+    return out
+
+
+def _agreement_weights(pos_weights: np.ndarray, k: int) -> np.ndarray:
+    """[2^l]: e_k of the position weights over each set of agreeing positions."""
+    l = len(pos_weights)
+    bits = (np.arange(2**l)[:, None] >> np.arange(l)) & 1
+    dp = np.zeros((2**l, k + 1))
+    dp[:, 0] = 1.0
+    for p in range(l):
+        v = bits[:, p] * pos_weights[p]
+        for j in range(min(p + 1, k), 0, -1):
+            dp[:, j] += v * dp[:, j - 1]
+    return dp[:, k]
+
+
 class CenterWeightedGkmKernel(PackedGkmKernel):
     """Center-weighted gapped k-mer kernel (-t 4 / wgkm).
 
@@ -130,6 +172,40 @@ class CenterWeightedGkmKernel(PackedGkmKernel):
         nothing.
         """
         return self.use_masked and not bool((x.max(axis=1) == 0).any())
+
+    def pack_nmask(self, x):
+        """[B, W] uint32 N masks of x's packed windows (CPU): 0b11 at each N position."""
+        n = (to_cpu(x).max(axis=1) == 0).astype(np.uint32)  # [B, L]
+        W = n.shape[1] - self.l + 1
+        out = np.zeros((n.shape[0], W), dtype=np.uint32)
+        for k in range(self.l):
+            out |= (n[:, k:k + W] * np.uint32(3)) << np.uint32(2 * k)
+        return out
+
+    def raw_packed_n(self, bx, by, by_n, by_rc=None, by_rc_n=None):
+        """K_raw [B, S] of packed query rows bx (no N) against columns with N.
+
+        by, by_n: the columns' packed windows (N packed as A) and N masks
+        (pack_nmask); by_rc, by_rc_n the same for their reverse complements.
+        A brute-force CPU pair loop, for the few SVs that contain N; the result
+        is on bx's device.
+        """
+        from gkmsvm.kernels.packed import device_of
+
+        if getattr(self, "_agree_g", None) is None:
+            self._agree_g = _agreement_weights(self._pos_weights, self.k)
+        q = np.ascontiguousarray(to_cpu(bx))
+        out = _brute_nmask_numba(q, np.ascontiguousarray(by), np.ascontiguousarray(by_n),
+                                 self._agree_g, self.l)
+        if by_rc is not None:
+            out += _brute_nmask_numba(q, np.ascontiguousarray(by_rc),
+                                      np.ascontiguousarray(by_rc_n), self._agree_g, self.l)
+        dev = device_of(bx)
+        if dev == "mlx":
+            import mlx.core as mx
+
+            return mx.array(out.astype(np.float32))
+        return out if dev == "cpu" else get_array_module(bx).asarray(out)
 
     def raw_diag_packed(self, bx, bx_rc=None):
         """K_raw(x, x) via the masked self-join (on CPU, returned on bx's device)."""

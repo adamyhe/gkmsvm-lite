@@ -103,7 +103,7 @@ src/gkmsvm/
 - `-t 0` and `-t 2` use completely different weight table math. Do not mix.
 - `score(ALT) - score(REF)` differs from deltaSVM's k-mer-weight linear approximation.
 - Original gkmSVM (`.gkmmodel`) uses opposite sign convention for bias vs LS-GKM. Use `load_classic_model()` not `load_lsgkm_model()`.
-- `-t 4`/`-t 5` (wgkm/wgkmrbf) require M and H parameters. They use the masked join with per-mask weights; inputs with N positions use the per-position match path (chunked over columns to `_MATCH_BYTES`).
+- `-t 4`/`-t 5` (wgkm/wgkmrbf) require M and H parameters. They use the masked join with per-mask weights; N agrees with nothing, which packing (N as A) can't express. Inputs with N positions use the per-position match path (chunked over columns to `_MATCH_BYTES`). SVs with N (`GkmSVM._sv_n_rows()`; ENCFF579AOX has 4) are split off: the other SVs stay packed, the N rows' columns come from `raw_packed_n` (a CPU pair loop over agreement bits with per-window N masks), and the `-t 4` l-mer table adds their windows only for masks that avoid their Ns.
 - LS-GKM C is GPL v3 — cannot wrap or link against it (gkmsvm-lite is MIT).
 - GPU float32 diagonal causes <3e-3 score difference vs CPU float64.
 - Beer lab `deltasvm.pl` drops the first weight-file line as a bias header; with gkmpredict output on `nrkmers.py` l-mers that gives AAAAAAAAAA/TTTTTTTTTT raw score 0 (bias included, so -bias in a `to_deltasvm` table). Published deltaSVM scores from that script (e.g. the GkmExplain paper) include this; `dsqtl_auprc.deltasvm_pl()` reproduces it.
