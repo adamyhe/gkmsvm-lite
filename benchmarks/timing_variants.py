@@ -357,6 +357,8 @@ def main():
         c_runs = ([] if method == "deltaSVM scoring" else
                   [(impl, bins, t) for impl, (bins, thr) in c_impls.items() for t in thr[binary]])
         for impl, bins, n_thr in c_runs:
+            # Some C runs take an hour (LS-GKM -T 16 on the deltaSVM l-mers)
+            print(f"  {impl} ({n_thr} thread{'s' if n_thr > 1 else ''}) running...", flush=True)
             wall, peak, status = 0.0, 0.0, "ok"
             for cmd, _ in _lsgkm_runs(method, impl, bins, n_thr, work, info["model"]):
                 m = run_measured(cmd, timeout=args.timeout)
