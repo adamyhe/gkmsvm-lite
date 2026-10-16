@@ -81,7 +81,7 @@ def _ism_packed(model, x):
     rows = _BLOCK_BYTES // (8 * L * W * 4)
     if table is not None:
         fn = _ism_table
-    elif xp is np and model._sv_index() is not None:
+    elif xp is np and model._sv_index() is not None and not len(model._sv_n_rows()):
         fn = _ism_index
         rows = min(rows, model._MAX_SCORE_BYTES // (8 * S))
     else:

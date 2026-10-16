@@ -352,22 +352,23 @@ class GkmSVM(DeviceModel):
 
             packed = self._sv_packed()
             base = self.kernel.base
-            use = packed is not None and lmer_index.applies(base)
+            use = packed is not None and packed[0].shape[0] > 0 and lmer_index.applies(base)
             c["index"] = lmer_index.LmerIndex(base, *packed) if use else None
         return c["index"]
 
     def _sv_raw(self, bx):
         """Base-kernel K_raw [B, S] of packed query rows bx against the SVs."""
         index = self._sv_index()
-        if index is not None:
-            return index.pairwise(bx)
         base = self.kernel.base
         packed = self._sv_packed()
+
+        def packed_raw():
+            return index.pairwise(bx) if index is not None else base.raw_packed(bx, *packed)
+
         if not len(self._sv_n_rows()):
-            return base.raw_packed(bx, *packed)
+            return packed_raw()
         n_part = base.raw_packed_n(bx, *self._sv_n_windows())
-        packed_part = base.raw_packed(bx, *packed) if packed[0].shape[0] else None
-        return self._join_sv_columns(packed_part, n_part)
+        return self._join_sv_columns(packed_raw() if packed[0].shape[0] else None, n_part)
 
     def _sv_scores(self, x):
         """sum_s coef_s K(x, sv_s) [B, 1] of one-hot x (on the model's device)."""
@@ -381,7 +382,7 @@ class GkmSVM(DeviceModel):
         diag_x = base.raw_diag_packed(bx, bx_rc) if base.normalize else None
         gamma = kernel.gamma if isinstance(kernel, RbfKernel) else np.nan
         index = self._sv_index()
-        if xp is np and index is not None:
+        if xp is np and index is not None and not len(self._sv_n_rows()):
             # Fused index query + reduction: no [B, S] block at all
             if diag_x is None:
                 inv_dx, inv_ds = np.ones(x.shape[0]), np.ones(self.num_support_vectors)
