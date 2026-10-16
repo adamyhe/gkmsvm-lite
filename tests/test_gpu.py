@@ -89,7 +89,7 @@ class TestGPUScoring:
         gpu_scores = direct_model(cp.asarray(x))
 
         np.testing.assert_allclose(
-            cp.asnumpy(gpu_scores), cpu_scores, atol=1e-6,
+            cp.asnumpy(gpu_scores), cpu_scores, rtol=1e-9, atol=1e-12,
         )
 
     def test_esttrunc_scores_match(self, esttrunc_model):
@@ -100,7 +100,7 @@ class TestGPUScoring:
         gpu_scores = esttrunc_model(cp.asarray(x))
 
         np.testing.assert_allclose(
-            cp.asnumpy(gpu_scores), cpu_scores, atol=1e-5,
+            cp.asnumpy(gpu_scores), cpu_scores, rtol=1e-9, atol=1e-12,
         )
 
     def test_esttrunc_no_rc_no_norm(self, esttrunc_model_no_rc_no_norm):
@@ -112,7 +112,7 @@ class TestGPUScoring:
         gpu_scores = model(cp.asarray(x))
 
         np.testing.assert_allclose(
-            cp.asnumpy(gpu_scores), cpu_scores, atol=1e-6,
+            cp.asnumpy(gpu_scores), cpu_scores, rtol=1e-9, atol=1e-12,
         )
 
     def test_chunked_scoring(self, esttrunc_model):
@@ -124,7 +124,7 @@ class TestGPUScoring:
         gpu_scores = esttrunc_model(cp.asarray(x))
 
         np.testing.assert_allclose(
-            cp.asnumpy(gpu_scores), cpu_scores, atol=1e-5,
+            cp.asnumpy(gpu_scores), cpu_scores, rtol=1e-9, atol=1e-12,
         )
 
     def test_single_sequence(self, direct_model):
@@ -135,7 +135,7 @@ class TestGPUScoring:
         gpu_scores = direct_model(cp.asarray(x))
 
         np.testing.assert_allclose(
-            cp.asnumpy(gpu_scores), cpu_scores, atol=1e-6,
+            cp.asnumpy(gpu_scores), cpu_scores, rtol=1e-9, atol=1e-12,
         )
 
     def test_rc_invariance_on_gpu(self, esttrunc_model):
@@ -150,7 +150,7 @@ class TestGPUScoring:
         score_rc = esttrunc_model(cp.asarray(x_rc))
 
         np.testing.assert_allclose(
-            cp.asnumpy(score), cp.asnumpy(score_rc), atol=1e-6,
+            cp.asnumpy(score), cp.asnumpy(score_rc), rtol=1e-9, atol=1e-12,
         )
 
 
@@ -170,7 +170,7 @@ class TestGPUIsm:
         gpu_result = ism(direct_model, cp.asarray(x))
 
         np.testing.assert_allclose(
-            cp.asnumpy(gpu_result), cpu_result, atol=1e-5,
+            cp.asnumpy(gpu_result), cpu_result, rtol=1e-9, atol=1e-12,
         )
 
     def test_ism_esttrunc_matches_cpu(self, esttrunc_model):
@@ -183,7 +183,7 @@ class TestGPUIsm:
         gpu_result = ism(esttrunc_model, cp.asarray(x))
 
         np.testing.assert_allclose(
-            cp.asnumpy(gpu_result), cpu_result, atol=1e-5,
+            cp.asnumpy(gpu_result), cpu_result, rtol=1e-9, atol=1e-12,
         )
 
     def test_ism_ref_base_zero_on_gpu(self, esttrunc_model):
@@ -213,7 +213,7 @@ class TestGPUGkmExplain:
         gpu_result = gkmexplain(esttrunc_model, cp.asarray(x), mode=0)
 
         np.testing.assert_allclose(
-            cp.asnumpy(gpu_result), cpu_result, atol=1e-6,
+            cp.asnumpy(gpu_result), cpu_result, rtol=1e-9, atol=1e-12,
         )
 
     def test_mode1_matches_cpu(self, esttrunc_model):
@@ -226,7 +226,7 @@ class TestGPUGkmExplain:
         gpu_result = gkmexplain(esttrunc_model, cp.asarray(x), mode=1)
 
         np.testing.assert_allclose(
-            cp.asnumpy(gpu_result), cpu_result, atol=1e-6,
+            cp.asnumpy(gpu_result), cpu_result, rtol=1e-9, atol=1e-12,
         )
 
     def test_mode0_direct_kernel(self, direct_model):
@@ -239,7 +239,7 @@ class TestGPUGkmExplain:
         gpu_result = gkmexplain(direct_model, cp.asarray(x), mode=0)
 
         np.testing.assert_allclose(
-            cp.asnumpy(gpu_result), cpu_result, atol=1e-6,
+            cp.asnumpy(gpu_result), cpu_result, rtol=1e-9, atol=1e-12,
         )
 
     def test_mode1_direct_kernel(self, direct_model):
@@ -252,7 +252,7 @@ class TestGPUGkmExplain:
         gpu_result = gkmexplain(direct_model, cp.asarray(x), mode=1)
 
         np.testing.assert_allclose(
-            cp.asnumpy(gpu_result), cpu_result, atol=1e-6,
+            cp.asnumpy(gpu_result), cpu_result, rtol=1e-9, atol=1e-12,
         )
 
     def test_decomposition_on_gpu(self, esttrunc_model):
@@ -271,7 +271,7 @@ class TestGPUGkmExplain:
         np.testing.assert_allclose(
             cp.asnumpy(exp_sum),
             cp.asnumpy(expected).astype(np.float64),
-            atol=1e-5,
+            rtol=1e-9, atol=1e-12,
         )
 
     def test_nonref_bases_zero_on_gpu(self, esttrunc_model):
@@ -309,7 +309,7 @@ class TestGPUGkmExplain:
         gpu_result = gkmexplain(model, cp.asarray(x), mode=0)
 
         np.testing.assert_allclose(
-            cp.asnumpy(gpu_result), cpu_result, atol=1e-6,
+            cp.asnumpy(gpu_result), cpu_result, rtol=1e-9, atol=1e-12,
         )
 
 
@@ -331,7 +331,7 @@ class TestGPUKernelPairwise:
         gpu_result = kernel.pairwise(cp.asarray(seqs_a), cp.asarray(seqs_b))
 
         np.testing.assert_allclose(
-            cp.asnumpy(gpu_result), cpu_result, atol=1e-6,
+            cp.asnumpy(gpu_result), cpu_result, rtol=1e-9, atol=1e-12,
         )
 
     def test_pairwise_esttrunc(self):
@@ -348,7 +348,7 @@ class TestGPUKernelPairwise:
         gpu_result = kernel.pairwise(cp.asarray(seqs_a), cp.asarray(seqs_b))
 
         np.testing.assert_allclose(
-            cp.asnumpy(gpu_result), cpu_result, atol=1e-5,
+            cp.asnumpy(gpu_result), cpu_result, rtol=1e-9, atol=1e-12,
         )
 
     def test_self_pairwise_symmetric_on_gpu(self):
@@ -380,7 +380,7 @@ class TestGPUVariantScoring:
         gpu_delta = esttrunc_model.score_variants(cp.asarray(ref), cp.asarray(alt))
 
         np.testing.assert_allclose(
-            cp.asnumpy(gpu_delta), cpu_delta, atol=1e-5,
+            cp.asnumpy(gpu_delta), cpu_delta, rtol=1e-9, atol=1e-12,
         )
 
     def test_same_variant_zero_on_gpu(self, esttrunc_model):
@@ -410,7 +410,7 @@ class TestGPUGram:
         gpu_gram = compute_gram(kernel, cp.asarray(seqs))
 
         np.testing.assert_allclose(
-            cp.asnumpy(gpu_gram), cpu_gram, atol=1e-5,
+            cp.asnumpy(gpu_gram), cpu_gram, rtol=1e-9, atol=1e-12,
         )
 
     def test_gram_symmetric_on_gpu(self):
@@ -458,7 +458,7 @@ class TestGPUTraining:
         cpu_scores = cpu_model(x)
         gpu_scores = gpu_model(x)
 
-        np.testing.assert_allclose(gpu_scores, cpu_scores, atol=1e-5)
+        np.testing.assert_allclose(gpu_scores, cpu_scores, rtol=1e-9, atol=1e-12)
 
     def test_train_smo_scores_match_cpu(self):
         from gkmsvm import train_gkmsvm
@@ -482,7 +482,7 @@ class TestGPUTraining:
         cpu_scores = cpu_model(x)
         gpu_scores = gpu_model(x)
 
-        np.testing.assert_allclose(gpu_scores, cpu_scores, atol=1e-4)
+        np.testing.assert_allclose(gpu_scores, cpu_scores, rtol=1e-9, atol=1e-12)
 
     def test_train_returns_numpy_model(self):
         from gkmsvm import train_gkmsvm
@@ -545,7 +545,7 @@ class TestMaskedGPU:
         cpu = np.asarray(model(X)).ravel()
         model.cuda()
         gpu = cp.asnumpy(model(X)).ravel()
-        np.testing.assert_allclose(gpu, cpu, atol=3e-3)
+        np.testing.assert_allclose(gpu, cpu, rtol=1e-9, atol=1e-12)
 
 
 class TestLmerTableGPU:
@@ -559,7 +559,7 @@ class TestLmerTableGPU:
         model.cuda()
         got = cp.asnumpy(model(X)).ravel()
         assert model._lmer_table is not False
-        np.testing.assert_allclose(got, ref, atol=3e-3)
+        np.testing.assert_allclose(got, ref, rtol=1e-9, atol=1e-12)
 
 
 class TestLmerIndexGPU:
@@ -595,4 +595,4 @@ class TestLmerIndexGPU:
         assert model._sv_index() is not None
         model.cuda()
         got = cp.asnumpy(model(cp.asarray(X))).ravel()
-        np.testing.assert_allclose(got, cpu, atol=1e-4)
+        np.testing.assert_allclose(got, cpu, rtol=1e-9, atol=1e-12)
