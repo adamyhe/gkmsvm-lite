@@ -467,3 +467,24 @@ class TestMutationImpactOracle:
             model.score_variants(ref, alt, method="gkmexplain", batch_size=7),
             mutation_impact(model, ref, alt),
         )
+
+
+@pytest.mark.parametrize("mode", ["hypothetical", "perturbation"])
+@pytest.mark.parametrize("kernel_type, params", [
+    ("gkm_esttrunc", {"L": 8, "k": 5, "d": 2}),
+    ("gkm_esttrunc", {"L": 8, "k": 5, "d": 2, "include_rc": False}),
+    ("gkm_cnt", {"L": 6, "k": 4}),
+])
+def test_lmer_path_matches_pair_loop(kernel_type, params, mode, monkeypatch):
+    """The l-mer neighborhood path equals the per-SV pair loop."""
+    from gkmsvm.explain import gkmexplain
+    from gkmsvm.kernels import lmer_index
+    from gkmsvm.svm import GkmSVM
+
+    rng = np.random.default_rng(5)
+    sv = np.eye(4)[rng.integers(0, 4, (30, 25))].transpose(0, 2, 1)
+    model = GkmSVM(sv, rng.normal(size=30), 0.2, kernel_type, params)
+    x = np.eye(4)[rng.integers(0, 4, (3, 25))].transpose(0, 2, 1)
+    fast = gkmexplain(model, x, mode=mode)
+    monkeypatch.setattr(lmer_index, "MAX_NEIGHBORS", -1)  # forces the pair loop
+    np.testing.assert_allclose(fast, gkmexplain(model, x, mode=mode), rtol=1e-12, atol=1e-15)
