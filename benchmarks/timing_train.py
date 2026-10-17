@@ -10,6 +10,10 @@ gkmsvm-lite SMO runs; the solver comparison itself is Fig. S3
 model's caches (the exact l-mer table for -t 2), as gkmpredict's includes
 loading its model; JIT compilation is excluded.
 
+Memory (Linux): LS-GKM's is gkmtrain's peak RSS (GNU time); gkmsvm-lite's is
+the peak RSS training added to the process (VmHWM reset before each run), so
+neither counts the Python interpreter or the loaded sequences.
+
 Setup:
     conda create -n lsgkm -c bioconda -c conda-forge ls-gkm -y
 
@@ -25,7 +29,6 @@ from __future__ import annotations
 
 import argparse
 import gc
-import resource
 import subprocess
 import sys
 import tempfile
@@ -74,20 +77,27 @@ def setup_conda_env(name: str) -> None:
 # ── Memory helpers ─────────────────────────────────────────────────
 
 
-def _read_rss_mb() -> float | None:
-    """Current process RSS in MB."""
+def _reset_peak_rss() -> float | None:
+    """Reset this process's peak RSS (Linux VmHWM) and return its RSS in MB.
+
+    None where /proc/self/clear_refs isn't available (macOS): there the
+    process-wide ru_maxrss can't be reset, so a per-run peak isn't measurable.
+    """
     try:
-        with open("/proc/self/status") as f:
-            for line in f:
-                if line.startswith("VmRSS:"):
-                    return int(line.split()[1]) / 1024
-    except (FileNotFoundError, ValueError):
-        pass
-    try:
-        ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        return ru / 1024 if sys.platform != "darwin" else ru / 1024 / 1024
-    except Exception:
+        with open("/proc/self/clear_refs", "w") as f:
+            f.write("5")
+        return _proc_status_mb("VmRSS")
+    except OSError:
         return None
+
+
+def _proc_status_mb(field: str) -> float | None:
+    """A /proc/self/status memory field in MB."""
+    with open("/proc/self/status") as f:
+        for line in f:
+            if line.startswith(f"{field}:"):
+                return int(line.split()[1]) / 1024
+    return None
 
 
 def _parse_gnu_time_rss(stderr: str) -> float | None:
@@ -224,7 +234,7 @@ def train_lite(
     from gkmsvm import train_gkmsvm
 
     gc.collect()
-    rss_before = _read_rss_mb()
+    rss_before = _reset_peak_rss()
     _install_gram_timer()
     _GRAM_SECONDS[0] = 0.0
 
@@ -236,10 +246,10 @@ def train_lite(
     )
     elapsed = time.perf_counter() - t0
 
-    rss_after = _read_rss_mb()
+    # Peak memory training added on top of what the process already held
     mem_mb = None
-    if rss_before is not None and rss_after is not None:
-        mem_mb = max(0.0, rss_after - rss_before)
+    if rss_before is not None:
+        mem_mb = max(0.0, _proc_status_mb("VmHWM") - rss_before)
     model.gram_seconds = _GRAM_SECONDS[0]  # time in compute_gram; the rest is the solver
     return model, elapsed, mem_mb
 
@@ -689,7 +699,11 @@ def main():
     print(f"\n{'=' * 78}")
     print("INFERENCE TIME")
     print(f"{'=' * 78}")
-    hdr = f"{'N_train':>7}  {'N_SV':>6}  {'N_test':>6}  {'LS-GKM C':>10}  {'lite CPU':>10}"
+    mls = any(r["t_mlsgkm"] for r in infer_results)
+    hdr = f"{'N_train':>7}  {'N_SV':>6}  {'N_test':>6}  {'LS-GKM C':>10}"
+    if mls:
+        hdr += f"  {'mLS-GKM':>10}"
+    hdr += f"  {'lite CPU':>10}"
     if gpu:
         hdr += f"  {'lite GPU':>10}  {'C/GPU':>6}"
     print(hdr)
@@ -697,6 +711,8 @@ def main():
     for r in infer_results:
         line = f"{r['N_train']:>7d}  {r['n_sv']:>6d}  {r['n_test']:>6d}"
         line += f"  {r['t_lsgkm']:>9.2f}s" if r["t_lsgkm"] else f"  {'N/A':>10}"
+        if mls:
+            line += f"  {r['t_mlsgkm']:>9.2f}s" if r["t_mlsgkm"] else f"  {'N/A':>10}"
         line += f"  {r['t_lite_cpu']:>9.2f}s"
         if gpu:
             if r["t_lite_gpu"] is not None:

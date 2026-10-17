@@ -324,19 +324,41 @@ class Measured:
     stderr: str
 
 
+def _vm_hwm_mb(pid: int) -> float | None:
+    """Peak RSS of ``pid``'s current address space (Linux ``VmHWM``), in MB."""
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1]) / 1024
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 def run_measured(cmd: list[str], timeout: float | None = None) -> Measured:
     """Run ``cmd`` and report its wall time and its own peak RSS.
 
-    Uses ``os.wait4`` for the child's resource usage, so it works on Linux and
-    macOS without GNU time. Output goes through temp files, so large outputs
-    can't fill a pipe and stall the child.
+    On Linux the peak is the child's ``VmHWM``, polled while it runs: the
+    ``ru_maxrss`` that ``wait4`` returns there also counts the address space
+    the child had before exec, which (fork or vfork) is this process's, so
+    every child would measure at least this process's RSS. ``VmHWM`` only
+    grows, so polling misses at most the last poll interval. Without /proc
+    (macOS, where ``ru_maxrss`` doesn't inherit) it falls back to ``wait4``.
+    Output goes through temp files, so large outputs can't fill a pipe and
+    stall the child.
     """
+    hwm = None
     with tempfile.TemporaryFile("w+") as out, tempfile.TemporaryFile("w+") as err:
         t0 = time.perf_counter()
+        # Popen returns once the child has exec'd, so every poll sees its own memory
         proc = subprocess.Popen(cmd, stdout=out, stderr=err, text=True,
                                 env={**os.environ, **_CHILD_THREAD_ENV})
         status = "ok"
         while True:
+            h = _vm_hwm_mb(proc.pid)
+            if h is not None:
+                hwm = max(hwm or 0.0, h)
             pid, code, usage = os.wait4(proc.pid, os.WNOHANG)
             if pid:
                 break
@@ -345,7 +367,7 @@ def run_measured(cmd: list[str], timeout: float | None = None) -> Measured:
                 pid, code, usage = os.wait4(proc.pid, 0)
                 status = "timeout"
                 break
-            time.sleep(0.05)
+            time.sleep(0.01)
         wall = time.perf_counter() - t0
         proc.returncode = os.waitstatus_to_exitcode(code)
         if status == "ok" and proc.returncode != 0:
@@ -354,7 +376,8 @@ def run_measured(cmd: list[str], timeout: float | None = None) -> Measured:
         err.seek(0)
         stdout, stderr = out.read(), err.read()
     # ru_maxrss is KiB on Linux, bytes on macOS
-    rss = usage.ru_maxrss / (1024**2 if sys.platform == "darwin" else 1024)
+    rss = hwm if hwm is not None else usage.ru_maxrss / (
+        1024**2 if sys.platform == "darwin" else 1024)
     return Measured(status, wall, rss, stdout, stderr)
 
 
