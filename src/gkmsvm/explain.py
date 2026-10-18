@@ -223,6 +223,11 @@ void explain_lmer(
 """
 
 _cupy_explain_lmer_kernel = None
+# Past lmer_index.MAX_NEIGHBORS, the l-mer path is taken when the SVs have at
+# least this many windows per neighbor: -t 0 l=11 k=7 (143,980 neighbors, 300 bp
+# SVs) breaks even near 1,000 SVs on CPU (Apple M4, Xeon) and 2,000 on a Titan
+# Xp, and is 3.6-4.7x faster at 10,000 (benchmarks/dev/explain_lmer_gpu.py)
+_EXPLAIN_SV_WINDOWS_PER_NEIGHBOR = 6
 # Threads to aim for per launch; mask slices (grid.y) make up for few windows
 _EXPLAIN_LMER_THREADS = 1 << 18
 
@@ -664,9 +669,16 @@ def _explain_lmer(model, x, table_a, table_b, dmax, perturbation, gamma, batch_s
 
     base = model.kernel.base
     l = base.l
-    if (l > lmer_index.MAX_L or dmax < 0
-            or lmer_index.neighbor_count(l, dmax) > lmer_index.MAX_NEIGHBORS):
+    if not model.use_lmer_index or l > lmer_index.MAX_L or dmax < 0:
         return None
+    n_neighbors = lmer_index.neighbor_count(l, dmax)
+    if n_neighbors > lmer_index.MAX_NEIGHBORS:
+        # A query window visits n_neighbors l-mers here and every SV window
+        # in the per-SV kernel
+        packed = model._sv_packed()
+        sv_windows = 0 if packed is None else sum(p.size for p in packed if p is not None)
+        if n_neighbors * _EXPLAIN_SV_WINDOWS_PER_NEIGHBOR > sv_windows:
+            return None
     coef = to_cpu(model.coefficients).astype(np.float64)
     inv_ds = (1 / np.sqrt(np.clip(to_cpu(model._sv_diag()).astype(np.float64), 1e-20, None))
               if base.normalize else np.ones(len(coef)))

@@ -332,15 +332,15 @@ class TestGPUGkmExplain:
 
     def test_lmer_path_matches_fused(self, monkeypatch):
         """-t 0 at dmax 5 (143,980 neighbors): l-mer path == per-SV kernel."""
-        from gkmsvm.explain import gkmexplain
-        from gkmsvm.kernels import lmer_index
+        from gkmsvm import explain
 
         model = _make_model(20, 100, "gkm_cnt", {"L": 11, "k": 7}, seed=5)
         model.cuda()
         x = cp.asarray(np.stack([one_hot_encode(s) for s in _make_seqs(2, 150, seed=39)]))
-        fused = gkmexplain(model, x, mode="hypothetical")
-        monkeypatch.setattr(lmer_index, "MAX_NEIGHBORS", 200_000)
-        lmer = gkmexplain(model, x, mode="hypothetical")
+        monkeypatch.setattr(explain, "_EXPLAIN_SV_WINDOWS_PER_NEIGHBOR", 0.01)
+        lmer = explain.gkmexplain(model, x, mode="hypothetical")
+        model.use_lmer_index = False
+        fused = explain.gkmexplain(model, x, mode="hypothetical")
 
         np.testing.assert_allclose(
             cp.asnumpy(lmer), cp.asnumpy(fused), rtol=1e-9, atol=1e-12,

@@ -475,10 +475,9 @@ class TestMutationImpactOracle:
     ("gkm_esttrunc", {"L": 8, "k": 5, "d": 2, "include_rc": False}),
     ("gkm_cnt", {"L": 6, "k": 4}),
 ])
-def test_lmer_path_matches_pair_loop(kernel_type, params, mode, monkeypatch):
+def test_lmer_path_matches_pair_loop(kernel_type, params, mode):
     """The l-mer neighborhood path equals the per-SV pair loop."""
     from gkmsvm.explain import gkmexplain
-    from gkmsvm.kernels import lmer_index
     from gkmsvm.svm import GkmSVM
 
     rng = np.random.default_rng(5)
@@ -486,16 +485,37 @@ def test_lmer_path_matches_pair_loop(kernel_type, params, mode, monkeypatch):
     model = GkmSVM(sv, rng.normal(size=30), 0.2, kernel_type, params)
     x = np.eye(4)[rng.integers(0, 4, (3, 25))].transpose(0, 2, 1)
     fast = gkmexplain(model, x, mode=mode)
-    monkeypatch.setattr(lmer_index, "MAX_NEIGHBORS", -1)  # forces the pair loop
+    model.use_lmer_index = False  # forces the pair loop
     np.testing.assert_allclose(fast, gkmexplain(model, x, mode=mode), rtol=1e-12, atol=1e-15)
 
 
+def test_lmer_path_past_neighbor_cap(monkeypatch):
+    """-t 0 l=11 k=7 (143,980 neighbors) takes the l-mer path once the SVs have
+    enough windows per neighbor, and equals the pair loop."""
+    from gkmsvm import explain
+    from gkmsvm.svm import GkmSVM
+
+    rng = np.random.default_rng(6)
+    sv = np.eye(4)[rng.integers(0, 4, (30, 40))].transpose(0, 2, 1)
+    model = GkmSVM(sv, rng.normal(size=30), 0.2, "gkm_cnt", {"L": 11, "k": 7})
+    x = np.eye(4)[rng.integers(0, 4, (3, 40))].transpose(0, 2, 1)
+    calls = []
+    lmer_cpu = explain._explain_lmer_cpu
+    monkeypatch.setattr(explain, "_explain_lmer_cpu",
+                        lambda *a: calls.append(1) or lmer_cpu(*a))
+    pair = explain.gkmexplain(model, x, mode="hypothetical")
+    assert calls == []  # 1,800 SV windows: pair loop
+    monkeypatch.setattr(explain, "_EXPLAIN_SV_WINDOWS_PER_NEIGHBOR", 0.01)
+    lmer = explain.gkmexplain(model, x, mode="hypothetical")
+    assert calls
+    np.testing.assert_allclose(lmer, pair, rtol=1e-12, atol=1e-15)
+
+
 @pytest.mark.parametrize("pair_loop", [False, True])
-def test_rbf_attribution(pair_loop, monkeypatch):
+def test_rbf_attribution(pair_loop):
     """-t 3: LS-GKM scales each SV's contributions by (exp(g(K-1)) - exp(-g)) / K, so
     importance sums to score - bias - exp(-g) sum(coef); both paths agree."""
     from gkmsvm.explain import gkmexplain
-    from gkmsvm.kernels import lmer_index
     from gkmsvm.svm import GkmSVM
 
     rng = np.random.default_rng(8)
@@ -505,7 +525,7 @@ def test_rbf_attribution(pair_loop, monkeypatch):
     x = np.eye(4)[rng.integers(0, 4, (3, 25))].transpose(0, 2, 1)
     fast = gkmexplain(model, x, mode="hypothetical")
     if pair_loop:
-        monkeypatch.setattr(lmer_index, "MAX_NEIGHBORS", -1)
+        model.use_lmer_index = False
         np.testing.assert_allclose(gkmexplain(model, x, mode="hypothetical"), fast,
                                    rtol=1e-12, atol=1e-15)
     imp = gkmexplain(model, x, mode="importance")

@@ -8,9 +8,10 @@ sequences, l=11 k=7 d=3, for each kernel and path:
   cuda-lmer   the CUDA l-mer path (_explain_lmer_gpu)
   cuda-fused  the CUDA per-SV kernel (fused_explain)
 
-The fused paths are forced by setting lmer_index.MAX_NEIGHBORS to 0; for -t 0
-(143,980 neighbors at dmax 5) the l-mer paths are forced by raising it. Each
-row also reports the largest difference from cpu-lmer relative to its peak.
+The fused paths are forced with model.use_lmer_index = False; for -t 0
+(143,980 neighbors at dmax 5) the l-mer paths are forced by lowering
+explain._EXPLAIN_SV_WINDOWS_PER_NEIGHBOR. Each row also reports the largest
+difference from cpu-lmer relative to its peak.
 
 Usage (GPU server):
   python benchmarks/dev/explain_lmer_gpu.py --sv 2000 10000 --n 500
@@ -23,8 +24,7 @@ import time
 
 import numpy as np
 
-from gkmsvm import GkmSVM, gkmexplain
-from gkmsvm.kernels import lmer_index
+from gkmsvm import GkmSVM, explain, gkmexplain
 
 KERNELS = {"-t 0": "gkm_cnt", "-t 2": "gkm_esttrunc", "-t 3": "gkmrbf"}
 PARAMS = {"L": 11, "k": 7, "d": 3, "gamma": 2.0}
@@ -34,10 +34,10 @@ def onehot(rng, n, length):
     return np.eye(4, dtype=np.float32)[rng.integers(0, 4, (n, length))].transpose(0, 2, 1).copy()
 
 
-def run(model, x, device, cap, batch_size):
+def run(model, x, device, lmer, batch_size):
     import cupy as cp
 
-    lmer_index.MAX_NEIGHBORS = cap
+    model.use_lmer_index = lmer
     model.clear_caches()
     if device == "cuda":
         model.cuda()
@@ -66,27 +66,25 @@ def main():
                     help="skip the per-SV paths (slow for -t 0 at large S)")
     args = ap.parse_args()
 
-    default_cap = lmer_index.MAX_NEIGHBORS
+    explain._EXPLAIN_SV_WINDOWS_PER_NEIGHBOR = 0
     rng = np.random.default_rng(0)
     x = onehot(rng, args.n, args.len)
     print(f"{'kernel':6} {'S':>6} {'path':11} {'ms/seq':>9} {'max rel diff':>13}")
     for name in args.kernels:
-        lmer_cap = 200_000 if name == "-t 0" else default_cap
         for S in args.sv:
             model = GkmSVM(onehot(rng, S, args.len), rng.normal(size=S), 0.1,
                            KERNELS[name], PARAMS)
-            paths = [("cpu-lmer", "cpu", lmer_cap, 50), ("cuda-lmer", "cuda", lmer_cap, args.batch)]
+            paths = [("cpu-lmer", "cpu", True, 50), ("cuda-lmer", "cuda", True, args.batch)]
             if not args.skip_fused:
-                paths += [("cpu-fused", "cpu", 0, 50), ("cuda-fused", "cuda", 0, args.batch)]
+                paths += [("cpu-fused", "cpu", False, 50), ("cuda-fused", "cuda", False, args.batch)]
             ref = None
-            for label, device, cap, bs in paths:
-                dt, out = run(model, x, device, cap, bs)
+            for label, device, lmer, bs in paths:
+                dt, out = run(model, x, device, lmer, bs)
                 if ref is None:
                     ref = out
                 diff = np.abs(out - ref).max() / np.abs(ref).max()
                 print(f"{name:6} {S:>6} {label:11} {dt / args.n * 1e3:>9.3f} {diff:>13.2e}",
                       flush=True)
-    lmer_index.MAX_NEIGHBORS = default_cap
 
 
 if __name__ == "__main__":
