@@ -34,8 +34,8 @@ Timed runs each execute in their own process, so the reported peak memory is tha
 | S2 | Prediction throughput vs number of SVs (`-t 2` l-mer table, `-t 3` l-mer index, masked join, LS-GKM) | `s2` | `throughput_sweep.py` | `throughput.tsv` |
 | S3 | Training time, peak memory and held-out accuracy by solver (precomputed Gram, SMO, Nyström, LS-GKM), gkmsvm-lite on GPU and on CPU | `s3` | `training_memory.py` | `training_memory.tsv`, `training_memory_cpu.tsv` |
 | S4 | GkmExplain completeness | `s4` | `completeness.py` | `completeness.tsv` |
-| S5 | DART-Eval Task 4 (five cell lines) and Task 5 (caQTL, dsQTL) with ENCODE models, against published DART-Eval and Evo 2 results (`dart_reference.tsv`) | `s5` | `dart_eval.py` | `dart_task4_<cell>_<model>.tsv`, `dart_task5_<model>.tsv` |
-| check | S5 with gkm-SVMs retrained on DART-Eval's training chromosomes, against S5's ENCODE models (`figures/check_dart_retrained.*`; not in the paper yet) | `s5-retrained` | `dart_train.py`, `dart_eval.py` | `dart_retrained_train_<cell>.tsv`, `dart_retrained_task4_<cell>.tsv`, `dart_retrained_task5_GM12878.tsv` |
+| S5 | DART-Eval Task 4 (five cell lines) with ENCODE models and models retrained on DART-Eval's training chromosomes, and Task 5 (caQTL, dsQTL) with ENCODE models, against published DART-Eval and Evo 2 results (`dart_reference.tsv`) | `s5` | `dart_eval.py`, `dart_train.py` | `dart_task4_<cell>_<model>.tsv`, `dart_retrained_task4_<cell>.tsv`, `dart_task5_<model>.tsv` |
+| check | Retrained models against S5's ENCODE models, Task 4 and Task 5 (GM12878), with training times (`figures/check_dart_retrained.*`; not in the paper) | `s5-retrained` | `dart_train.py`, `dart_eval.py` | `dart_retrained_train_<cell>.tsv`, `dart_retrained_task5_GM12878.tsv` |
 
 The dsQTL reproduction behind 1A, 1D and S1 is written up in [`docs/validation.md`](../docs/validation.md).
 
@@ -73,7 +73,7 @@ Downloaded on first use into `benchmarks/data/` and `examples/data/`, neither of
   trained on the DNase-seq experiment DART-Eval uses per cell line (`DART_TASK4` in the Makefile).
   None holds out a test set: each concatenates the five models of a 5-fold CV over its top 10k
   non-promoter peaks genome-wide, so those of its peaks on DART-Eval's test chromosomes were
-  training positives. `s5-retrained` retrains each with gkmsvm-lite on DART-Eval's training split
+  training positives. `s5` also retrains each with gkmsvm-lite on DART-Eval's training split
   (`dart_train.py`: top 10k IDR peaks by reads against 10k background regions, 300 bp, `-t 2`),
   saving models to `data/models/retrained/`.
 

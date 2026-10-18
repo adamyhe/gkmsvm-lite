@@ -29,8 +29,8 @@ DART_MODELS   ?= data/models
 DART_TASK4    ?= GM12878_ENCFF701NCI H1ESC_ENCFF888QKW HEPG2_ENCFF984SKX \
                  IMR90_ENCFF077GEF K562_ENCFF795HQE
 DART_TASK5    ?= ENCFF701NCI ENCFF953DDE
-# Models retrained on DART-Eval's training chromosomes (dart_train.py), checked
-# on their own (s5-retrained) before they join S5: Task 4 per cell line, Task 5 GM12878
+# Models retrained on DART-Eval's training chromosomes (dart_train.py): Task 4 per
+# cell line in S5; Task 5 (GM12878) a check of its own, s5-retrained
 DART_RETRAIN  ?= GM12878 H1ESC HEPG2 IMR90 K562
 DART_RETRAIN5 ?= GM12878
 
@@ -113,6 +113,7 @@ S2 := $(OUT)/throughput.tsv
 S3 := $(OUT)/training_memory.tsv $(OUT)/training_memory_cpu.tsv
 S4 := $(OUT)/completeness.tsv
 S5 := $(foreach c,$(DART_TASK4),$(OUT)/dart_task4_$(c).tsv) \
+      $(foreach c,$(DART_RETRAIN),$(OUT)/dart_retrained_task4_$(c).tsv) \
       $(foreach m,$(DART_TASK5),$(OUT)/dart_task5_$(m).tsv)
 
 # S1 is about training, so never reuse cached models
@@ -155,8 +156,7 @@ $(DART_MODELS)/%.model.txt.gz:
 
 # Retrained models: dart_train.py writes the model and dart_retrained_train_<cell>.tsv
 S5R_MODELS := $(DART_MODELS)/retrained$(if $(QUICK),/quick)
-S5R := $(foreach c,$(DART_RETRAIN),$(OUT)/dart_retrained_task4_$(c).tsv) \
-       $(foreach c,$(DART_RETRAIN5),$(OUT)/dart_retrained_task5_$(c).tsv)
+S5R := $(foreach c,$(DART_RETRAIN5),$(OUT)/dart_retrained_task5_$(c).tsv)
 
 $(OUT)/dart_retrained_train_%.tsv: dart_train.py dart_eval.py $(COMMON)
 	$(PY) dart_train.py --cell-line $* --device $(DEVICE) --work-dir $(DART_WORK_DIR) \
@@ -192,7 +192,7 @@ figures:
 help:
 	@echo "Figure 1:   fig1a fig1b fig1c fig1d"
 	@echo "Supplement: s1 s2 s3 s4 s5"
-	@echo "Checks:     s5-retrained (DART-Eval with models retrained on its training chromosomes)"
+	@echo "Checks:     s5-retrained (DART-Eval Task 5 with the retrained GM12878 model)"
 	@echo "All:        paper (results), figures (PDFs), quick (small run)"
 	@echo "Options:    DEVICE=$(DEVICE) QUICK=1 PY=$(PY) THREADS=1|4|16 LSGKM_ENV=$(LSGKM_ENV) LSGKM_BIN=<dir> MLSGKM_BIN=<dir>"
 	@echo "            DART_WORK_DIR=$(DART_WORK_DIR) DART_MODELS=$(DART_MODELS)"
