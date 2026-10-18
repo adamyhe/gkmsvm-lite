@@ -24,7 +24,15 @@ MLSGKM_BIN    ?=
 THREADS       ?=
 DART_WORK_DIR ?= data/dart-eval
 DART_MODELS   ?= data/models
-DART_ENCODE   ?= ENCFF953DDE ENCFF701NCI
+# Task 4: each cell line with the ENCODE gkm-SVM model trained on the DNase-seq
+# experiment DART-Eval uses (cell_model). Task 5: GM12878 models, DNase and ATAC
+DART_TASK4    ?= GM12878_ENCFF701NCI H1ESC_ENCFF888QKW HEPG2_ENCFF984SKX \
+                 IMR90_ENCFF077GEF K562_ENCFF795HQE
+DART_TASK5    ?= ENCFF701NCI ENCFF953DDE
+# Models retrained on DART-Eval's training chromosomes (dart_train.py): Task 4 per
+# cell line in S5; Task 5 (GM12878) a check of its own, s5-retrained
+DART_RETRAIN  ?= GM12878 H1ESC HEPG2 IMR90 K562
+DART_RETRAIN5 ?= GM12878
 
 ifdef QUICK
 OUT           := results/quick
@@ -40,6 +48,7 @@ SOLVER_CPU_ARGS := --sizes 500,1000,2000 --n-test 200
 SWEEP_ARGS    := --sizes 1000,4000 --n-seqs 200
 DART_ARGS     := --max-variants 200
 DART4_ARGS    := --max-seqs 2000
+DART_TRAIN_ARGS := --n-pos 1000 --n-neg 1000
 else
 OUT           := results
 FIG_OUT       := figures
@@ -55,6 +64,7 @@ SOLVER_CPU_ARGS := --sizes 1000,2000,5000,10000,20000
 SWEEP_ARGS    :=
 DART_ARGS     :=
 DART4_ARGS    :=
+DART_TRAIN_ARGS :=
 endif
 
 COMMON := _common.py
@@ -102,7 +112,9 @@ S1 := $(OUT)/dsqtl_retrained_per_model.tsv
 S2 := $(OUT)/throughput.tsv
 S3 := $(OUT)/training_memory.tsv $(OUT)/training_memory_cpu.tsv
 S4 := $(OUT)/completeness.tsv
-S5 := $(foreach m,$(DART_ENCODE),$(OUT)/dart_task4_$(m).tsv $(OUT)/dart_task5_dsqtl_$(m).tsv)
+S5 := $(foreach c,$(DART_TASK4),$(OUT)/dart_task4_$(c).tsv) \
+      $(foreach c,$(DART_RETRAIN),$(OUT)/dart_retrained_task4_$(c).tsv) \
+      $(foreach m,$(DART_TASK5),$(OUT)/dart_task5_$(m).tsv)
 
 # S1 is about training, so never reuse cached models
 $(OUT)/dsqtl_retrained_per_model.tsv: $(DSQTL)
@@ -124,25 +136,47 @@ $(OUT)/training_memory_cpu.tsv: training_memory.py $(DSQTL)
 $(OUT)/completeness.tsv: completeness.py $(COMMON)
 	$(PY) completeness.py --device $(DEVICE) $(COMPL_ARGS) --output $@
 
-$(OUT)/dart_task4_%.tsv: dart_eval.py $(COMMON) $(DART_MODELS)/%.model.txt.gz
-	$(PY) dart_eval.py -m $(DART_MODELS)/$*.model.txt.gz --task activity \
-	    --cell-lines GM12878 --device $(DEVICE) --work-dir $(DART_WORK_DIR) \
+# dart_task4_<cell>_<model>.tsv
+cell_of  = $(firstword $(subst _, ,$(1)))
+model_of = $(lastword $(subst _, ,$(1)))
+.SECONDEXPANSION:
+$(OUT)/dart_task4_%.tsv: dart_eval.py $(COMMON) $$(DART_MODELS)/$$(call model_of,$$*).model.txt.gz
+	$(PY) dart_eval.py -m $(DART_MODELS)/$(call model_of,$*).model.txt.gz --task activity \
+	    --cell-lines $(call cell_of,$*) --device $(DEVICE) --work-dir $(DART_WORK_DIR) \
 	    $(DART4_ARGS) --output $@ -v
 
-$(OUT)/dart_task5_dsqtl_%.tsv: dart_eval.py $(COMMON) $(DART_MODELS)/%.model.txt.gz
+$(OUT)/dart_task5_%.tsv: dart_eval.py $(COMMON) $(DART_MODELS)/%.model.txt.gz
 	$(PY) dart_eval.py -m $(DART_MODELS)/$*.model.txt.gz --task vep \
-	    --vep-tasks dsqtl --vep-method gkmexplain --device $(DEVICE) \
+	    --vep-tasks all --vep-method gkmexplain --device $(DEVICE) \
 	    --work-dir $(DART_WORK_DIR) $(DART_ARGS) --output $@ -v
 
 $(DART_MODELS)/%.model.txt.gz:
 	mkdir -p $(DART_MODELS)
 	curl -fL -o $@ https://www.encodeproject.org/files/$*/@@download/$*.txt.gz
 
+# Retrained models: dart_train.py writes the model and dart_retrained_train_<cell>.tsv
+S5R_MODELS := $(DART_MODELS)/retrained$(if $(QUICK),/quick)
+S5R := $(foreach c,$(DART_RETRAIN5),$(OUT)/dart_retrained_task5_$(c).tsv)
+
+$(OUT)/dart_retrained_train_%.tsv: dart_train.py dart_eval.py $(COMMON)
+	$(PY) dart_train.py --cell-line $* --device $(DEVICE) --work-dir $(DART_WORK_DIR) \
+	    $(DART_TRAIN_ARGS) --model-output $(S5R_MODELS)/$*.npz --output $@
+
+$(OUT)/dart_retrained_task4_%.tsv: dart_eval.py $(COMMON) $(OUT)/dart_retrained_train_%.tsv
+	$(PY) dart_eval.py -m $(S5R_MODELS)/$*.npz --task activity --cell-lines $* \
+	    --device $(DEVICE) --work-dir $(DART_WORK_DIR) $(DART4_ARGS) --output $@ -v
+
+$(OUT)/dart_retrained_task5_%.tsv: dart_eval.py $(COMMON) $(OUT)/dart_retrained_train_%.tsv
+	$(PY) dart_eval.py -m $(S5R_MODELS)/$*.npz --task vep \
+	    --vep-tasks all --vep-method gkmexplain --device $(DEVICE) \
+	    --work-dir $(DART_WORK_DIR) $(DART_ARGS) --output $@ -v
+
 s1: $(S1)
 s2: $(S2)
 s3: $(S3)
 s4: $(S4)
 s5: $(S5)
+s5-retrained: $(S5R)
 
 # ── Aggregates ──────────────────────────────────────────────────────
 
@@ -158,10 +192,11 @@ figures:
 help:
 	@echo "Figure 1:   fig1a fig1b fig1c fig1d"
 	@echo "Supplement: s1 s2 s3 s4 s5"
+	@echo "Checks:     s5-retrained (DART-Eval Task 5 with the retrained GM12878 model)"
 	@echo "All:        paper (results), figures (PDFs), quick (small run)"
 	@echo "Options:    DEVICE=$(DEVICE) QUICK=1 PY=$(PY) THREADS=1|4|16 LSGKM_ENV=$(LSGKM_ENV) LSGKM_BIN=<dir> MLSGKM_BIN=<dir>"
 	@echo "            DART_WORK_DIR=$(DART_WORK_DIR) DART_MODELS=$(DART_MODELS)"
 
 .DEFAULT_GOAL := help
-.PHONY: fig1a fig1b fig1c fig1d s1 s2 s3 s4 s5 paper quick figures help
+.PHONY: fig1a fig1b fig1c fig1d s1 s2 s3 s4 s5 s5-retrained paper quick figures help
 .SECONDARY:

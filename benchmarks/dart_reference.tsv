@@ -1,0 +1,529 @@
+# Published DART-Eval Task 4 and Task 5 results, for Fig. S5.
+# DART-Eval: Patel et al., arXiv:2412.05430v3 (2026; NeurIPS 2024 Datasets and Benchmarks),
+#   values parsed from the LaTeX source: Tables chromatin_<cell> (Task 4, per cell line),
+#   scoring_super_supp_afr / scoring_super_supp_yoruban (Task 5 supervised, after the
+#   July 2025 corrigendum) and variant_scoring (Task 5 zero-shot AUROC).
+# Evo 2: Brixi et al., Nature 652:1349 (2026), doi:10.1038/s41586-026-10176-5; zero-shot
+#   embedding (cosine distance) AUROC. 40B from the main text; 7B read from the bars of
+#   Extended Data Fig. 5f (+-0.01; the same reading gives 0.585/0.663 for the 40B values
+#   printed as 0.58/0.66). Evo 2 reports no Task 4 results.
+# Metrics follow DART-Eval: Task 4 *_peaks over peaks, *_all over peaks and background,
+#   AUROC/AUPRC of IDR peaks vs background; Task 5 AUROC/AUPRC of |allelic effect| for
+#   significant vs control variants, Pearson/Spearman of signed effects on significant ones.
+task	dataset	setting	model	metric	value	source
+task4	GM12878	Probed	Caduceus	spearman_peaks	0.251	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	Caduceus	pearson_peaks	0.3028	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	Caduceus	spearman_all	0.1751	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	Caduceus	pearson_all	0.2157	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	Caduceus	auroc	0.6053	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	Caduceus	auprc	0.4521	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	DNABERT-2	spearman_peaks	0.3946	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	DNABERT-2	pearson_peaks	0.4625	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	DNABERT-2	spearman_all	0.4899	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	DNABERT-2	pearson_all	0.5308	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	DNABERT-2	auroc	0.757	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	DNABERT-2	auprc	0.6399	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	GENA-LM	spearman_peaks	0.4899	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	GENA-LM	pearson_peaks	0.5369	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	GENA-LM	spearman_all	0.5014	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	GENA-LM	pearson_all	0.5572	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	GENA-LM	auroc	0.7836	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	GENA-LM	auprc	0.6794	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	HyenaDNA	spearman_peaks	0.3619	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	HyenaDNA	pearson_peaks	0.4125	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	HyenaDNA	spearman_all	0.3964	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	HyenaDNA	pearson_all	0.4693	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	HyenaDNA	auroc	0.7082	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	HyenaDNA	auprc	0.5707	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	Mistral-DNA	spearman_peaks	0.2932	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	Mistral-DNA	pearson_peaks	0.2669	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	Mistral-DNA	spearman_all	0.2266	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	Mistral-DNA	pearson_all	0.3418	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	Mistral-DNA	auroc	0.5858	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	Mistral-DNA	auprc	0.3692	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	NT	spearman_peaks	0.4098	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	NT	pearson_peaks	0.4556	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	NT	spearman_all	0.478	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	NT	pearson_all	0.5191	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	NT	auroc	0.7565	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Probed	NT	auprc	0.6271	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	Caduceus	spearman_peaks	0.5029	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	Caduceus	pearson_peaks	0.5596	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	Caduceus	spearman_all	0.7405	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	Caduceus	pearson_all	0.7304	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	Caduceus	auroc	0.935	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	Caduceus	auprc	0.8724	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	DNABERT-2	spearman_peaks	0.4892	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	DNABERT-2	pearson_peaks	0.5436	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	DNABERT-2	spearman_all	0.7304	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	DNABERT-2	pearson_all	0.7286	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	DNABERT-2	auroc	0.9157	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	DNABERT-2	auprc	0.8425	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	GENA-LM	spearman_peaks	0.4669	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	GENA-LM	pearson_peaks	0.5347	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	GENA-LM	spearman_all	0.7196	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	GENA-LM	pearson_all	0.7206	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	GENA-LM	auroc	0.9084	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	GENA-LM	auprc	0.8333	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	HyenaDNA	spearman_peaks	0.4356	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	HyenaDNA	pearson_peaks	0.4962	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	HyenaDNA	spearman_all	0.6058	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	HyenaDNA	pearson_all	0.6069	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	HyenaDNA	auroc	0.8532	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	HyenaDNA	auprc	0.7452	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	Mistral-DNA	spearman_peaks	0.3718	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	Mistral-DNA	pearson_peaks	0.4368	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	Mistral-DNA	spearman_all	0.5175	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	Mistral-DNA	pearson_all	0.5557	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	Mistral-DNA	auroc	0.7888	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	Mistral-DNA	auprc	0.6694	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	NT	spearman_peaks	0.5148	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	NT	pearson_peaks	0.5862	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	NT	spearman_all	0.7659	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	NT	pearson_all	0.765	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	NT	auroc	0.9381	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Fine-Tuned	NT	auprc	0.8868	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Ab initio	ChromBPNet	spearman_peaks	0.5401	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Ab initio	ChromBPNet	pearson_peaks	0.6074	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Ab initio	ChromBPNet	spearman_all	0.7349	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Ab initio	ChromBPNet	pearson_all	0.7282	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Ab initio	ChromBPNet	auroc	0.9399	DART-Eval v3 Table chromatin_gm12878
+task4	GM12878	Ab initio	ChromBPNet	auprc	0.8851	DART-Eval v3 Table chromatin_gm12878
+task4	H1ESC	Probed	Caduceus	spearman_peaks	0.3706	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	Caduceus	pearson_peaks	0.4624	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	Caduceus	spearman_all	0.2484	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	Caduceus	pearson_all	0.3267	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	Caduceus	auroc	0.6076	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	Caduceus	auprc	0.4291	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	DNABERT-2	spearman_peaks	0.5835	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	DNABERT-2	pearson_peaks	0.6477	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	DNABERT-2	spearman_all	0.5714	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	DNABERT-2	pearson_all	0.6035	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	DNABERT-2	auroc	0.7629	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	DNABERT-2	auprc	0.6412	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	GENA-LM	spearman_peaks	0.6779	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	GENA-LM	pearson_peaks	0.7074	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	GENA-LM	spearman_all	0.6311	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	GENA-LM	pearson_all	0.6682	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	GENA-LM	auroc	0.8093	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	GENA-LM	auprc	0.7036	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	HyenaDNA	spearman_peaks	0.5381	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	HyenaDNA	pearson_peaks	0.607	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	HyenaDNA	spearman_all	0.5154	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	HyenaDNA	pearson_all	0.563	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	HyenaDNA	auroc	0.7282	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	HyenaDNA	auprc	0.5932	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	Mistral-DNA	spearman_peaks	0.4997	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	Mistral-DNA	pearson_peaks	0.5002	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	Mistral-DNA	spearman_all	0.437	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	Mistral-DNA	pearson_all	0.47	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	Mistral-DNA	auroc	0.6445	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	Mistral-DNA	auprc	0.4424	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	NT	spearman_peaks	0.5945	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	NT	pearson_peaks	0.6544	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	NT	spearman_all	0.5418	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	NT	pearson_all	0.5611	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	NT	auroc	0.7654	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Probed	NT	auprc	0.6504	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	Caduceus	spearman_peaks	0.7437	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	Caduceus	pearson_peaks	0.7869	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	Caduceus	spearman_all	0.7983	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	Caduceus	pearson_all	0.7992	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	Caduceus	auroc	0.9541	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	Caduceus	auprc	0.9081	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	DNABERT-2	spearman_peaks	0.7173	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	DNABERT-2	pearson_peaks	0.7732	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	DNABERT-2	spearman_all	0.781	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	DNABERT-2	pearson_all	0.7962	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	DNABERT-2	auroc	0.9405	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	DNABERT-2	auprc	0.8908	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	GENA-LM	spearman_peaks	0.6962	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	GENA-LM	pearson_peaks	0.755	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	GENA-LM	spearman_all	0.7768	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	GENA-LM	pearson_all	0.7962	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	GENA-LM	auroc	0.9416	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	GENA-LM	auprc	0.8956	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	HyenaDNA	spearman_peaks	0.6726	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	HyenaDNA	pearson_peaks	0.7271	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	HyenaDNA	spearman_all	0.74	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	HyenaDNA	pearson_all	0.7486	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	HyenaDNA	auroc	0.9272	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	HyenaDNA	auprc	0.861	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	Mistral-DNA	spearman_peaks	0.5734	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	Mistral-DNA	pearson_peaks	0.6478	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	Mistral-DNA	spearman_all	0.6362	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	Mistral-DNA	pearson_all	0.6835	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	Mistral-DNA	auroc	0.8385	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	Mistral-DNA	auprc	0.7353	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	NT	spearman_peaks	0.7366	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	NT	pearson_peaks	0.7969	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	NT	spearman_all	0.8011	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	NT	pearson_all	0.815	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	NT	auroc	0.9584	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Fine-Tuned	NT	auprc	0.9247	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Ab initio	ChromBPNet	spearman_peaks	0.7549	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Ab initio	ChromBPNet	pearson_peaks	0.7971	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Ab initio	ChromBPNet	spearman_all	0.7716	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Ab initio	ChromBPNet	pearson_all	0.7534	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Ab initio	ChromBPNet	auroc	0.9524	DART-Eval v3 Table chromatin_h1esc
+task4	H1ESC	Ab initio	ChromBPNet	auprc	0.9062	DART-Eval v3 Table chromatin_h1esc
+task4	HEPG2	Probed	Caduceus	spearman_peaks	0.3123	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	Caduceus	pearson_peaks	0.3857	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	Caduceus	spearman_all	0.2623	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	Caduceus	pearson_all	0.3407	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	Caduceus	auroc	0.6108	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	Caduceus	auprc	0.5432	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	DNABERT-2	spearman_peaks	0.3566	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	DNABERT-2	pearson_peaks	0.4241	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	DNABERT-2	spearman_all	0.3342	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	DNABERT-2	pearson_all	0.3954	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	DNABERT-2	auroc	0.6499	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	DNABERT-2	auprc	0.5736	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	GENA-LM	spearman_peaks	0.4008	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	GENA-LM	pearson_peaks	0.4833	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	GENA-LM	spearman_all	0.5052	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	GENA-LM	pearson_all	0.5558	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	GENA-LM	auroc	0.7709	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	GENA-LM	auprc	0.7	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	HyenaDNA	spearman_peaks	0.3453	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	HyenaDNA	pearson_peaks	0.3962	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	HyenaDNA	spearman_all	0.3465	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	HyenaDNA	pearson_all	0.4072	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	HyenaDNA	auroc	0.6414	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	HyenaDNA	auprc	0.5506	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	Mistral-DNA	spearman_peaks	0.3487	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	Mistral-DNA	pearson_peaks	0.4096	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	Mistral-DNA	spearman_all	0.3529	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	Mistral-DNA	pearson_all	0.4141	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	Mistral-DNA	auroc	0.6528	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	Mistral-DNA	auprc	0.5586	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	NT	spearman_peaks	0.3365	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	NT	pearson_peaks	0.3989	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	NT	spearman_all	0.3175	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	NT	pearson_all	0.3862	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	NT	auroc	0.6483	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Probed	NT	auprc	0.5777	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	Caduceus	spearman_peaks	0.4536	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	Caduceus	pearson_peaks	0.5234	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	Caduceus	spearman_all	0.6671	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	Caduceus	pearson_all	0.6323	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	Caduceus	auroc	0.8964	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	Caduceus	auprc	0.8219	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	DNABERT-2	spearman_peaks	0.4719	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	DNABERT-2	pearson_peaks	0.5365	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	DNABERT-2	spearman_all	0.6858	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	DNABERT-2	pearson_all	0.6559	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	DNABERT-2	auroc	0.8934	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	DNABERT-2	auprc	0.8247	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	GENA-LM	spearman_peaks	0.4392	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	GENA-LM	pearson_peaks	0.5145	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	GENA-LM	spearman_all	0.6626	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	GENA-LM	pearson_all	0.6408	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	GENA-LM	auroc	0.8777	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	GENA-LM	auprc	0.8097	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	HyenaDNA	spearman_peaks	0.4057	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	HyenaDNA	pearson_peaks	0.4782	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	HyenaDNA	spearman_all	0.6197	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	HyenaDNA	pearson_all	0.5949	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	HyenaDNA	auroc	0.8537	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	HyenaDNA	auprc	0.7732	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	Mistral-DNA	spearman_peaks	0.3597	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	Mistral-DNA	pearson_peaks	0.4241	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	Mistral-DNA	spearman_all	0.4754	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	Mistral-DNA	pearson_all	0.4833	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	Mistral-DNA	auroc	0.7306	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	Mistral-DNA	auprc	0.6331	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	NT	spearman_peaks	0.5134	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	NT	pearson_peaks	0.5773	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	NT	spearman_all	0.7184	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	NT	pearson_all	0.6876	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	NT	auroc	0.9216	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Fine-Tuned	NT	auprc	0.869	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Ab initio	ChromBPNet	spearman_peaks	0.5344	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Ab initio	ChromBPNet	pearson_peaks	0.6021	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Ab initio	ChromBPNet	spearman_all	0.6898	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Ab initio	ChromBPNet	pearson_all	0.6711	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Ab initio	ChromBPNet	auroc	0.9097	DART-Eval v3 Table chromatin_hepg2
+task4	HEPG2	Ab initio	ChromBPNet	auprc	0.8618	DART-Eval v3 Table chromatin_hepg2
+task4	IMR90	Probed	Caduceus	spearman_peaks	0.1486	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	Caduceus	pearson_peaks	0.1719	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	Caduceus	spearman_all	0.2123	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	Caduceus	pearson_all	0.2163	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	Caduceus	auroc	0.6096	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	Caduceus	auprc	0.2702	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	DNABERT-2	spearman_peaks	0.2745	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	DNABERT-2	pearson_peaks	0.2884	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	DNABERT-2	spearman_all	0.4454	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	DNABERT-2	pearson_all	0.4448	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	DNABERT-2	auroc	0.7285	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	DNABERT-2	auprc	0.4125	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	GENA-LM	spearman_peaks	0.3288	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	GENA-LM	pearson_peaks	0.3638	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	GENA-LM	spearman_all	0.5213	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	GENA-LM	pearson_all	0.5539	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	GENA-LM	auroc	0.7989	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	GENA-LM	auprc	0.541	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	HyenaDNA	spearman_peaks	0.2371	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	HyenaDNA	pearson_peaks	0.2869	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	HyenaDNA	spearman_all	0.3856	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	HyenaDNA	pearson_all	0.4408	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	HyenaDNA	auroc	0.7016	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	HyenaDNA	auprc	0.3889	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	Mistral-DNA	spearman_peaks	0.2439	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	Mistral-DNA	pearson_peaks	0.2828	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	Mistral-DNA	spearman_all	0.3866	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	Mistral-DNA	pearson_all	0.3956	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	Mistral-DNA	auroc	0.7116	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	Mistral-DNA	auprc	0.4025	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	NT	spearman_peaks	0.2693	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	NT	pearson_peaks	0.3184	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	NT	spearman_all	0.4379	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	NT	pearson_all	0.4427	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	NT	auroc	0.7387	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Probed	NT	auprc	0.4795	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	Caduceus	spearman_peaks	0.4793	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	Caduceus	pearson_peaks	0.5258	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	Caduceus	spearman_all	0.7988	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	Caduceus	pearson_all	0.7475	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	Caduceus	auroc	0.976	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	Caduceus	auprc	0.8997	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	DNABERT-2	spearman_peaks	0.4699	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	DNABERT-2	pearson_peaks	0.5126	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	DNABERT-2	spearman_all	0.796	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	DNABERT-2	pearson_all	0.7505	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	DNABERT-2	auroc	0.9629	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	DNABERT-2	auprc	0.858	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	GENA-LM	spearman_peaks	0.4211	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	GENA-LM	pearson_peaks	0.4778	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	GENA-LM	spearman_all	0.7898	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	GENA-LM	pearson_all	0.7512	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	GENA-LM	auroc	0.9612	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	GENA-LM	auprc	0.8569	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	HyenaDNA	spearman_peaks	0.4255	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	HyenaDNA	pearson_peaks	0.4703	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	HyenaDNA	spearman_all	0.7231	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	HyenaDNA	pearson_all	0.6737	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	HyenaDNA	auroc	0.9412	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	HyenaDNA	auprc	0.7851	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	Mistral-DNA	spearman_peaks	0.3023	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	Mistral-DNA	pearson_peaks	0.3425	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	Mistral-DNA	spearman_all	0.5912	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	Mistral-DNA	pearson_all	0.583	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	Mistral-DNA	auroc	0.8547	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	Mistral-DNA	auprc	0.6093	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	NT	spearman_peaks	0.489	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	NT	pearson_peaks	0.5416	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	NT	spearman_all	0.8195	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	NT	pearson_all	0.7806	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	NT	auroc	0.9745	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Fine-Tuned	NT	auprc	0.9018	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Ab initio	ChromBPNet	spearman_peaks	0.5495	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Ab initio	ChromBPNet	pearson_peaks	0.5963	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Ab initio	ChromBPNet	spearman_all	0.7749	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Ab initio	ChromBPNet	pearson_all	0.7314	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Ab initio	ChromBPNet	auroc	0.9745	DART-Eval v3 Table chromatin_imr90
+task4	IMR90	Ab initio	ChromBPNet	auprc	0.8886	DART-Eval v3 Table chromatin_imr90
+task4	K562	Probed	Caduceus	spearman_peaks	0.4006	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	Caduceus	pearson_peaks	0.5499	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	Caduceus	spearman_all	0.3009	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	Caduceus	pearson_all	0.4444	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	Caduceus	auroc	0.6164	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	Caduceus	auprc	0.5819	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	DNABERT-2	spearman_peaks	0.4827	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	DNABERT-2	pearson_peaks	0.6215	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	DNABERT-2	spearman_all	0.4811	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	DNABERT-2	pearson_all	0.5722	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	DNABERT-2	auroc	0.7208	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	DNABERT-2	auprc	0.6701	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	GENA-LM	spearman_peaks	0.461	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	GENA-LM	pearson_peaks	0.6152	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	GENA-LM	spearman_all	0.4988	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	GENA-LM	pearson_all	0.5811	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	GENA-LM	auroc	0.7607	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	GENA-LM	auprc	0.7066	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	HyenaDNA	spearman_peaks	0.4381	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	HyenaDNA	pearson_peaks	0.5616	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	HyenaDNA	spearman_all	0.3763	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	HyenaDNA	pearson_all	0.4624	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	HyenaDNA	auroc	0.6621	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	HyenaDNA	auprc	0.5869	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	Mistral-DNA	spearman_peaks	0.4307	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	Mistral-DNA	pearson_peaks	0.5634	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	Mistral-DNA	spearman_all	0.3973	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	Mistral-DNA	pearson_all	0.5019	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	Mistral-DNA	auroc	0.6782	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	Mistral-DNA	auprc	0.6031	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	NT	spearman_peaks	0.499	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	NT	pearson_peaks	0.6339	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	NT	spearman_all	0.5116	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	NT	pearson_all	0.6037	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	NT	auroc	0.764	DART-Eval v3 Table chromatin_k562
+task4	K562	Probed	NT	auprc	0.7203	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	Caduceus	spearman_peaks	0.5698	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	Caduceus	pearson_peaks	0.6668	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	Caduceus	spearman_all	0.7599	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	Caduceus	pearson_all	0.7475	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	Caduceus	auroc	0.9334	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	Caduceus	auprc	0.8852	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	DNABERT-2	spearman_peaks	0.5286	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	DNABERT-2	pearson_peaks	0.6484	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	DNABERT-2	spearman_all	0.7357	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	DNABERT-2	pearson_all	0.7329	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	DNABERT-2	auroc	0.9172	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	DNABERT-2	auprc	0.8674	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	GENA-LM	spearman_peaks	0.5323	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	GENA-LM	pearson_peaks	0.6392	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	GENA-LM	spearman_all	0.7349	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	GENA-LM	pearson_all	0.7389	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	GENA-LM	auroc	0.9096	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	GENA-LM	auprc	0.8603	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	HyenaDNA	spearman_peaks	0.4456	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	HyenaDNA	pearson_peaks	0.5878	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	HyenaDNA	spearman_all	0.5112	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	HyenaDNA	pearson_all	0.5693	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	HyenaDNA	auroc	0.7499	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	HyenaDNA	auprc	0.6729	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	Mistral-DNA	spearman_peaks	0.4305	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	Mistral-DNA	pearson_peaks	0.5678	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	Mistral-DNA	spearman_all	0.5615	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	Mistral-DNA	pearson_all	0.6005	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	Mistral-DNA	auroc	0.7956	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	Mistral-DNA	auprc	0.7117	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	NT	spearman_peaks	0.5829	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	NT	pearson_peaks	0.6863	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	NT	spearman_all	0.7764	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	NT	pearson_all	0.7714	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	NT	auroc	0.9412	DART-Eval v3 Table chromatin_k562
+task4	K562	Fine-Tuned	NT	auprc	0.9016	DART-Eval v3 Table chromatin_k562
+task4	K562	Ab initio	ChromBPNet	spearman_peaks	0.5741	DART-Eval v3 Table chromatin_k562
+task4	K562	Ab initio	ChromBPNet	pearson_peaks	0.6687	DART-Eval v3 Table chromatin_k562
+task4	K562	Ab initio	ChromBPNet	spearman_all	0.72	DART-Eval v3 Table chromatin_k562
+task4	K562	Ab initio	ChromBPNet	pearson_all	0.7246	DART-Eval v3 Table chromatin_k562
+task4	K562	Ab initio	ChromBPNet	auroc	0.9167	DART-Eval v3 Table chromatin_k562
+task4	K562	Ab initio	ChromBPNet	auprc	0.8762	DART-Eval v3 Table chromatin_k562
+task5	caQTL	Probed	Caduceus	pearson	-0.0209	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Probed	Caduceus	spearman	-0.0084	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Probed	Caduceus	auroc	0.5124	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Probed	Caduceus	auprc	0.0848	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Probed	DNABERT-2	pearson	0.0169	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Probed	DNABERT-2	spearman	0.0106	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Probed	DNABERT-2	auroc	0.5024	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Probed	DNABERT-2	auprc	0.081	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Probed	GENA-LM	pearson	-0.0087	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Probed	GENA-LM	spearman	0.0009	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Probed	GENA-LM	auroc	0.5149	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Probed	GENA-LM	auprc	0.0836	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Probed	HyenaDNA	pearson	0.0304	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Probed	HyenaDNA	spearman	0.0262	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Probed	HyenaDNA	auroc	0.5658	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Probed	HyenaDNA	auprc	0.0937	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Probed	Mistral-DNA	pearson	0.0122	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Probed	Mistral-DNA	spearman	0.0068	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Probed	Mistral-DNA	auroc	0.5018	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Probed	Mistral-DNA	auprc	0.0821	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Probed	NT	pearson	0.0203	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Probed	NT	spearman	0.0267	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Probed	NT	auroc	0.5248	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Probed	NT	auprc	0.087	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Fine-Tuned	Caduceus	pearson	0.4707	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Fine-Tuned	Caduceus	spearman	0.4945	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Fine-Tuned	Caduceus	auroc	0.6498	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Fine-Tuned	Caduceus	auprc	0.1791	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Fine-Tuned	DNABERT-2	pearson	0.3899	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Fine-Tuned	DNABERT-2	spearman	0.4267	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Fine-Tuned	DNABERT-2	auroc	0.6385	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Fine-Tuned	DNABERT-2	auprc	0.1524	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Fine-Tuned	GENA-LM	pearson	0.3666	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Fine-Tuned	GENA-LM	spearman	0.3772	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Fine-Tuned	GENA-LM	auroc	0.6147	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Fine-Tuned	GENA-LM	auprc	0.1384	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Fine-Tuned	HyenaDNA	pearson	0.3892	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Fine-Tuned	HyenaDNA	spearman	0.3958	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Fine-Tuned	HyenaDNA	auroc	0.5845	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Fine-Tuned	HyenaDNA	auprc	0.106	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Fine-Tuned	Mistral-DNA	pearson	0.1454	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Fine-Tuned	Mistral-DNA	spearman	0.147	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Fine-Tuned	Mistral-DNA	auroc	0.5101	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Fine-Tuned	Mistral-DNA	auprc	0.0841	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Fine-Tuned	NT	pearson	0.4592	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Fine-Tuned	NT	spearman	0.4578	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Fine-Tuned	NT	auroc	0.6225	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Fine-Tuned	NT	auprc	0.1527	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Ab initio	ChromBPNet	pearson	0.6739	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Ab initio	ChromBPNet	spearman	0.7033	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Ab initio	ChromBPNet	auroc	0.7716	DART-Eval v3 Table scoring_super_supp_afr
+task5	caQTL	Ab initio	ChromBPNet	auprc	0.3972	DART-Eval v3 Table scoring_super_supp_afr
+task5	dsQTL	Probed	Caduceus	pearson	0.0167	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Probed	Caduceus	spearman	0.0236	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Probed	Caduceus	auroc	0.4901	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Probed	Caduceus	auprc	0.02	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Probed	DNABERT-2	pearson	0.0239	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Probed	DNABERT-2	spearman	-0.0044	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Probed	DNABERT-2	auroc	0.4758	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Probed	DNABERT-2	auprc	0.0194	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Probed	GENA-LM	pearson	0.0589	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Probed	GENA-LM	spearman	0.0293	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Probed	GENA-LM	auroc	0.4655	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Probed	GENA-LM	auprc	0.0191	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Probed	HyenaDNA	pearson	-0.0416	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Probed	HyenaDNA	spearman	-0.0771	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Probed	HyenaDNA	auroc	0.4672	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Probed	HyenaDNA	auprc	0.0187	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Probed	Mistral-DNA	pearson	-0.0031	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Probed	Mistral-DNA	spearman	0.0457	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Probed	Mistral-DNA	auroc	0.4324	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Probed	Mistral-DNA	auprc	0.0201	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Probed	NT	pearson	0.1289	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Probed	NT	spearman	0.1406	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Probed	NT	auroc	0.5163	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Probed	NT	auprc	0.0222	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Fine-Tuned	Caduceus	pearson	0.5127	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Fine-Tuned	Caduceus	spearman	0.5619	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Fine-Tuned	Caduceus	auroc	0.6664	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Fine-Tuned	Caduceus	auprc	0.0764	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Fine-Tuned	DNABERT-2	pearson	0.5002	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Fine-Tuned	DNABERT-2	spearman	0.5303	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Fine-Tuned	DNABERT-2	auroc	0.6491	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Fine-Tuned	DNABERT-2	auprc	0.0556	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Fine-Tuned	GENA-LM	pearson	0.4297	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Fine-Tuned	GENA-LM	spearman	0.4294	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Fine-Tuned	GENA-LM	auroc	0.6409	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Fine-Tuned	GENA-LM	auprc	0.0543	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Fine-Tuned	HyenaDNA	pearson	0.3576	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Fine-Tuned	HyenaDNA	spearman	0.3304	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Fine-Tuned	HyenaDNA	auroc	0.4992	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Fine-Tuned	HyenaDNA	auprc	0.0221	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Fine-Tuned	Mistral-DNA	pearson	0.053	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Fine-Tuned	Mistral-DNA	spearman	0.0618	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Fine-Tuned	Mistral-DNA	auroc	0.5041	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Fine-Tuned	Mistral-DNA	auprc	0.0204	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Fine-Tuned	NT	pearson	0.5569	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Fine-Tuned	NT	spearman	0.587	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Fine-Tuned	NT	auroc	0.697	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Fine-Tuned	NT	auprc	0.0816	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Ab initio	ChromBPNet	pearson	0.7385	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Ab initio	ChromBPNet	spearman	0.7507	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Ab initio	ChromBPNet	auroc	0.8916	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	dsQTL	Ab initio	ChromBPNet	auprc	0.3587	DART-Eval v3 Table scoring_super_supp_yoruban
+task5	caQTL	Zero-shot likelihood	Caduceus	auroc	0.525	DART-Eval v3 Table variant_scoring
+task5	caQTL	Zero-shot embedding	Caduceus	auroc	0.519	DART-Eval v3 Table variant_scoring
+task5	caQTL	Zero-shot embedding	DNABERT-2	auroc	0.48	DART-Eval v3 Table variant_scoring
+task5	caQTL	Zero-shot embedding	GENA-LM	auroc	0.508	DART-Eval v3 Table variant_scoring
+task5	caQTL	Zero-shot likelihood	HyenaDNA	auroc	0.486	DART-Eval v3 Table variant_scoring
+task5	caQTL	Zero-shot embedding	HyenaDNA	auroc	0.515	DART-Eval v3 Table variant_scoring
+task5	caQTL	Zero-shot embedding	Mistral-DNA	auroc	0.52	DART-Eval v3 Table variant_scoring
+task5	caQTL	Zero-shot likelihood	NT	auroc	0.525	DART-Eval v3 Table variant_scoring
+task5	caQTL	Zero-shot embedding	NT	auroc	0.519	DART-Eval v3 Table variant_scoring
+task5	dsQTL	Zero-shot likelihood	Caduceus	auroc	0.443	DART-Eval v3 Table variant_scoring
+task5	dsQTL	Zero-shot embedding	Caduceus	auroc	0.508	DART-Eval v3 Table variant_scoring
+task5	dsQTL	Zero-shot embedding	DNABERT-2	auroc	0.505	DART-Eval v3 Table variant_scoring
+task5	dsQTL	Zero-shot embedding	GENA-LM	auroc	0.501	DART-Eval v3 Table variant_scoring
+task5	dsQTL	Zero-shot likelihood	HyenaDNA	auroc	0.436	DART-Eval v3 Table variant_scoring
+task5	dsQTL	Zero-shot embedding	HyenaDNA	auroc	0.515	DART-Eval v3 Table variant_scoring
+task5	dsQTL	Zero-shot embedding	Mistral-DNA	auroc	0.475	DART-Eval v3 Table variant_scoring
+task5	dsQTL	Zero-shot likelihood	NT	auroc	0.469	DART-Eval v3 Table variant_scoring
+task5	dsQTL	Zero-shot embedding	NT	auroc	0.613	DART-Eval v3 Table variant_scoring
+task5	caQTL	Zero-shot embedding	Evo 2 40B	auroc	0.58	Evo 2 main text
+task5	dsQTL	Zero-shot embedding	Evo 2 40B	auroc	0.66	Evo 2 main text
+task5	caQTL	Zero-shot embedding	Evo 2 7B	auroc	0.53	Evo 2 Extended Data Fig. 5f (read from bars)
+task5	dsQTL	Zero-shot embedding	Evo 2 7B	auroc	0.64	Evo 2 Extended Data Fig. 5f (read from bars)

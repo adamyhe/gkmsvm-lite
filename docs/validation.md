@@ -16,7 +16,7 @@ Fixtures were generated with lsgkm built from source, with all parameters passed
 
 Shrikumar et al. (2019), Figure 8, reproduced with the paper's published lsgkm models ([kundajelab/gkmexplain](https://github.com/kundajelab/gkmexplain/tree/master/dsQTL)).
 
-**Data.** 28,309 GM12878 SNPs from Lee et al. (2015): 574 dsQTLs and 27,735 controls. Variants are ranked by |score| and evaluated by AUPRC.
+**Data.** 28,309 GM12878 SNPs from Lee et al. (2015): 574 dsQTLs and 27,735 controls. Variants are ranked by |score| and evaluated by AUPRC. A random ranking gives the fraction of dsQTLs, 0.0203 (the AUPRC base rate), for every table below.
 
 **Models.** Five lsgkm models per kernel, one per Beer lab negative set, `l=10 k=6 d=3`:
 - `-t 2` (gkm_esttrunc)
