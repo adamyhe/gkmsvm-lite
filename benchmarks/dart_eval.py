@@ -21,6 +21,8 @@ Datasets and Benchmarks; arXiv:2412.05430), with DART-Eval's metrics:
     variant_tasks.compute_change: allele1 - allele2 for dsQTLs (obs.estimate),
     allele2 - allele1 for caQTLs (beta).
 
+  auprc_baseline is the fraction of positives, the AUPRC of a random ranking.
+
   Sequences are center-cropped to the model's SV length (typically 300 bp)
   before scoring, matching the training context window.
 
@@ -269,6 +271,7 @@ def run_task4_cell_line(model, cell_line: str, device: str,
         "n_nonpeaks": len(nonpeak_scores),
         "auroc": auroc,
         "auprc": auprc,
+        "auprc_baseline": labels.mean(),  # AUPRC of a random ranking
         "elapsed": elapsed,
     }
 
@@ -288,7 +291,8 @@ def run_task4_cell_line(model, cell_line: str, device: str,
                   f"Spearman={result[f'spearman_{name}']:.4f}")
         result["n_peaks"] = len(peak_scores)
 
-    print(f"  Classification: AUROC={auroc:.4f}, AUPRC={auprc:.4f}")
+    print(f"  Classification: AUROC={auroc:.4f}, AUPRC={auprc:.4f} "
+          f"(base rate {result['auprc_baseline']:.4f})")
     return result
 
 
@@ -467,6 +471,7 @@ def _run_vep_task(model, df: pd.DataFrame, a1_seqs: np.ndarray,
         "n_ctrl": n_ctrl,
         "auroc": auroc,
         "auprc": auprc,
+        "auprc_baseline": labels.mean(),  # AUPRC of a random ranking
         "method": vep_method,
     }
 
@@ -482,7 +487,8 @@ def _run_vep_task(model, df: pd.DataFrame, a1_seqs: np.ndarray,
             print(f"  Effect size: Pearson={r_p:.4f}, Spearman={r_s:.4f} "
                   f"(n={len(sig_with_effect)})")
 
-    print(f"  Classification: AUROC={auroc:.4f}, AUPRC={auprc:.4f}")
+    print(f"  Classification: AUROC={auroc:.4f}, AUPRC={auprc:.4f} "
+          f"(base rate {result['auprc_baseline']:.4f})")
     return result, df
 
 
@@ -758,23 +764,24 @@ def main():
     if activity_results:
         print(f"\nTask 4 — Chromatin Activity (peak vs nonpeak classification)")
         cols = ["pearson_peaks", "spearman_peaks", "pearson_all", "spearman_all"]
-        print(f"  {'Cell line':<12} {'AUROC':>8} {'AUPRC':>8} "
+        print(f"  {'Cell line':<12} {'AUROC':>8} {'AUPRC':>8} {'base':>8} "
               + " ".join(f"{c:>14}" for c in cols))
         for r in activity_results:
             vals = " ".join(f"{r[c]:>14.4f}" if c in r else f"{'N/A':>14}" for c in cols)
-            print(f"  {r['cell_line']:<12} {r['auroc']:>8.4f} {r['auprc']:>8.4f} {vals}")
+            print(f"  {r['cell_line']:<12} {r['auroc']:>8.4f} {r['auprc']:>8.4f} "
+                  f"{r['auprc_baseline']:>8.4f} {vals}")
 
     vep_results = [r for r in results if "task" in r]
     if vep_results:
         print(f"\nTask 5 — Variant Effect Prediction ({args.vep_method})")
-        print(f"  {'Task':<12} {'AUROC':>8} {'AUPRC':>8} "
+        print(f"  {'Task':<12} {'AUROC':>8} {'AUPRC':>8} {'base':>8} "
               f"{'Pearson':>8} {'n_sig':>8} {'n_ctrl':>8}")
-        print(f"  {'-'*12} {'-'*8} {'-'*8} {'-'*8} {'-'*8} {'-'*8}")
+        print(f"  {'-'*12} {'-'*8} {'-'*8} {'-'*8} {'-'*8} {'-'*8} {'-'*8}")
         for r in vep_results:
             pear_key = [k for k in r if k.startswith("pearson")]
             pear = f"{r[pear_key[0]]:.4f}" if pear_key else "N/A"
             print(f"  {r['task']:<12} {r['auroc']:>8.4f} "
-                  f"{r['auprc']:>8.4f} {pear:>8} "
+                  f"{r['auprc']:>8.4f} {r['auprc_baseline']:>8.4f} {pear:>8} "
                   f"{r['n_sig']:>8} {r['n_ctrl']:>8}")
 
     if args.output and results:
