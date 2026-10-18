@@ -25,7 +25,9 @@ Usage (a host with LS-GKM in the "lsgkm" conda env):
 from __future__ import annotations
 
 import argparse
+import gzip
 import random
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -71,12 +73,18 @@ def test_seqs(rng, n, length):
             + [add_n(rng, s, block=False) for s in clean])
 
 
+def run(cmd):
+    p = subprocess.run(cmd, capture_output=True, text=True, errors="replace", check=False)
+    if p.returncode:
+        sys.exit(f"{' '.join(cmd)} failed ({p.returncode}):\n{p.stderr[-2000:]}")
+
+
 def gkmpredict(binary, model, seqs, workdir, threads):
     fa, out = workdir / "test.fa", workdir / "test.pred.txt"
     write_seqs(fa, seqs, "t")
     cmd = [binary] + (["-T", str(threads)] if threads > 1 else []) + [str(fa), str(model),
                                                                       str(out)]
-    subprocess.run(cmd, check=True, capture_output=True, text=True)
+    run(cmd)
     with open(out) as f:
         scores = {name: float(score) for name, score, *_ in map(str.split, f)}
     return np.array([scores[f"t{i}"] for i in range(len(seqs))])
@@ -126,7 +134,10 @@ def main():
           f"{'max|score|':>10}")
     if not args.no_encode:
         n = 20
-        compare("ENCFF579AOX", ENCODE, test_seqs(rng, n, 300), n, predict, workdir,
+        encode = workdir / "ENCFF579AOX.model.txt"  # gkmpredict doesn't read gzip
+        with gzip.open(ENCODE, "rb") as src, open(encode, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+        compare("ENCFF579AOX", encode, test_seqs(rng, n, 300), n, predict, workdir,
                 args.threads)
 
     pos = [random_seq(rng, 100) for _ in range(300)]
@@ -143,7 +154,7 @@ def main():
         cmd = [train, "-t", str(t), "-l", "11", "-k", "7", "-d", "3", "-g", "1.0",
                "-M", "50", "-H", "50", "-c", "1.0",
                str(workdir / "pos.fa"), str(workdir / "neg.fa"), str(prefix)]
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        run(cmd)
         compare(f"gkmtrain -t {t}", Path(f"{prefix}.model.txt"), seqs, n, predict, workdir,
                 args.threads)
     if args.keep:
