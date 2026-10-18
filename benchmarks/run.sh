@@ -11,6 +11,7 @@
 #   bash benchmarks/run.sh fig1b s2           # selected targets
 #   bash benchmarks/run.sh --quick            # small settings, results/quick/
 #   bash benchmarks/run.sh --cpu-only fig1b
+#   bash benchmarks/run.sh --set a100 fig1b fig1c s2 s3   # second host: results/a100/
 #   bash benchmarks/run.sh --lsgkm-bin <lsgkm>/bin fig1c   # source build with gkmexplain
 #   bash benchmarks/run.sh --mlsgkm-bin <mLS-GKM>/bin       # add the mLS-GKM baseline
 #
@@ -27,6 +28,7 @@ TARGETS=()
 while [[ $# -gt 0 ]]; do
     case $1 in
         --quick)     MAKE_VARS+=(QUICK=1); shift ;;
+        --set)       MAKE_VARS+=("SET=$2"); shift 2 ;;
         --cpu-only)  DEVICE="cpu"; shift ;;
         --lsgkm-bin) MAKE_VARS+=("LSGKM_BIN=$2"); shift 2 ;;
         --mlsgkm-bin) MAKE_VARS+=("MLSGKM_BIN=$2"); shift 2 ;;
