@@ -129,18 +129,20 @@ def _explain_gpu(packed_x, packed_y_t, table_a, table_b, eff_coef, result,
     )
 
 
-# The l-mer path (_explain_lmer_cpu / _explain_index_cpu) on CUDA. Each thread
-# takes one query window and a slice of the masks (grid.y), summing its
-# contributions in a per-thread [4, l] array, so no atomics run per neighbor.
-# Perturbation adds a match's weight to all four bases and subtracts it from
-# the matching one. A block's TILE windows then add their arrays into a shared
-# [4, TILE + l - 1] tile one offset k at a time (thread j writes position
-# j + k, so writes don't collide) and flush it with float64 atomicAdd
-# (CC >= 6.0). use_index: V[v] is the sum of w[b, ids[e]] over v's entries.
-_EXPLAIN_LMER_TILE = 128
+# The l-mer path (_explain_lmer_cpu / _explain_index_cpu) on CUDA. A group of
+# GROUP lanes takes one query window and a slice of the masks (grid.y); lane k
+# owns position k. Each round the lanes look up GROUP neighbors' weights at
+# once (V[v], or with use_index the sum of w[b, ids[e]] over v's entries) and
+# shuffle them round the group. A lane keeps four register sums, indexed by
+# the mask's 2-bit delta d at its position (the neighbor's base is u_k ^ d),
+# picked with selects so each (neighbor, position) costs one float64 add: a
+# dynamically indexed [4, l] array spills to local memory. Perturbation adds a
+# match's weight to all four bases (q) and subtracts it from u_k. Lanes flush
+# with float64 atomicAdd (CC >= 6.0), 4 per window position.
+_EXPLAIN_LMER_GROUP = 16
+_EXPLAIN_LMER_BLOCK = 128
 _EXPLAIN_LMER_CUDA = r"""
-#define TILE 128
-#define MAX_L 12
+#define GROUP 16
 extern "C" __global__
 void explain_lmer(
     const unsigned int* __restrict__ bx, const int W, const int seqlen, const int l,
@@ -153,68 +155,69 @@ void explain_lmer(
     const double* __restrict__ table_b, const int perturbation,
     double* __restrict__ out
 ) {
-    __shared__ double s_acc[4][TILE + MAX_L - 1];
     const int b = blockIdx.z;
-    const int i0 = blockIdx.x * TILE;
-    const int i = i0 + threadIdx.x;
-    for (int j = threadIdx.x; j < 4 * (TILE + MAX_L - 1); j += TILE)
-        (&s_acc[0][0])[j] = 0.0;
+    const int lane = threadIdx.x % GROUP;
+    const int i = blockIdx.x * (blockDim.x / GROUP) + threadIdx.x / GROUP;
+    // Groups past the last window still take part in the shuffles
+    const bool valid = i < W;
+    const unsigned int u = valid ? bx[(long long)b * W + i] : 0u;
+    const double* wb = w + (long long)b * S;
+    const int shift = 2 * lane;
+    const unsigned int uk = (u >> shift) & 3u;
 
-    double p[4][MAX_L];
-    double q[MAX_L];
-    #pragma unroll
-    for (int k = 0; k < MAX_L; k++) {
-        q[k] = 0.0;
-        p[0][k] = p[1][k] = p[2][k] = p[3][k] = 0.0;
-    }
-    if (i < W) {
-        const unsigned int u = bx[(long long)b * W + i];
-        const double* wb = w + (long long)b * S;
-        const int t1 = min(n_masks, (blockIdx.y + 1) * mask_chunk);
-        for (int t = blockIdx.y * mask_chunk; t < t1; t++) {
-            const unsigned int mask = masks[t];
-            const unsigned int v = u ^ mask;
-            if ((long long)v >= n_lmers) continue;  // padding window
-            double wv;
-            if (use_index) {
-                wv = 0.0;
-                for (long long e = offsets[v]; e < offsets[v + 1]; e++) wv += wb[ids[e]];
-            } else {
-                wv = V[v];
-            }
-            if (wv == 0.0) continue;
-            const double av = wv * table_a[levels[t]];
-            const double bv = wv * table_b[levels[t]];
-            #pragma unroll
-            for (int k = 0; k < MAX_L; k++) {
-                if (k >= l) break;
-                const int vk = (v >> (2 * k)) & 3;
-                const bool same = ((mask >> (2 * k)) & 3) == 0;
-                if (!perturbation) {
-                    p[vk][k] += same ? av : bv;
-                } else if (same) {
-                    q[k] += av;
-                    p[vk][k] -= av;
+    double r0 = 0.0, r1 = 0.0, r2 = 0.0, r3 = 0.0, q = 0.0;
+    const int t_begin = blockIdx.y * mask_chunk;
+    const int t_end = min(n_masks, t_begin + mask_chunk);
+    for (int t0 = t_begin; t0 < t_end; t0 += GROUP) {
+        // Lane j looks up neighbor t0 + j
+        const int t = t0 + lane;
+        unsigned int my_mask = 0u;
+        double my_a = 0.0, my_b = 0.0;
+        if (valid && t < t_end) {
+            my_mask = masks[t];
+            const unsigned int v = u ^ my_mask;
+            if ((long long)v < n_lmers) {  // else a padding window
+                double wv;
+                if (use_index) {
+                    wv = 0.0;
+                    for (long long e = offsets[v]; e < offsets[v + 1]; e++) wv += wb[ids[e]];
                 } else {
-                    p[vk][k] += bv;
+                    wv = V[v];
                 }
+                my_a = wv * table_a[levels[t]];
+                my_b = wv * table_b[levels[t]];
             }
         }
-    }
-    __syncthreads();
-    #pragma unroll
-    for (int k = 0; k < MAX_L; k++) {
-        if (k < l) {
-            for (int h = 0; h < 4; h++) s_acc[h][threadIdx.x + k] += p[h][k] + q[k];
+        const int n = min(GROUP, t_end - t0);
+        for (int j = 0; j < n; j++) {
+            const unsigned int mask = __shfl_sync(0xffffffffu, my_mask, j, GROUP);
+            const double av = __shfl_sync(0xffffffffu, my_a, j, GROUP);
+            const double bv = __shfl_sync(0xffffffffu, my_b, j, GROUP);
+            if (av == 0.0 && bv == 0.0) continue;
+            const unsigned int d = (mask >> shift) & 3u;
+            double val;
+            if (d != 0u) {
+                val = bv;
+            } else if (perturbation) {
+                q += av;
+                val = -av;
+            } else {
+                val = av;
+            }
+            double cur = d == 0u ? r0 : d == 1u ? r1 : d == 2u ? r2 : r3;
+            cur += val;
+            r0 = d == 0u ? cur : r0;
+            r1 = d == 1u ? cur : r1;
+            r2 = d == 2u ? cur : r2;
+            r3 = d == 3u ? cur : r3;
         }
-        __syncthreads();
     }
-    double* row = out + (long long)b * 4 * seqlen;
-    for (int j = threadIdx.x; j < TILE + l - 1; j += TILE) {
-        const int pos = i0 + j;
-        if (pos >= seqlen) break;
-        for (int h = 0; h < 4; h++)
-            if (s_acc[h][j] != 0.0) atomicAdd(&row[(long long)h * seqlen + pos], s_acc[h][j]);
+    if (!valid || lane >= l) return;
+    double* row = out + (long long)b * 4 * seqlen + i + lane;
+    const double r[4] = {r0, r1, r2, r3};
+    for (int dd = 0; dd < 4; dd++) {
+        const double val = r[dd] + q;
+        if (val != 0.0) atomicAdd(&row[(long long)(uk ^ dd) * seqlen], val);
     }
 }
 """
@@ -236,9 +239,10 @@ def _explain_lmer_gpu(packed_x, inv_dx, V, offsets, ids, w, masks, levels, table
     packed_x = cp.ascontiguousarray(packed_x, dtype=cp.uint32)
     B, W = packed_x.shape
     n_masks = len(masks)
-    tiles = -(-W // _EXPLAIN_LMER_TILE)
+    per_block = _EXPLAIN_LMER_BLOCK // _EXPLAIN_LMER_GROUP
+    blocks = -(-W // per_block)
     n_slices = max(1, min(-(-n_masks // 256),
-                          -(-_EXPLAIN_LMER_THREADS // (B * tiles * _EXPLAIN_LMER_TILE))))
+                          -(-_EXPLAIN_LMER_THREADS // (B * blocks * _EXPLAIN_LMER_BLOCK))))
     chunk = -(-n_masks // n_slices)
     n_slices = -(-n_masks // chunk)
     use_index = V is None
@@ -247,7 +251,7 @@ def _explain_lmer_gpu(packed_x, inv_dx, V, offsets, ids, w, masks, levels, table
     for b0 in range(0, B, 65535):  # grid.z limit
         nb = min(65535, B - b0)
         _cupy_explain_lmer_kernel(
-            (tiles, n_slices, nb), (_EXPLAIN_LMER_TILE,),
+            (blocks, n_slices, nb), (_EXPLAIN_LMER_BLOCK,),
             (packed_x[b0:b0 + nb], np.int32(W), np.int32(seqlen), np.int32(l),
              masks, levels, np.int32(n_masks), np.int32(chunk),
              dummy_f if use_index else V,
