@@ -34,7 +34,7 @@ Timed runs each execute in their own process, so the reported peak memory is tha
 | S2 | Prediction throughput vs number of SVs (`-t 2` l-mer table, `-t 3` l-mer index, masked join, LS-GKM) | `s2` | `throughput_sweep.py` | `throughput.tsv` |
 | S3 | Training time, peak memory and held-out accuracy by solver (precomputed Gram, SMO, Nyström, LS-GKM), gkmsvm-lite on GPU and on CPU | `s3` | `training_memory.py` | `training_memory.tsv`, `training_memory_cpu.tsv` |
 | S4 | GkmExplain completeness | `s4` | `completeness.py` | `completeness.tsv` |
-| S5 | DART-Eval Tasks 4 and 5 with ENCODE models | `s5` | `dart_eval.py` | `dart_task4_*.tsv`, `dart_task5_dsqtl_*.tsv` |
+| S5 | DART-Eval Task 4 (five cell lines) and Task 5 (caQTL, dsQTL) with ENCODE models, against published DART-Eval and Evo 2 results (`dart_reference.tsv`) | `s5` | `dart_eval.py` | `dart_task4_<cell>_<model>.tsv`, `dart_task5_<model>.tsv` |
 
 The dsQTL reproduction behind 1A, 1D and S1 is written up in [`docs/validation.md`](../docs/validation.md).
 
@@ -66,6 +66,11 @@ Downloaded on first use into `benchmarks/data/` and `examples/data/`, neither of
 - Beer lab GM12878 sequence sets and dsQTL variants, hg18 (~940 MB), and the GkmExplain paper's models and outputs: `dsqtl_auprc.py`, `agreement_lsgkm.py`
 - ENCODE gkm-SVM models: the Makefile, into `data/models/`
 - DART-Eval data: Synapse, see `dart_download.py`, into `data/dart-eval/` (override with `DART_WORK_DIR`)
+- DART-Eval reference values: `dart_reference.tsv` (committed), parsed from the DART-Eval v3 LaTeX
+  source (Patel et al., arXiv:2412.05430v3) plus Evo 2's zero-shot Task 5 AUROC (Brixi et al. 2026,
+  doi:10.1038/s41586-026-10176-5); sources in its header. The gkm-SVM models are the ENCODE models
+  trained on the DNase-seq experiment DART-Eval uses per cell line (`DART_TASK4` in the Makefile).
+  They were trained genome-wide, so they may have seen DART-Eval's test chromosomes.
 
 ## Building LS-GKM with gkmexplain
 

@@ -24,7 +24,11 @@ MLSGKM_BIN    ?=
 THREADS       ?=
 DART_WORK_DIR ?= data/dart-eval
 DART_MODELS   ?= data/models
-DART_ENCODE   ?= ENCFF953DDE ENCFF701NCI
+# Task 4: each cell line with the ENCODE gkm-SVM model trained on the DNase-seq
+# experiment DART-Eval uses (cell_model). Task 5: GM12878 models, DNase and ATAC
+DART_TASK4    ?= GM12878_ENCFF701NCI H1ESC_ENCFF888QKW HEPG2_ENCFF984SKX \
+                 IMR90_ENCFF077GEF K562_ENCFF795HQE
+DART_TASK5    ?= ENCFF701NCI ENCFF953DDE
 
 ifdef QUICK
 OUT           := results/quick
@@ -102,7 +106,8 @@ S1 := $(OUT)/dsqtl_retrained_per_model.tsv
 S2 := $(OUT)/throughput.tsv
 S3 := $(OUT)/training_memory.tsv $(OUT)/training_memory_cpu.tsv
 S4 := $(OUT)/completeness.tsv
-S5 := $(foreach m,$(DART_ENCODE),$(OUT)/dart_task4_$(m).tsv $(OUT)/dart_task5_dsqtl_$(m).tsv)
+S5 := $(foreach c,$(DART_TASK4),$(OUT)/dart_task4_$(c).tsv) \
+      $(foreach m,$(DART_TASK5),$(OUT)/dart_task5_$(m).tsv)
 
 # S1 is about training, so never reuse cached models
 $(OUT)/dsqtl_retrained_per_model.tsv: $(DSQTL)
@@ -124,14 +129,18 @@ $(OUT)/training_memory_cpu.tsv: training_memory.py $(DSQTL)
 $(OUT)/completeness.tsv: completeness.py $(COMMON)
 	$(PY) completeness.py --device $(DEVICE) $(COMPL_ARGS) --output $@
 
-$(OUT)/dart_task4_%.tsv: dart_eval.py $(COMMON) $(DART_MODELS)/%.model.txt.gz
-	$(PY) dart_eval.py -m $(DART_MODELS)/$*.model.txt.gz --task activity \
-	    --cell-lines GM12878 --device $(DEVICE) --work-dir $(DART_WORK_DIR) \
+# dart_task4_<cell>_<model>.tsv
+cell_of  = $(firstword $(subst _, ,$(1)))
+model_of = $(lastword $(subst _, ,$(1)))
+.SECONDEXPANSION:
+$(OUT)/dart_task4_%.tsv: dart_eval.py $(COMMON) $$(DART_MODELS)/$$(call model_of,$$*).model.txt.gz
+	$(PY) dart_eval.py -m $(DART_MODELS)/$(call model_of,$*).model.txt.gz --task activity \
+	    --cell-lines $(call cell_of,$*) --device $(DEVICE) --work-dir $(DART_WORK_DIR) \
 	    $(DART4_ARGS) --output $@ -v
 
-$(OUT)/dart_task5_dsqtl_%.tsv: dart_eval.py $(COMMON) $(DART_MODELS)/%.model.txt.gz
+$(OUT)/dart_task5_%.tsv: dart_eval.py $(COMMON) $(DART_MODELS)/%.model.txt.gz
 	$(PY) dart_eval.py -m $(DART_MODELS)/$*.model.txt.gz --task vep \
-	    --vep-tasks dsqtl --vep-method gkmexplain --device $(DEVICE) \
+	    --vep-tasks all --vep-method gkmexplain --device $(DEVICE) \
 	    --work-dir $(DART_WORK_DIR) $(DART_ARGS) --output $@ -v
 
 $(DART_MODELS)/%.model.txt.gz:

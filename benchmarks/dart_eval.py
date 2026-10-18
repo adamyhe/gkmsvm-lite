@@ -1,11 +1,12 @@
 """DART-Eval benchmarks for gkm-SVM models.
 
-Evaluates gkm-SVM models on DART-Eval Tasks 4 and 5 (Pampari et al. 2024,
-NeurIPS):
+Evaluates gkm-SVM models on DART-Eval Tasks 4 and 5 (Patel et al., NeurIPS 2024
+Datasets and Benchmarks; arXiv:2412.05430), with DART-Eval's metrics:
 
-  Task 4 — Chromatin activity prediction
-    Score peak vs nonpeak regions for classification (AUROC/AUPRC).
-    Correlate gkm-SVM scores with quantitative log1p(counts) signal.
+  Task 4 — Chromatin activity prediction (DNase-seq, five cell lines)
+    Classification: IDR peaks vs background regions (AUROC/AUPRC).
+    Regression: Pearson/Spearman of gkm-SVM scores with log1p(counts), over
+    peaks ("peaks") and over peaks plus background ("all").
 
   Task 5 — Variant effect prediction
     Three VEP scoring methods:
@@ -14,17 +15,25 @@ NeurIPS):
                   (Shrikumar et al. 2019; score_variants(method="gkmexplain"))
       deltasvm:   Σ Δw_kmer  (linear k-mer weight approximation)
     dsQTLs: Yoruban LCL (hg19), caQTLs: African (hg38).
+    Classification: |effect| of significant vs control variants (AUROC/AUPRC).
+    Regression: Pearson/Spearman of the signed effect with the QTL effect size,
+    over significant variants. Effects are oriented as in DART-Eval's
+    variant_tasks.compute_change: allele1 - allele2 for dsQTLs (obs.estimate),
+    allele2 - allele1 for caQTLs (beta).
 
   Sequences are center-cropped to the model's SV length (typically 300 bp)
   before scoring, matching the training context window.
 
-ENCODE ATAC-seq gkm-SVM models (Beer lab, hg38):
-  Cell line   Annotation      Enhancer model   Promoter model
-  GM12878     ENCSR614LCR     ENCFF953DDE      ENCFF795HXN
-  K562        ENCSR735DFK     ENCFF986TYL      ENCFF388NZI
-  HepG2       ENCSR847ICH     ENCFF354PGX      ENCFF724LMF
-  IMR90       ENCSR571ISC     ENCFF935GNI      ENCFF072NJQ
-  H1ESC       (none)          —                —
+ENCODE gkm-SVM enhancer models (Beer lab, hg38, 300 bp, non-promoter peaks)
+trained on the DNase-seq experiment DART-Eval uses for each cell line:
+  Cell line   DNase-seq       Model
+  GM12878     ENCSR000EMT     ENCFF701NCI
+  H1ESC       ENCSR000EMU     ENCFF888QKW
+  HEPG2       ENCSR149XIL     ENCFF984SKX
+  IMR90       ENCSR477RTP     ENCFF077GEF
+  K562        ENCSR000EOT     ENCFF795HQE
+GM12878's ATAC-seq model is ENCFF953DDE. These models were trained genome-wide,
+so unlike DART-Eval's models they may have seen the test chromosomes.
 
   Download:
     wget https://www.encodeproject.org/files/ENCFF953DDE/@@download/ENCFF953DDE.txt.gz
@@ -181,7 +190,7 @@ def _load_task4_bed(cell_line: str) -> dict | None:
 
         entry = {"seqs": np.stack(seqs)}
 
-        if key == "peaks" and os.path.exists(bw_path):
+        if os.path.exists(bw_path):
             import figwig
             mid = (df["start"].to_numpy() + df["end"].to_numpy()) // 2
             # figwig needs starts >= 0; bases past a chromosome end are NaN.
@@ -225,7 +234,13 @@ def run_task4_cell_line(model, cell_line: str, device: str,
             return {}
 
     (idr_seqs,) = _subsample(data["idr_peaks"]["seqs"], max_seqs)
-    (nonpeak_seqs,) = _subsample(data["nonpeaks"]["seqs"], max_seqs)
+    nonpeaks = data["nonpeaks"]
+    nonpeak_counts = None
+    if "counts" in nonpeaks:
+        nonpeak_seqs, nonpeak_counts = _subsample(
+            nonpeaks["seqs"], max_seqs, np.asarray(nonpeaks["counts"]))
+    else:
+        (nonpeak_seqs,) = _subsample(nonpeaks["seqs"], max_seqs)
     idr_seqs = _center_crop(idr_seqs, sv_len)
     nonpeak_seqs = _center_crop(nonpeak_seqs, sv_len)
     print(f"  IDR peaks: {len(idr_seqs)}, nonpeaks: {len(nonpeak_seqs)}")
@@ -257,19 +272,21 @@ def run_task4_cell_line(model, cell_line: str, device: str,
         "elapsed": elapsed,
     }
 
-    if "peaks" in data and "counts" in data["peaks"]:
+    if "counts" in data["peaks"] and nonpeak_counts is not None:
         peak_seqs, counts = _subsample(
             data["peaks"]["seqs"], max_seqs, np.asarray(data["peaks"]["counts"]))
         peak_seqs = _center_crop(peak_seqs, sv_len)
         print(f"  Scoring all peaks ({len(peak_seqs)}) for quantitative eval...")
         peak_scores = _score_sequences(model, peak_seqs, batch_size, device, verbose)
-        r_pearson, _ = pearsonr(peak_scores, counts)
-        r_spearman, _ = spearmanr(peak_scores, counts)
-        result["pearson_counts"] = r_pearson
-        result["spearman_counts"] = r_spearman
+        # As DART-Eval: over peaks, and over peaks plus background regions
+        all_scores = np.concatenate([peak_scores, nonpeak_scores])
+        all_counts = np.concatenate([counts, nonpeak_counts])
+        for name, x, y in (("peaks", peak_scores, counts), ("all", all_scores, all_counts)):
+            result[f"pearson_{name}"] = pearsonr(x, y)[0]
+            result[f"spearman_{name}"] = spearmanr(x, y)[0]
+            print(f"  Quantitative ({name}): Pearson={result[f'pearson_{name}']:.4f}, "
+                  f"Spearman={result[f'spearman_{name}']:.4f}")
         result["n_peaks"] = len(peak_scores)
-        print(f"  Quantitative: Pearson={r_pearson:.4f}, "
-              f"Spearman={r_spearman:.4f}")
 
     print(f"  Classification: AUROC={auroc:.4f}, AUPRC={auprc:.4f}")
     return result
@@ -348,6 +365,20 @@ def _extract_variant_seqs(variant_df: pd.DataFrame, genome_fa: str,
     return np.stack(a1_seqs), np.stack(a2_seqs)
 
 
+def _check_alleles(a1_seqs: np.ndarray, alleles) -> None:
+    """Raise unless the allele-1 sequences carry the TSV's allele1 at the variant.
+
+    Catches a data.h5 exported from a different version of the variant table
+    (DART-Eval's July 2025 corrigendum re-oriented some caQTL alleles).
+    """
+    center = DART_SEQ_LEN // 2
+    bases = np.array(list("ACGT"))[a1_seqs[:, :, center].argmax(axis=1)]
+    mismatch = (bases != np.asarray(alleles, dtype=str)).mean()
+    if mismatch > 0.01:
+        raise ValueError(f"{mismatch:.1%} of allele-1 sequences don't match the variant "
+                         "table's allele1: data.h5 and the TSV are from different versions")
+
+
 def _vep_kernel(model, a1_seqs: np.ndarray, a2_seqs: np.ndarray,
                 sv_len: int, batch_size: int, device: str,
                 verbose: bool) -> np.ndarray:
@@ -383,8 +414,12 @@ def _run_vep_task(model, df: pd.DataFrame, a1_seqs: np.ndarray,
                   label_filter_fn, sig_label, ctrl_label,
                   effect_col: str | None,
                   vep_method: str, batch_size: int, device: str,
-                  verbose: bool) -> dict:
-    """Shared VEP evaluation logic for dsQTL and caQTL."""
+                  verbose: bool, flip: bool = False) -> dict:
+    """Shared VEP evaluation logic for dsQTL and caQTL.
+
+    Effects are allele2 - allele1, or allele1 - allele2 with flip (dsQTLs),
+    matching the orientation of each dataset's effect size in DART-Eval.
+    """
     df = df.copy()
 
     mask = label_filter_fn(df).index
@@ -410,7 +445,7 @@ def _run_vep_task(model, df: pd.DataFrame, a1_seqs: np.ndarray,
         raise ValueError(f"Unknown VEP method: {vep_method}")
 
     logfc = np.full(n_total, np.nan)
-    logfc[mask.values] = logfc_sub
+    logfc[mask.values] = -logfc_sub if flip else logfc_sub
     df["llm_logfc"] = logfc
 
     df_used = label_filter_fn(df)
@@ -473,6 +508,7 @@ def run_task5_dsqtl(model, device: str, batch_size: int, verbose: bool,
         print(f"  Loaded sequences from H5 ({len(h5_data['a1_seqs'])} variants)")
         a1_seqs = h5_data["a1_seqs"]
         a2_seqs = h5_data["a2_seqs"]
+        _check_alleles(a1_seqs, df["var.allele1"])
     else:
         genome_fa = os.path.join(WORK_DIR, "refs/male.hg19.fa")
         if not os.path.exists(genome_fa):
@@ -501,7 +537,7 @@ def run_task5_dsqtl(model, device: str, batch_size: int, verbose: bool,
         label_filter_fn=label_filter, sig_label=1, ctrl_label=-1,
         effect_col="obs.estimate",
         vep_method=vep_method, batch_size=batch_size,
-        device=device, verbose=verbose)
+        device=device, verbose=verbose, flip=True)
     result["task"] = "dsQTL"
     result["elapsed"] = time.perf_counter() - t0
     print(f"  Elapsed: {result['elapsed']:.1f}s")
@@ -510,8 +546,9 @@ def run_task5_dsqtl(model, device: str, batch_size: int, verbose: bool,
         os.makedirs(save_scores_dir, exist_ok=True)
         scores_df = df_scored[["var.chrom", "var.pos", "var.allele1",
                                "var.allele2", "llm_logfc"]].copy()
-        scores_df["allele1_scores"] = 0.0
-        scores_df["allele2_scores"] = scores_df["llm_logfc"]
+        # DART-Eval reads dsQTL effects as allele1_scores - allele2_scores
+        scores_df["allele1_scores"] = scores_df["llm_logfc"]
+        scores_df["allele2_scores"] = 0.0
         out_path = os.path.join(save_scores_dir, "dsqtl_scores.tsv")
         scores_df.to_csv(out_path, sep="\t", index=False)
         print(f"  Saved scores to {out_path}")
@@ -552,6 +589,7 @@ def run_task5_caqtl(model, device: str, batch_size: int, verbose: bool,
         print(f"  Loaded {len(h5_data['a1_seqs'])} filtered sequences from H5")
         a1_seqs = h5_data["a1_seqs"]
         a2_seqs = h5_data["a2_seqs"]
+        _check_alleles(a1_seqs, df["allele1"].to_numpy()[keep_idx])
     else:
         genome_fa = os.path.join(
             WORK_DIR, "refs/GRCh38_no_alt_analysis_set_GCA_000001405.15.fasta")
@@ -719,14 +757,12 @@ def main():
     activity_results = [r for r in results if "cell_line" in r]
     if activity_results:
         print(f"\nTask 4 — Chromatin Activity (peak vs nonpeak classification)")
+        cols = ["pearson_peaks", "spearman_peaks", "pearson_all", "spearman_all"]
         print(f"  {'Cell line':<12} {'AUROC':>8} {'AUPRC':>8} "
-              f"{'Pearson':>8} {'Spearman':>8}")
-        print(f"  {'-'*12} {'-'*8} {'-'*8} {'-'*8} {'-'*8}")
+              + " ".join(f"{c:>14}" for c in cols))
         for r in activity_results:
-            pear = f"{r['pearson_counts']:.4f}" if "pearson_counts" in r else "N/A"
-            spear = f"{r['spearman_counts']:.4f}" if "spearman_counts" in r else "N/A"
-            print(f"  {r['cell_line']:<12} {r['auroc']:>8.4f} "
-                  f"{r['auprc']:>8.4f} {pear:>8} {spear:>8}")
+            vals = " ".join(f"{r[c]:>14.4f}" if c in r else f"{'N/A':>14}" for c in cols)
+            print(f"  {r['cell_line']:<12} {r['auroc']:>8.4f} {r['auprc']:>8.4f} {vals}")
 
     vep_results = [r for r in results if "task" in r]
     if vep_results:
