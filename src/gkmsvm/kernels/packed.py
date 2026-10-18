@@ -14,7 +14,6 @@ from __future__ import annotations
 import numpy as np
 
 from gkmsvm.backend import float_dtype, get_array_module, is_mlx, to_cpu, to_gpu, to_mlx
-from gkmsvm.codec import reverse_complement
 from gkmsvm.kernels.base import GkmKernel
 
 # Below this many query or column sequences, the masked join's per-call index
@@ -26,6 +25,17 @@ _MASKED_MIN_ROWS = 16
 # masked kernels count it identically wherever it appears, so it cancels in
 # differences between window sets padded the same way.
 PAD_WINDOW = np.uint32(0xFFFFFFFF)
+
+
+def _rc_windows(packed, l):
+    """Packed windows of the reverse complement: window j is window W-1-j with
+    its bases complemented (b ^ 3: A<->T, C<->G) and in reverse order."""
+    xp = get_array_module(packed)
+    u = packed[:, ::-1] ^ xp.uint32((1 << (2 * l)) - 1)
+    out = xp.zeros_like(u)
+    for k in range(l):
+        out |= ((u >> xp.uint32(2 * k)) & xp.uint32(3)) << xp.uint32(2 * (l - 1 - k))
+    return xp.ascontiguousarray(out)
 
 
 def device_of(x) -> str:
@@ -78,8 +88,22 @@ class PackedGkmKernel(GkmKernel):
         return packed
 
     def pack_both(self, x):
-        """(packed x, packed reverse complement of x or None)."""
-        return self.pack(x), (self.pack(reverse_complement(x)) if self.include_rc else None)
+        """(packed x, packed reverse complement of x or None).
+
+        The RC windows come from the packed forward ones, so N packs as A on
+        the forward strand and T on the reverse one, as in lsgkm (which reads
+        N as A before taking the reverse complement). Packing the one-hot RC
+        would give A on both strands, and an RC block that isn't the reverse
+        complement of the forward one.
+        """
+        fwd = self.pack(x)
+        if not self.include_rc:
+            return fwd, None
+        if device_of(fwd) == "mlx":
+            import mlx.core as mx
+
+            return fwd, mx.array(_rc_windows(np.asarray(fwd), self.l))
+        return fwd, _rc_windows(fwd, self.l)
 
     # -- raw kernel from packed windows ------------------------------------
 
