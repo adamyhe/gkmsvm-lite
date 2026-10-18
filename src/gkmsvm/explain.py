@@ -129,6 +129,137 @@ def _explain_gpu(packed_x, packed_y_t, table_a, table_b, eff_coef, result,
     )
 
 
+# The l-mer path (_explain_lmer_cpu / _explain_index_cpu) on CUDA. Each thread
+# takes one query window and a slice of the masks (grid.y), summing its
+# contributions in a per-thread [4, l] array, so no atomics run per neighbor.
+# Perturbation adds a match's weight to all four bases and subtracts it from
+# the matching one. A block's TILE windows then add their arrays into a shared
+# [4, TILE + l - 1] tile one offset k at a time (thread j writes position
+# j + k, so writes don't collide) and flush it with float64 atomicAdd
+# (CC >= 6.0). use_index: V[v] is the sum of w[b, ids[e]] over v's entries.
+_EXPLAIN_LMER_TILE = 128
+_EXPLAIN_LMER_CUDA = r"""
+#define TILE 128
+#define MAX_L 12
+extern "C" __global__
+void explain_lmer(
+    const unsigned int* __restrict__ bx, const int W, const int seqlen, const int l,
+    const unsigned int* __restrict__ masks, const int* __restrict__ levels,
+    const int n_masks, const int mask_chunk,
+    const double* __restrict__ V,
+    const long long* __restrict__ offsets, const int* __restrict__ ids,
+    const double* __restrict__ w, const int S, const int use_index,
+    const long long n_lmers, const double* __restrict__ table_a,
+    const double* __restrict__ table_b, const int perturbation,
+    double* __restrict__ out
+) {
+    __shared__ double s_acc[4][TILE + MAX_L - 1];
+    const int b = blockIdx.z;
+    const int i0 = blockIdx.x * TILE;
+    const int i = i0 + threadIdx.x;
+    for (int j = threadIdx.x; j < 4 * (TILE + MAX_L - 1); j += TILE)
+        (&s_acc[0][0])[j] = 0.0;
+
+    double p[4][MAX_L];
+    double q[MAX_L];
+    #pragma unroll
+    for (int k = 0; k < MAX_L; k++) {
+        q[k] = 0.0;
+        p[0][k] = p[1][k] = p[2][k] = p[3][k] = 0.0;
+    }
+    if (i < W) {
+        const unsigned int u = bx[(long long)b * W + i];
+        const double* wb = w + (long long)b * S;
+        const int t1 = min(n_masks, (blockIdx.y + 1) * mask_chunk);
+        for (int t = blockIdx.y * mask_chunk; t < t1; t++) {
+            const unsigned int mask = masks[t];
+            const unsigned int v = u ^ mask;
+            if ((long long)v >= n_lmers) continue;  // padding window
+            double wv;
+            if (use_index) {
+                wv = 0.0;
+                for (long long e = offsets[v]; e < offsets[v + 1]; e++) wv += wb[ids[e]];
+            } else {
+                wv = V[v];
+            }
+            if (wv == 0.0) continue;
+            const double av = wv * table_a[levels[t]];
+            const double bv = wv * table_b[levels[t]];
+            #pragma unroll
+            for (int k = 0; k < MAX_L; k++) {
+                if (k >= l) break;
+                const int vk = (v >> (2 * k)) & 3;
+                const bool same = ((mask >> (2 * k)) & 3) == 0;
+                if (!perturbation) {
+                    p[vk][k] += same ? av : bv;
+                } else if (same) {
+                    q[k] += av;
+                    p[vk][k] -= av;
+                } else {
+                    p[vk][k] += bv;
+                }
+            }
+        }
+    }
+    __syncthreads();
+    #pragma unroll
+    for (int k = 0; k < MAX_L; k++) {
+        if (k < l) {
+            for (int h = 0; h < 4; h++) s_acc[h][threadIdx.x + k] += p[h][k] + q[k];
+        }
+        __syncthreads();
+    }
+    double* row = out + (long long)b * 4 * seqlen;
+    for (int j = threadIdx.x; j < TILE + l - 1; j += TILE) {
+        const int pos = i0 + j;
+        if (pos >= seqlen) break;
+        for (int h = 0; h < 4; h++)
+            if (s_acc[h][j] != 0.0) atomicAdd(&row[(long long)h * seqlen + pos], s_acc[h][j]);
+    }
+}
+"""
+
+_cupy_explain_lmer_kernel = None
+# Threads to aim for per launch; mask slices (grid.y) make up for few windows
+_EXPLAIN_LMER_THREADS = 1 << 18
+
+
+def _explain_lmer_gpu(packed_x, inv_dx, V, offsets, ids, w, masks, levels, table_a,
+                      table_b, l, seqlen, perturbation):
+    """[B, 4, seqlen] on CUDA: _explain_lmer_cpu when V is given, else
+    _explain_index_cpu with the CSR (offsets, ids) and SV weights w [B, S]."""
+    import cupy as cp
+
+    global _cupy_explain_lmer_kernel
+    if _cupy_explain_lmer_kernel is None:
+        _cupy_explain_lmer_kernel = cp.RawKernel(_EXPLAIN_LMER_CUDA, "explain_lmer")
+    packed_x = cp.ascontiguousarray(packed_x, dtype=cp.uint32)
+    B, W = packed_x.shape
+    n_masks = len(masks)
+    tiles = -(-W // _EXPLAIN_LMER_TILE)
+    n_slices = max(1, min(-(-n_masks // 256),
+                          -(-_EXPLAIN_LMER_THREADS // (B * tiles * _EXPLAIN_LMER_TILE))))
+    chunk = -(-n_masks // n_slices)
+    n_slices = -(-n_masks // chunk)
+    use_index = V is None
+    dummy_f = cp.zeros(1, dtype=cp.float64)
+    out = cp.zeros((B, 4, seqlen), dtype=cp.float64)
+    for b0 in range(0, B, 65535):  # grid.z limit
+        nb = min(65535, B - b0)
+        _cupy_explain_lmer_kernel(
+            (tiles, n_slices, nb), (_EXPLAIN_LMER_TILE,),
+            (packed_x[b0:b0 + nb], np.int32(W), np.int32(seqlen), np.int32(l),
+             masks, levels, np.int32(n_masks), np.int32(chunk),
+             dummy_f if use_index else V,
+             offsets if use_index else cp.zeros(1, dtype=cp.int64),
+             ids if use_index else cp.zeros(1, dtype=cp.int32),
+             cp.ascontiguousarray(w[b0:b0 + nb]) if use_index else dummy_f,
+             np.int32(w.shape[1] if use_index else 0), np.int32(use_index),
+             np.int64(4**l), table_a, table_b, np.int32(perturbation), out[b0:b0 + nb]))
+    out *= inv_dx[:, None, None]
+    return out
+
+
 @njit(parallel=True, cache=True, fastmath=True)
 def _explain_cpu(packed_x, packed_y, table_a, table_b, eff_coef, l, min_matches,
                  seqlen, perturbation):
@@ -535,7 +666,7 @@ def _explain_lmer(model, x, table_a, table_b, dmax, perturbation, gamma, batch_s
     coef = to_cpu(model.coefficients).astype(np.float64)
     inv_ds = (1 / np.sqrt(np.clip(to_cpu(model._sv_diag()).astype(np.float64), 1e-20, None))
               if base.normalize else np.ones(len(coef)))
-    index = None
+    index = V = None
     if gamma is not None:
         index = model._sv_index()  # its arrays live on CPU whatever the model's device
         if index is None:
@@ -556,6 +687,9 @@ def _explain_lmer(model, x, table_a, table_b, dmax, perturbation, gamma, batch_s
     masks, levels = lmer_index.neighbor_masks(l, nonzero, dmax)
 
     xp = get_array_module(x)
+    if xp is not np and not is_mlx(x):
+        return _explain_lmer_cuda(model, x, V, index, coef, inv_ds, masks, levels, table_a,
+                                  table_b, gamma, batch_size, verbose, perturbation)
     x_cpu = to_cpu(x)
     B, _, seqlen = x_cpu.shape
     starts = range(0, B, batch_size)
@@ -583,6 +717,51 @@ def _explain_lmer(model, x, table_a, table_b, dmax, perturbation, gamma, batch_s
                                         table_b, l, seqlen, perturbation, n_split))
     out = np.concatenate(parts)
     return out if xp is np else xp.asarray(out)
+
+
+def _explain_lmer_cuda(model, x, V, index, coef, inv_ds, masks, levels, table_a, table_b,
+                       gamma, batch_size, verbose, perturbation):
+    """_explain_lmer's loop on CUDA (_explain_lmer_gpu); V, the masks and the
+    l-mer index's arrays are uploaded once and kept in the model's caches."""
+    import cupy as cp
+
+    base = model.kernel.base
+    l = base.l
+    c = model._sv_cache
+    if index is None:
+        if "explain_V_cuda" not in c:
+            c["explain_V_cuda"] = cp.asarray(V)
+        V = c["explain_V_cuda"]
+        offsets = ids = None
+    else:
+        offsets, ids, _, _ = index._arrays("cuda")
+        coef_d = cp.asarray(coef)
+        inv_ds_d = cp.asarray(inv_ds)
+    masks, levels = cp.asarray(masks), cp.asarray(levels)
+    table_a = cp.asarray(table_a, dtype=cp.float64)
+    table_b = cp.asarray(table_b, dtype=cp.float64)
+
+    B, _, seqlen = x.shape
+    starts = range(0, B, batch_size)
+    if verbose:
+        from tqdm import tqdm
+        starts = tqdm(starts, desc="GkmExplain", total=(B + batch_size - 1) // batch_size)
+    out = cp.empty((B, 4, seqlen), dtype=cp.float64)
+    for b0 in starts:
+        x_b = x[b0:b0 + batch_size]
+        packed_x, packed_x_rc = base.pack_both(x_b)
+        packed_x = cp.ascontiguousarray(packed_x)
+        inv_dx = (1 / cp.sqrt(cp.clip(base.raw_diag_packed(packed_x, packed_x_rc),
+                                      1e-20, None)) if base.normalize
+                  else cp.ones(x_b.shape[0]))
+        w = None
+        if index is not None:
+            k_norm = index.pairwise(packed_x) * inv_dx[:, None] * inv_ds_d[None, :]
+            w = coef_d * inv_ds_d * _rbf_scale(k_norm, gamma, cp)
+        out[b0:b0 + batch_size] = _explain_lmer_gpu(
+            packed_x, inv_dx, V, offsets, ids, w, masks, levels, table_a, table_b, l,
+            seqlen, perturbation)
+    return out
 
 
 def mutation_impact(
