@@ -70,7 +70,9 @@ Downloaded on first use into `benchmarks/data/` and `examples/data/`, neither of
   source (Patel et al., arXiv:2412.05430v3) plus Evo 2's zero-shot Task 5 AUROC (Brixi et al. 2026,
   doi:10.1038/s41586-026-10176-5); sources in its header. The gkm-SVM models are the ENCODE models
   trained on the DNase-seq experiment DART-Eval uses per cell line (`DART_TASK4` in the Makefile).
-  They were trained genome-wide, so they may have seen DART-Eval's test chromosomes.
+  None holds out a test set: each concatenates the five models of a 5-fold CV over its top 10k
+  non-promoter peaks genome-wide, so those of its peaks on DART-Eval's test chromosomes were
+  training positives.
 
 ## Building LS-GKM with gkmexplain
 

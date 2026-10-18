@@ -34,8 +34,11 @@ trained on the DNase-seq experiment DART-Eval uses for each cell line:
   HEPG2       ENCSR149XIL     ENCFF984SKX
   IMR90       ENCSR477RTP     ENCFF077GEF
   K562        ENCSR000EOT     ENCFF795HQE
-GM12878's ATAC-seq model is ENCFF953DDE. These models were trained genome-wide,
-so unlike DART-Eval's models they may have seen the test chromosomes.
+GM12878's ATAC-seq model is ENCFF953DDE. None holds out a test set. Each file
+(submitted as <exp>_hg38_300_noproms_nc30_top10k_vs_neg1x_r1_avg) concatenates
+the five models of a 5-fold CV over the top 10k non-promoter peaks genome-wide,
+each fold with its own 1x negatives, so every peak is a training positive in 4
+of the 5. Unlike DART-Eval's models, they have seen peaks on the test chromosomes.
 
   Download:
     wget https://www.encodeproject.org/files/ENCFF953DDE/@@download/ENCFF953DDE.txt.gz
