@@ -198,6 +198,12 @@ class GkmSVM(DeviceModel):
         self.use_lmer_table: bool | str = "auto"
         self._lmer_table: np.ndarray | bool | None = None
         self._lmer_table_dev = None
+        # GkmExplain attributions of every l-mer window for non-RBF kernels
+        # (explain._build_explain_table), on CPU, one per mode: "auto" builds
+        # one when a call explains enough sequences and it fits; True/False
+        # force it on or off
+        self.use_explain_table: bool | str = "auto"
+        self._explain_tables: dict = {}
 
         if device != "cpu":
             self._to_device(device)
@@ -211,7 +217,8 @@ class GkmSVM(DeviceModel):
         return dict(self._kernel_params)
 
     def clear_caches(self) -> None:
-        """Drop the packed SVs, self-kernels, l-mer index and l-mer table.
+        """Drop the packed SVs, self-kernels, l-mer index, l-mer table and
+        explain tables.
 
         They are rebuilt on the next call. Frees their memory, and lets a
         timing include building them.
@@ -219,6 +226,7 @@ class GkmSVM(DeviceModel):
         self._sv_cache = {}
         self._lmer_table = None
         self._lmer_table_dev = None
+        self._explain_tables = {}
 
     def _on_device_move(self) -> None:
         """Drop device caches and free the old device's memory pool."""

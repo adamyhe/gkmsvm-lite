@@ -11,7 +11,8 @@ sequences, l=11 k=7 d=3, for each kernel and path:
 The fused paths are forced with model.use_lmer_index = False; for -t 0
 (143,980 neighbors at dmax 5) the l-mer paths are forced by lowering
 explain._EXPLAIN_SV_WINDOWS_PER_NEIGHBOR. Each row also reports the largest
-difference from cpu-lmer relative to its peak.
+difference from cpu-lmer relative to its peak. The explain table
+(-t 0/2) is turned off.
 
 Usage (GPU server):
   python benchmarks/dev/explain_lmer_gpu.py --sv 2000 10000 --n 500
@@ -38,6 +39,7 @@ def run(model, x, device, lmer, batch_size):
     import cupy as cp
 
     model.use_lmer_index = lmer
+    model.use_explain_table = False
     model.clear_caches()
     if device == "cuda":
         model.cuda()

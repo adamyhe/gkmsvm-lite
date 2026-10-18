@@ -531,3 +531,52 @@ def test_rbf_attribution(pair_loop):
     imp = gkmexplain(model, x, mode="importance")
     expected = model(x).ravel() - 0.2 - np.exp(-1.5) * coef.sum()
     np.testing.assert_allclose(imp.sum(axis=(1, 2)), expected, rtol=1e-10, atol=1e-12)
+
+
+@pytest.mark.parametrize("mode", ["hypothetical", "perturbation", "importance"])
+@pytest.mark.parametrize("kernel_type, params", [
+    ("gkm_esttrunc", {"L": 8, "k": 5, "d": 2}),
+    ("gkm_esttrunc", {"L": 8, "k": 5, "d": 2, "include_rc": False}),
+    ("gkm_estfull", {"L": 7, "k": 4, "d": 3}),
+    ("gkm_cnt", {"L": 7, "k": 4}),
+])
+def test_explain_table_matches_lmer_path(kernel_type, params, mode):
+    """Attributions read from the explain table equal the l-mer path's."""
+    from gkmsvm.explain import gkmexplain
+    from gkmsvm.svm import GkmSVM
+
+    rng = np.random.default_rng(9)
+    sv = np.eye(4)[rng.integers(0, 4, (40, 30))].transpose(0, 2, 1)
+    model = GkmSVM(sv, rng.normal(size=40), 0.2, kernel_type, params)
+    x = np.eye(4)[rng.integers(0, 4, (4, 33))].transpose(0, 2, 1)
+    model.use_explain_table = False
+    ref = gkmexplain(model, x, mode=mode)
+    model.use_explain_table = True
+    np.testing.assert_allclose(gkmexplain(model, x, mode=mode), ref, rtol=1e-12, atol=1e-14)
+    assert model._explain_tables
+
+
+def test_explain_table_auto_and_caching():
+    """"auto" builds a table only for batches large enough to pay for it, then
+    reuses it; RBF models never get one; clear_caches drops it."""
+    from gkmsvm.explain import gkmexplain
+    from gkmsvm.svm import GkmSVM
+
+    rng = np.random.default_rng(10)
+    sv = np.eye(4)[rng.integers(0, 4, (20, 30))].transpose(0, 2, 1)
+    model = GkmSVM(sv, rng.normal(size=20), 0.2, "gkm_esttrunc", {"L": 8, "k": 5, "d": 2})
+    x = np.eye(4)[rng.integers(0, 4, (40, 30))].transpose(0, 2, 1)
+    gkmexplain(model, x[:2], mode="hypothetical")
+    assert model._explain_tables == {}
+    full = gkmexplain(model, x, mode="hypothetical")
+    assert list(model._explain_tables) == [False]
+    np.testing.assert_allclose(gkmexplain(model, x[:2], mode="hypothetical"), full[:2],
+                               rtol=1e-12, atol=1e-14)
+    model.clear_caches()
+    assert model._explain_tables == {}
+
+    rbf = GkmSVM(sv, rng.normal(size=20), 0.2, "gkmrbf",
+                 {"L": 8, "k": 5, "d": 2, "gamma": 1.5})
+    rbf.use_explain_table = True
+    gkmexplain(rbf, x, mode="hypothetical")
+    assert rbf._explain_tables == {}
