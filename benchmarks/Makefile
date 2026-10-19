@@ -33,10 +33,13 @@ DART_TASK5    ?= ENCFF701NCI ENCFF953DDE
 # cell line in S5; Task 5 (GM12878) a check of its own, s5-retrained
 DART_RETRAIN  ?= GM12878 H1ESC HEPG2 IMR90 K562
 DART_RETRAIN5 ?= GM12878
+# Label for a second host's runs (e.g. SET=a100): results go to results/<SET>/ and
+# figures to figures/<SET>/; panels a set doesn't have are read from results/
+SET           ?=
 
 ifdef QUICK
-OUT           := results/quick
-FIG_OUT       := figures/quick
+ROOT          := results/quick
+FIG_ROOT      := figures/quick
 TIMING_SIZES  := 500,1000,2000
 DSQTL_QUICK   := --n-negsets 1
 AGREE_ARGS    := --negsets 1 --tags t3
@@ -51,8 +54,8 @@ DART_ARGS     := --max-variants 200
 DART4_ARGS    := --max-seqs 2000
 DART_TRAIN_ARGS := --n-pos 1000 --n-neg 1000
 else
-OUT           := results
-FIG_OUT       := figures
+ROOT          := results
+FIG_ROOT      := figures
 TIMING_SIZES  := 500,1000,2000,5000,10000,20000
 DSQTL_QUICK   :=
 AGREE_ARGS    :=
@@ -72,6 +75,8 @@ DART4_ARGS    :=
 DART_TRAIN_ARGS :=
 endif
 
+OUT    := $(ROOT)$(if $(SET),/$(SET))
+FIG_OUT := $(FIG_ROOT)$(if $(SET),/$(SET))
 COMMON := _common.py
 THR    := $(if $(THREADS),--threads $(THREADS))
 # gkmexplain is not in conda's ls-gkm: point LSGKM_BIN at a kundajelab/lsgkm source build
@@ -201,7 +206,7 @@ quick:
 	$(MAKE) paper QUICK=1
 
 figures:
-	RESULTS_DIR=$(OUT) FIGURES_DIR=$(FIG_OUT) $(PY) -m jupyter nbconvert \
+	RESULTS_DIR=$(OUT) RESULTS_ROOT=$(ROOT) FIGURES_DIR=$(FIG_OUT) $(PY) -m jupyter nbconvert \
 	    --to notebook --execute --inplace figures.ipynb
 
 help:
@@ -209,7 +214,7 @@ help:
 	@echo "Supplement: s1 s2 s3 s4 s5; s3b (large-N CTCF scaling, not in paper: up to a day)"
 	@echo "Checks:     s5-retrained (DART-Eval Task 5 with the retrained GM12878 model)"
 	@echo "All:        paper (results), figures (PDFs), quick (small run)"
-	@echo "Options:    DEVICE=$(DEVICE) QUICK=1 PY=$(PY) THREADS=1|4|16 LSGKM_ENV=$(LSGKM_ENV) LSGKM_BIN=<dir> MLSGKM_BIN=<dir>"
+	@echo "Options:    DEVICE=$(DEVICE) QUICK=1 SET=<label> PY=$(PY) THREADS=1|4|16 LSGKM_ENV=$(LSGKM_ENV) LSGKM_BIN=<dir> MLSGKM_BIN=<dir>"
 	@echo "            DART_WORK_DIR=$(DART_WORK_DIR) DART_MODELS=$(DART_MODELS)"
 
 .DEFAULT_GOAL := help
