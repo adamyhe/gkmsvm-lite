@@ -13,8 +13,14 @@ tests/fixtures:
   lsgkm_wgkm_test100.fa / lsgkm_wgkm_test85.fa
   lsgkm_wgkm_t{0,1,4,5}_test{100,85}.pred.txt
 
-(-t 2/-t 3 attributions are checked on the lsgkm_mode5_* models.) --models
-trains a subset; the test FASTAs come out the same every run.
+(-t 2/-t 3 attributions are checked on the lsgkm_mode5_* models.) It also
+writes the training sets and -t 2/-t 3 models trained on them with their
+scores, the oracle for train_gkmsvm:
+
+  lsgkm_wgkm_{pos,neg}.fa, lsgkm_wgkm_t{2,3}.model.txt.gz,
+  lsgkm_wgkm_t{2,3}_test{100,85}.pred.txt
+
+--models trains a subset; the FASTAs come out the same every run.
 
 With --explain-bin (a build of the kundajelab/lsgkm fork, which has
 gkmexplain), also runs gkmexplain on each model and test set in modes 0
@@ -81,6 +87,11 @@ RAGGED_MODELS = {
         "2.0",
     ],
 }
+# Trained and scored for the training oracle only (no gkmexplain outputs)
+TRAIN_MODELS = {
+    "t2": ["-t", "2", "-l", "10", "-k", "6", "-d", "3"],
+    "t3": ["-t", "3", "-l", "10", "-k", "6", "-d", "3", "-g", "2.0"],
+}
 MODELS = {
     "t0": ["-t", "0", "-l", "10", "-k", "6"],
     "t1": ["-t", "1", "-l", "11", "-k", "7", "-d", "3"],
@@ -133,8 +144,9 @@ def main():
     )
     ap.add_argument(
         "--models",
-        default=",".join(MODELS),
-        help=f"comma-separated models to train (default: {','.join(MODELS)})",
+        default=",".join([*MODELS, *TRAIN_MODELS]),
+        help="comma-separated models to train (default: "
+        f"{','.join([*MODELS, *TRAIN_MODELS])})",
     )
     ap.add_argument(
         "--ragged",
@@ -174,8 +186,8 @@ def main():
     neg = [random_seq(rng, 100) for _ in range(80)]
     pos = [add_n(rng, s) if i % 5 == 0 else s for i, s in enumerate(pos)]
     neg = [add_n(rng, s) if i % 5 == 0 else s for i, s in enumerate(neg)]
-    write_seqs(workdir / "pos.fa", pos, "p")
-    write_seqs(workdir / "neg.fa", neg, "n")
+    write_seqs(FIXTURES / "lsgkm_wgkm_pos.fa", pos, "p")
+    write_seqs(FIXTURES / "lsgkm_wgkm_neg.fa", neg, "n")
 
     tests = {}
     for length in (100, 85):
@@ -187,7 +199,7 @@ def main():
         write_seqs(tests[length], seqs, "t")
 
     for name in args.models.split(","):
-        opts = MODELS[name]
+        opts = {**MODELS, **TRAIN_MODELS}[name]
         prefix = workdir / name
         run(
             [
@@ -195,17 +207,16 @@ def main():
                 *opts,
                 "-c",
                 "1.0",
-                str(workdir / "pos.fa"),
-                str(workdir / "neg.fa"),
+                str(FIXTURES / "lsgkm_wgkm_pos.fa"),
+                str(FIXTURES / "lsgkm_wgkm_neg.fa"),
                 str(prefix),
             ]
         )
         model = Path(f"{prefix}.model.txt")
-        with (
-            open(model, "rb") as src,
-            gzip.open(FIXTURES / f"lsgkm_wgkm_{name}.model.txt.gz", "wb") as dst,
-        ):
-            shutil.copyfileobj(src, dst)
+        # mtime=0: unchanged models give byte-identical files
+        (FIXTURES / f"lsgkm_wgkm_{name}.model.txt.gz").write_bytes(
+            gzip.compress(model.read_bytes(), mtime=0)
+        )
         for length, fa in tests.items():
             run(
                 [
