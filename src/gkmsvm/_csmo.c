@@ -181,7 +181,8 @@ EXPORT int csmo_cache_insert(void *cache, int idx, const double *col) {
 EXPORT int csmo_solve(
     int N,
     const double *y,
-    double C,
+    double Cp,
+    double Cn,
     double tol,
     int max_iter,
     int cache_columns,
@@ -197,6 +198,8 @@ EXPORT int csmo_solve(
      * columns the solver will likely need). */
     double *alpha = state;
     double *G     = state + N;
+    /* Upper bound of alpha[t]: Cp for positives, Cn for negatives (LS-GKM -w) */
+#define C_OF(t) (y[t] > 0 ? Cp : Cn)
     for (int i = 0; i < N; i++) alpha[i] = 0.0;
     int    *active = (int *)malloc(N * sizeof(int));
     int n_active = N;
@@ -228,8 +231,8 @@ EXPORT int csmo_solve(
         for (int t = 0; t < N; t++) {
             if (!active[t]) continue;
             double neg_yG = -y[t] * G[t];
-            int in_up  = (y[t] > 0 && alpha[t] < C) || (y[t] < 0 && alpha[t] > 0);
-            int in_low = (y[t] > 0 && alpha[t] > 0) || (y[t] < 0 && alpha[t] < C);
+            int in_up  = (y[t] > 0 && alpha[t] < Cp) || (y[t] < 0 && alpha[t] > 0);
+            int in_low = (y[t] > 0 && alpha[t] > 0) || (y[t] < 0 && alpha[t] < Cn);
             if (in_up && neg_yG > m_val) {
                 m_val = neg_yG;
                 i_best = t;
@@ -284,7 +287,7 @@ EXPORT int csmo_solve(
                 if (!active[t]) continue;
                 double neg_yG = -y[t] * G[t];
                 int at_zero = alpha[t] < 1e-10;
-                int at_C = alpha[t] > C - 1e-10;
+                int at_C = alpha[t] > C_OF(t) - 1e-10;
                 int do_shrink = 0;
                 if (at_zero && y[t] > 0 && neg_yG < M_val) do_shrink = 1;
                 if (at_zero && y[t] < 0 && neg_yG > m_val) do_shrink = 1;
@@ -316,7 +319,7 @@ EXPORT int csmo_solve(
         for (int t = 0; t < N; t++) {
             if (!active[t]) continue;
             double neg_yG = -y[t] * G[t];
-            int in_low = (y[t] > 0 && alpha[t] > 0) || (y[t] < 0 && alpha[t] < C);
+            int in_low = (y[t] > 0 && alpha[t] > 0) || (y[t] < 0 && alpha[t] < Cn);
             if (!in_low || neg_yG >= m_val) continue;
 
             double b = m_val - neg_yG;
@@ -354,14 +357,15 @@ EXPORT int csmo_solve(
         double b = -s * G[i] + G[j];
         double d_j = -b / a;
 
-        /* Box constraints */
+        /* Box constraints: 0 <= alpha[i] + d_i <= C_i, 0 <= alpha[j] + d_j <= C_j */
         double lo, hi;
+        double C_i = C_OF(i), C_j = C_OF(j);
         if (s > 0) {
-            lo = (alpha[i] - C > -alpha[j]) ? alpha[i] - C : -alpha[j];
-            hi = (C - alpha[j] < alpha[i]) ? C - alpha[j] : alpha[i];
+            lo = (alpha[i] - C_i > -alpha[j]) ? alpha[i] - C_i : -alpha[j];
+            hi = (C_j - alpha[j] < alpha[i]) ? C_j - alpha[j] : alpha[i];
         } else {
             lo = (-alpha[i] > -alpha[j]) ? -alpha[i] : -alpha[j];
-            hi = (C - alpha[i] < C - alpha[j]) ? C - alpha[i] : C - alpha[j];
+            hi = (C_i - alpha[i] < C_j - alpha[j]) ? C_i - alpha[i] : C_j - alpha[j];
         }
         if (d_j < lo) d_j = lo;
         if (d_j > hi) d_j = hi;
@@ -398,7 +402,7 @@ EXPORT int csmo_solve(
     int n_free = 0;
     double sum_free = 0.0;
     for (int t = 0; t < N; t++) {
-        if (alpha[t] > 1e-10 && alpha[t] < C - 1e-10) {
+        if (alpha[t] > 1e-10 && alpha[t] < C_OF(t) - 1e-10) {
             sum_free += y[t] * G[t];
             n_free++;
         }
@@ -417,6 +421,7 @@ EXPORT int csmo_solve(
     free(active);
 
     return iteration;
+#undef C_OF
 }
 
 /* Python extension module — allows setuptools to compile and install

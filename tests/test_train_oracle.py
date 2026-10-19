@@ -20,6 +20,9 @@ PARAMS = {
     "t3": dict(kernel_type=3, l=10, k=6, d=3, gamma=2.0),
     "t4": dict(kernel_type=4, l=11, k=7, d=3, M=20, H=10),
     "t5": dict(kernel_type=5, l=10, k=6, d=3, M=50, H=30, gamma=2.0),
+    # -w: the positives' C is w*C
+    "t2w2": dict(kernel_type=2, l=10, k=6, d=3, pos_weight=2.0),
+    "t4w05": dict(kernel_type=4, l=11, k=7, d=3, M=20, H=10, pos_weight=0.5),
 }
 
 
@@ -65,7 +68,7 @@ def test_training_matches_gkmtrain(name, solver):
 def test_gkmtrain_solution_is_optimal_under_our_kernel(name):
     """gkmtrain's dual solution meets the KKT conditions of the problem our
     kernel poses on its training set, to its stopping tolerance (eps 1e-3):
-    y f(x) = 1 on free SVs, >= 1 off them, <= 1 at C."""
+    y f(x) = 1 on free SVs, >= 1 off them, <= 1 at C (w C for positives)."""
     pos, neg = _seqs("lsgkm_wgkm_pos.fa"), _seqs("lsgkm_wgkm_neg.fa")
     model = load_lsgkm_model(FIXTURES / f"lsgkm_wgkm_{name}.model.txt.gz")
     alpha = {s: abs(c) for s, c in _sv_coefficients(model).items()}
@@ -73,7 +76,33 @@ def test_gkmtrain_solution_is_optimal_under_our_kernel(name):
     a = np.array([alpha.get(s.replace("N", "A"), 0.0) for s in pos + neg])
     assert (a > 0).sum() == model.num_support_vectors
     y = np.r_[np.ones(len(pos)), -np.ones(len(neg))]
+    C = np.where(y > 0, PARAMS[name].get("pos_weight", 1.0), 1.0)
     yf = y * np.asarray(model(pos + neg)).ravel()
-    free = (a > 1e-6) & (a < 1 - 1e-6)
+    free = (a > 1e-6) & (a < C - 1e-6)
     assert np.abs(yf[free] - 1).max() < 1e-3
-    assert (yf[a == 0] > 1 - 1e-3).all() and (yf[a >= 1 - 1e-6] < 1 + 1e-3).all()
+    assert (yf[a == 0] > 1 - 1e-3).all() and (yf[a >= C - 1e-6] < 1 + 1e-3).all()
+
+
+def test_cli_w(tmp_path):
+    """gkmsvm train -w is pos_weight."""
+    from gkmsvm.cli import main
+    from gkmsvm.serialization import load_model
+
+    out = str(tmp_path / "m.npz")
+    main(
+        [
+            "train",
+            "-p",
+            str(FIXTURES / "lsgkm_wgkm_pos.fa"),
+            "-n",
+            str(FIXTURES / "lsgkm_wgkm_neg.fa"),
+            "-o",
+            out,
+            *("-t", "2", "-l", "10", "-k", "6", "-d", "3", "-w", "2.0"),
+            *("--device", "cpu"),
+        ]
+    )
+    ref = _sv_coefficients(load_lsgkm_model(FIXTURES / "lsgkm_wgkm_t2w2.model.txt.gz"))
+    got = _sv_coefficients(load_model(out))
+    assert set(got) == set(ref)
+    np.testing.assert_allclose([got[s] for s in ref], list(ref.values()), atol=5e-3)

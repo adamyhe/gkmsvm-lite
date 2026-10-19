@@ -17,8 +17,8 @@ tests/fixtures:
 writes the training sets and -t 2/-t 3 models trained on them with their
 scores, the oracle for train_gkmsvm:
 
-  lsgkm_wgkm_{pos,neg}.fa, lsgkm_wgkm_t{2,3}.model.txt.gz,
-  lsgkm_wgkm_t{2,3}_test{100,85}.pred.txt
+  lsgkm_wgkm_{pos,neg}.fa, lsgkm_wgkm_{t2,t3,t2w2,t4w05}.model.txt.gz,
+  lsgkm_wgkm_{t2,t3,t2w2,t4w05}_test{100,85}.pred.txt (-w 2 and -w 0.5)
 
 --models trains a subset; the FASTAs come out the same every run.
 
@@ -91,6 +91,24 @@ RAGGED_MODELS = {
 TRAIN_MODELS = {
     "t2": ["-t", "2", "-l", "10", "-k", "6", "-d", "3"],
     "t3": ["-t", "3", "-l", "10", "-k", "6", "-d", "3", "-g", "2.0"],
+    # -w: the positives' C is w*C
+    "t2w2": ["-t", "2", "-l", "10", "-k", "6", "-d", "3", "-w", "2.0"],
+    "t4w05": [
+        "-t",
+        "4",
+        "-l",
+        "11",
+        "-k",
+        "7",
+        "-d",
+        "3",
+        "-M",
+        "20",
+        "-H",
+        "10",
+        "-w",
+        "0.5",
+    ],
 }
 MODELS = {
     "t0": ["-t", "0", "-l", "10", "-k", "6"],

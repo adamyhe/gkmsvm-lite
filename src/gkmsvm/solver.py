@@ -108,6 +108,7 @@ def smo_solve(
     cache_size: int | None = None,
     verbose: bool = False,
     lengths=None,
+    pos_weight: float = 1.0,
 ) -> tuple[np.ndarray, float]:
     """Column-cached SMO solver for C-SVM.
 
@@ -128,6 +129,7 @@ def smo_solve(
             available RAM (all N columns when they fit in a quarter of it).
         verbose: Print progress.
         lengths: [N] sequence lengths when they differ (X padded to the longest).
+        pos_weight: Positives' C is pos_weight * C (LS-GKM ``-w``).
 
     Returns:
         coefficients: [N] signed dual coefficients (alpha_i * y_i).
@@ -142,7 +144,9 @@ def smo_solve(
         )
     if cache_size is None:
         cache_size = auto_cache_columns(X.shape[0])
-    return _smo_csolver(kernel, X, y, C, tol, max_iter, cache_size, verbose, lengths)
+    return _smo_csolver(
+        kernel, X, y, (C * pos_weight, C), tol, max_iter, cache_size, verbose, lengths
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +205,8 @@ def auto_cache_columns(N: int) -> int:
 
 
 def _prefetch_candidates(state, y, C, k, fresh):
-    """Up to k indices WSS3 is likely to select next, among `fresh` ones.
+    """Up to k indices WSS3 is likely to select next, among `fresh` ones; C:
+    each alpha's upper bound ([N]).
 
     Working-set pairs come from the ends of -y*G: the largest values in
     I_up and the smallest in I_low. Take half from each. `fresh` excludes
@@ -226,7 +231,8 @@ def _prefetch_candidates(state, y, C, k, fresh):
 
 
 def _smo_csolver(kernel, X, y, C, tol, max_iter, cache_size, verbose, lengths=None):
-    """WSS3 SMO using the C solver with kernel column callback.
+    """WSS3 SMO using the C solver with kernel column callback; C: (positives'
+    C, negatives' C).
 
     The C solver handles the optimization loop (WSS3, shrinking, gradient
     updates) while kernel columns are computed by our KernelColumnCache
@@ -246,6 +252,8 @@ def _smo_csolver(kernel, X, y, C, tol, max_iter, cache_size, verbose, lengths=No
         else np.asarray(to_cpu(y) if xp is not np else y, dtype=np.float64)
     )
 
+    C_pos, C_neg = C
+    C_of = np.where(y_np > 0, C_pos, C_neg)
     # Written by the C solver: alpha in state[:N], gradient in state[N:2N],
     # 1.0 in state[2N:] for columns in its cache
     state = np.zeros(3 * N, dtype=np.float64)
@@ -280,7 +288,7 @@ def _smo_csolver(kernel, X, y, C, tol, max_iter, cache_size, verbose, lengths=No
                 fresh = in_cache == 0
                 fresh[idx] = False
                 extra = _prefetch_candidates(
-                    state, y_np, C, min(max_batch - 1, room), fresh
+                    state, y_np, C_of, min(max_batch - 1, room), fresh
                 )
         try:
             return cache.compute_columns([idx, *extra])
@@ -321,6 +329,7 @@ def _smo_csolver(kernel, X, y, C, tol, max_iter, cache_size, verbose, lengths=No
         _ct.POINTER(_ct.c_double),
         _ct.c_double,
         _ct.c_double,
+        _ct.c_double,
         _ct.c_int,
         _ct.c_int,
         _COLUMN_CB,
@@ -333,7 +342,8 @@ def _smo_csolver(kernel, X, y, C, tol, max_iter, cache_size, verbose, lengths=No
     n_iter = lib.csmo_solve(
         N,
         y_np.ctypes.data_as(_ct.POINTER(_ct.c_double)),
-        C,
+        C_pos,
+        C_neg,
         tol,
         max_iter,
         min(cache_size, N),

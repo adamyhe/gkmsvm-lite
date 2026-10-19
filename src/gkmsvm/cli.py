@@ -242,6 +242,7 @@ def cmd_train(args: argparse.Namespace) -> None:
         k=args.k,
         d=args.d,
         C=args.C,
+        pos_weight=args.w,
         gamma=args.gamma,
         M=args.M,
         H=args.H,
@@ -515,6 +516,12 @@ def build_parser() -> argparse.ArgumentParser:
         "-o", "--output", required=True, help="Output model (.npz or .model.txt)."
     )
     p.add_argument("-C", type=float, default=1.0, help="Regularization (default: 1.0).")
+    p.add_argument(
+        "-w",
+        type=float,
+        default=1.0,
+        help="Positives' C is w*C (as LS-GKM -w; default: 1.0).",
+    )
     p.add_argument(
         "--solver",
         default="auto",

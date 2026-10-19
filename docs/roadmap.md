@@ -72,6 +72,7 @@
 - [x] lsgkm oracles for every kernel type (`-t 0` to `-t 5`): gkmpredict scores; gkmexplain modes 0/1/4 on every CPU explain path and mode 5 (mutation impact) on every scoring path, with N and odd/even window counts (kundajelab fork, `benchmarks/dev/lsgkm_wgkm_fixtures.py`)
 - [x] N as in LS-GKM (A on the forward strand, T on the reverse); N accepted in every string input; `--allow-other-bases` / `allow_other` reads other letters as N (as gkmpredict does)
 - [x] `-t 0` truncated at `d` mismatches, as LS-GKM
+- [x] `-w` positive-class weight (`pos_weight`; LIBSVM and SMO match gkmtrain `-w 2` and `-w 0.5`)
 - [x] Training oracle: `train_gkmsvm` (LIBSVM and SMO) gives gkmtrain's support vectors for `-t 0` to `-t 5` on fixed- and mixed-length sets with N, coefficients to the solvers' 1e-3 tolerance and gkmpredict's scores to 5e-4; gkmtrain's solutions meet our KKT conditions (`tests/test_train_oracle.py`)
 - [x] Fixed-length pipeline (`--genome` summit windows, `--length` center-crop, 300 bp for training) and sequences of different lengths for compatibility: padded SVs and queries on CPU, CUDA and Metal; imported mixed-length models, npz/LS-GKM round trips; training, ISM, GkmExplain, mutation impact, variant scores and DeltaSVM on mixed lengths (gkmpredict, gkmtrain and gkmexplain oracles)
 
@@ -80,7 +81,6 @@
 Gaps found by checking against LS-GKM (2026-10-19), most important first:
 
 - [ ] **Re-run the dsQTL check** — `tests/test_gpu.py` passes on a CUDA host (2026-10-19, after the `-t 0` `d`, N and padding changes); `benchmarks/agreement_lsgkm.py` still to re-run (last run 2026-10-16, before the N packing change: mutation impact matched the paper's `gkmexplain -m 5` outputs to ~5e-6). CUDA explain paths are checked against CPU only, not against lsgkm directly.
-- [ ] **`-w` positive-class weight** — LS-GKM's `-w` sets C to w*C for positives; not exposed.
 - [ ] **Importer and SVR oracles** — the classic gkmSVM and R gkmSVM importers, and `train_gkmsvr` (vs kundajelab/lsgkm-svr), have no reference-tool fixtures.
 - [ ] **`-t 6` gkm_cnt_rbf** — in the kundajelab fork only; not supported.
 

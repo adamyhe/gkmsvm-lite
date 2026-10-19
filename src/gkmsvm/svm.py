@@ -127,8 +127,10 @@ def resolve_kernel_type(kernel_type: str | int) -> str:
     """Resolve a kernel type alias or ``-t N`` integer to the internal name.
 
     Accepts: internal names (``gkm_cnt``), aliases (``direct``),
-    or LS-GKM ``-t`` integers (``0``).
+    or LS-GKM ``-t`` integers (``0``, or ``"0"`` as the CLI passes it).
     """
+    if isinstance(kernel_type, str) and kernel_type.strip().isdigit():
+        kernel_type = int(kernel_type)
     if isinstance(kernel_type, int):
         canonical = KERNEL_ALIASES.get(kernel_type)
         if canonical is None:
