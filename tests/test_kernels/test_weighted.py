@@ -192,13 +192,95 @@ def test_mutant_self_kernels():
             np.testing.assert_allclose(got[v, p], kernel._raw_diagonal(m), rtol=1e-12)
 
 
-def test_gkmexplain_rejects_weighted():
+def _ref_explain(x, svs, coef, l=L, d=D):
+    """Hypothetical GkmExplain from the definition: each window pair (i, j)
+    with m mismatches adds coef / sqrt(K(x, x) K(sv, sv)) wx_i wy_j times
+    alpha(m) (match) or kappa(m) (mismatch) at each position, to the SV's base."""
+    from gkmsvm.explain import _build_alpha_table, _build_kappa_table
+
+    h = _build_estlmer_table(l, K, True)
+    h[d + 1:] = 0
+    alpha, kappa = _build_alpha_table(h, l, d), _build_kappa_table(h, l, d)
+    code = {"A": 0, "C": 1, "G": 2, "T": 3}
+    ex = [code.get(c, 0) for c in x]
+    wx = _ref_weights(len(ex) - l + 1, M, H)
+    out = np.zeros((4, len(ex)))
+    for sv, c in zip(svs, coef):
+        ey = [code.get(b, 0) for b in sv]
+        wy = _ref_weights(len(ey) - l + 1, M, H)
+        ec = c / math.sqrt(_ref_kernel(x, x) * _ref_kernel(sv, sv))
+        rc = [3 - b for b in ey[::-1]]
+        for seq, ww in ((ey, wy), (rc, wy[::-1])):
+            for i in range(len(ex) - l + 1):
+                u = ex[i:i + l]
+                for j in range(len(seq) - l + 1):
+                    v = seq[j:j + l]
+                    m = sum(a != b for a, b in zip(u, v))
+                    if m > d:
+                        continue
+                    for k in range(l):
+                        t = alpha[m] if u[k] == v[k] else kappa[m]
+                        out[v[k], i + k] += ec * wx[i] * ww[j] * t
+    return out
+
+
+# (use_explain_table, use_lmer_index): table, l-mer path, per-SV kernel
+_EXPLAIN_PATHS = [(True, True), (False, True), (False, False)]
+
+
+@pytest.mark.parametrize("kernel_type", ["wgkm", "wgkmrbf"])
+@pytest.mark.parametrize("mode", ["hypothetical", "perturbation", "importance"])
+def test_gkmexplain_paths_agree(kernel_type, mode):
+    """Explain table, l-mer path (index for RBF) and per-SV kernel agree, with
+    odd and even window counts."""
     from gkmsvm import gkmexplain
 
     rng = np.random.default_rng(5)
-    model = GkmSVM(_encode(_seqs(rng, 10, 33)), rng.normal(size=10), 0.0, "wgkm", PARAMS)
-    with pytest.raises(ValueError, match="GkmExplain"):
-        gkmexplain(model, _encode(_seqs(rng, 1, 33)))
+    for L_ in (33, 34):
+        model = GkmSVM(_encode(_seqs(rng, 12, L_)), rng.normal(size=12), 0.1, kernel_type,
+                       PARAMS)
+        x = _encode(_seqs(rng, 3, L_))
+        outs = []
+        for table, index in _EXPLAIN_PATHS:
+            model.use_explain_table, model.use_lmer_index = table, index
+            model.clear_caches()
+            outs.append(gkmexplain(model, x, mode=mode))
+            if table and kernel_type == "wgkm":
+                assert model._explain_tables
+        for got in outs[1:]:
+            np.testing.assert_allclose(got, outs[0], rtol=1e-10, atol=1e-13)
+
+
+def test_gkmexplain_matches_definition():
+    from gkmsvm import gkmexplain
+
+    rng = np.random.default_rng(8)
+    svs, coef = _seqs(rng, 4, 26), rng.normal(size=4)
+    model = GkmSVM(_encode(svs), coef, 0.1, "wgkm", PARAMS)
+    model.use_lmer_index = False  # per-SV kernel; the others agree with it (above)
+    xs = _seqs(rng, 2, 27)
+    got = gkmexplain(model, _encode(xs), mode="hypothetical")
+    for b, x in enumerate(xs):
+        np.testing.assert_allclose(got[b], _ref_explain(x, svs, coef), rtol=1e-10, atol=1e-14)
+
+
+@pytest.mark.parametrize("kernel_type", ["wgkm", "wgkmrbf"])
+def test_gkmexplain_completeness(kernel_type):
+    """Importance sums to score - bias (RBF: minus exp(-gamma) sum coef, as for -t 3)."""
+    from gkmsvm import gkmexplain
+
+    rng = np.random.default_rng(9)
+    coef = rng.normal(size=20)
+    model = GkmSVM(_encode(_seqs(rng, 20, 41)), coef, 0.3, kernel_type, PARAMS)
+    x = _encode(_seqs(rng, 4, 41, with_n=False))
+    expected = np.asarray(model(x)).ravel() - 0.3
+    if kernel_type == "wgkmrbf":
+        expected -= np.exp(-PARAMS["gamma"]) * coef.sum()
+    for table, index in _EXPLAIN_PATHS:
+        model.use_explain_table, model.use_lmer_index = table, index
+        model.clear_caches()
+        got = gkmexplain(model, x, mode="importance").sum(axis=(1, 2))
+        np.testing.assert_allclose(got, expected, rtol=1e-10, atol=1e-12)
 
 
 @pytest.mark.parametrize("query_norm", [True, False])

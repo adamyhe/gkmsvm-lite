@@ -698,6 +698,23 @@ class TestWeightedGPU:
         np.testing.assert_allclose(got, cpu, rtol=1e-9, atol=1e-12)
 
     @pytest.mark.parametrize("kernel_type", ["wgkm", "wgkmrbf"])
+    @pytest.mark.parametrize("mode", ["hypothetical", "perturbation"])
+    @pytest.mark.parametrize("lmer", [True, False])  # l-mer path (index for RBF); per-SV
+    def test_gkmexplain_matches_cpu(self, kernel_type, mode, lmer):
+        from gkmsvm import gkmexplain
+
+        sv = self._seqs(40, 61, 12)
+        X = self._seqs(5, 60, 13)  # even window count
+        coef = np.random.default_rng(2).standard_normal(40)
+        model = GkmSVM(sv, coef, 0.0, kernel_type, WEIGHTED_PARAMS)
+        model.use_explain_table = False
+        model.use_lmer_index = lmer
+        cpu = gkmexplain(model, X, mode=mode)
+        model.cuda()
+        got = cp.asnumpy(gkmexplain(model, cp.asarray(X), mode=mode))
+        np.testing.assert_allclose(got, cpu, rtol=1e-9, atol=1e-12)
+
+    @pytest.mark.parametrize("kernel_type", ["wgkm", "wgkmrbf"])
     def test_smo_columns_match_cpu(self, kernel_type):
         """SMO columns through the CUDA l-mer index and the masked join vs the Gram."""
         from gkmsvm.gram import compute_gram
