@@ -769,27 +769,30 @@ class TestWeightedGPU:
 
     @pytest.mark.parametrize("col_tile", [4096, 7])
     @pytest.mark.parametrize("length", [60, 61])  # odd/even window counts
-    def test_masked_join_matches_cpu(self, col_tile, length, monkeypatch):
+    @pytest.mark.parametrize("padded", [False, True])  # per-row weights
+    def test_masked_join_matches_cpu(self, col_tile, length, padded, monkeypatch):
         from gkmsvm.kernels import masked
         from gkmsvm.kernels.weighted import CenterWeightedGkmKernel
 
         monkeypatch.setattr(masked, "_GPU_COL_TILE_W", col_tile)
         kernel = CenterWeightedGkmKernel(8, 5, d=2, M=20, H=6.0)
-        bx = kernel.pack(self._seqs(21, 80, 3))
-        by, by_rc = kernel.pack_both(self._seqs(30, length, 4))
+        rng = np.random.default_rng(5)
+        lx = rng.integers(20, 81, 21) if padded else None
+        ly = rng.integers(10, length + 1, 30) if padded else None
+        bx = kernel.pack(self._seqs(21, 80, 3), lx)
+        by, by_rc = kernel.pack_both(self._seqs(30, length, 4), ly)
         plan = kernel._join_plan()
-        wx, wy = kernel.window_weights(bx.shape[1]), kernel.window_weights(by.shape[1])
-        ref = masked.masked_pairwise(
-            bx,
-            by,
-            plan,
-            by_rc,
-            wx=kernel.row_weights(bx),
-            wy=kernel.row_weights(by),
-            wy_rc=kernel.row_weights(by_rc, rc=True),
-        )
+        wx, wy = kernel.row_weights(bx), kernel.row_weights(by)
+        wy_rc = kernel.row_weights(by_rc, rc=True)
+        ref = masked.masked_pairwise(bx, by, plan, by_rc, wx=wx, wy=wy, wy_rc=wy_rc)
         got = masked.masked_pairwise_gpu(
-            cp.asarray(bx), cp.asarray(by), plan, cp.asarray(by_rc), wx=wx, wy=wy
+            cp.asarray(bx),
+            cp.asarray(by),
+            plan,
+            cp.asarray(by_rc),
+            wx=wx,
+            wy=wy,
+            wy_rc=wy_rc,
         )
         np.testing.assert_allclose(cp.asnumpy(got), ref, rtol=1e-12)
 

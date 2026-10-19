@@ -46,9 +46,12 @@ void fused_explain(
     double* __restrict__ result,
     const int total_pairs, const int S, const int Wx, const int Wy,
     const int l, const int min_matches, const int seqlen, const int perturbation,
-    const double* __restrict__ wx, const double* __restrict__ wy, const int weighted
+    const double* __restrict__ wx, const double* __restrict__ wy,
+    const int wy_rs, const int wy_cs, const int weighted
 ) {
-    // wx [Wx], wy [Wy]: window weights of the queries and SV windows (-t 4/5)
+    // wx [Wx]: the queries' window weights (-t 4/5); SV s's window j weighs
+    // wy[j * wy_rs + s * wy_cs] (wy [Wy, S], or one [Wy] row shared: wy_cs 0).
+    // PAD windows (past a shorter SV's) are skipped
     extern __shared__ char smem[];
     double* s_a = (double*)smem;
     double* s_b = s_a + l + 2;
@@ -81,12 +84,14 @@ void fused_explain(
 
     for (int i = 0; i < Wx; i++) {
         unsigned int bx_val = use_smem ? s_bx[i] : bx_packed[b * Wx + i];
+        if (bx_val == 0xFFFFFFFFu) continue;
         for (int j = 0; j < Wy; j++) {
             unsigned int by_val = by_packed_t[j * S + s];
+            if (by_val == 0xFFFFFFFFu) continue;
             unsigned int xv = bx_val ^ by_val;
             int mm = __popc(((xv >> 1) | xv) & 0x55555555u);
             if (l - mm < min_matches) continue;
-            const double ew = weighted ? ec * wx[i] * wy[j] : ec;
+            const double ew = weighted ? ec * wx[i] * wy[(long long)j * wy_rs + s * wy_cs] : ec;
             double av = ew * s_a[mm];
             double bv = ew * s_b[mm];
             for (int k = 0; k < l; k++) {
@@ -125,8 +130,8 @@ def _explain_gpu(
     wx,
     wy,
 ):
-    """Launch the CUDA kernel, accumulating into ``result`` [B, 4, seqlen]; wx,
-    wy: window weights (empty when unweighted)."""
+    """Launch the CUDA kernel, accumulating into ``result`` [B, 4, seqlen]; wx
+    [Wx], wy [S_c or 1, Wy]: window weights (empty when unweighted)."""
     import cupy as cp
 
     global _cupy_explain_kernel
@@ -139,8 +144,13 @@ def _explain_gpu(
     block = 256
     shared = 2 * (l + 2) * 8 + Wx * 4
     weighted = len(wx) > 0
+    wy_rs, wy_cs = 1, 0
     if not weighted:
         wx = wy = np.zeros(1)
+    elif len(wy) > 1:  # per SV: [Wy, S_c], read like packed_y_t
+        wy, wy_rs, wy_cs = np.ascontiguousarray(wy.T), S_c, 1
+    else:
+        wy = wy[0]
     _cupy_explain_kernel(
         ((total + block - 1) // block,),
         (block,),
@@ -161,6 +171,8 @@ def _explain_gpu(
             np.int32(perturbation),
             cp.asarray(wx, dtype=cp.float64),
             cp.asarray(wy, dtype=cp.float64),
+            np.int32(wy_rs),
+            np.int32(wy_cs),
             np.int32(weighted),
         ),
         shared_mem=shared,
@@ -753,7 +765,6 @@ def gkmexplain(
 
     kernel = model.kernel
     base = kernel.base
-    model._require_cpu_if_padded()
     if getattr(base, "_mismatch_table", None) is None:
         raise ValueError(
             f"GkmExplain attribution needs a gapped k-mer kernel, not {model.kernel_type!r}; "
@@ -879,7 +890,7 @@ def gkmexplain(
                     min_matches,
                     is_perturbation,
                     wx,
-                    wy[0],  # off the CPU SVs share a length (_require_cpu)
+                    wy[s0:s1] if len(wy) > 1 else wy,
                 )
 
     return result
@@ -1384,7 +1395,6 @@ def mutation_impact(
     """
     from gkmsvm.backend import to_cpu
 
-    model._require_cpu_if_padded()
     kernel = model.kernel
     base = kernel.base
     coef = model.coefficients

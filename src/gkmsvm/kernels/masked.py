@@ -328,6 +328,8 @@ __device__ __forceinline__ unsigned int masked_key(
     return key;
 }
 
+#define PAD_WINDOW 0xFFFFFFFFu  // past a shorter sequence's windows: skipped
+
 // counts[m, key + 1] += 1 for every column window (m = mask in chunk)
 extern "C" __global__ void masked_hist(
     const unsigned int* __restrict__ by, long long n_win,
@@ -338,6 +340,7 @@ extern "C" __global__ void masked_hist(
     if (idx >= (long long)M * n_win) return;
     int m = (int)(idx / n_win);
     long long w = idx % n_win;
+    if (by[w] == PAD_WINDOW) return;
     unsigned int key = masked_key(by[w], runs + m * R * 3, R);
     atomicAdd(&counts[m * (K + 1) + key + 1], 1);
 }
@@ -354,6 +357,7 @@ extern "C" __global__ void masked_scatter(
     if (idx >= (long long)M * n_win) return;
     int m = (int)(idx / n_win);
     long long w = idx % n_win;
+    if (by[w] == PAD_WINDOW) return;
     unsigned int key = masked_key(by[w], runs + m * R * 3, R);
     int slot = atomicAdd(&fill[m * K + key], 1);
     colseq[m * n_win + slot] = (unsigned short)seq_of_row[w / Wy];
@@ -382,7 +386,9 @@ extern "C" __global__ void masked_join(
     int n_groups = blockDim.x / lanes;
     for (int it = group; it < M * Wx; it += n_groups) {
         int m = it / Wx, i = it % Wx;
-        unsigned int key = masked_key(bx[(long long)b * Wx + i], s_runs + m * R * 3, R);
+        unsigned int u = bx[(long long)b * Wx + i];
+        if (u == PAD_WINDOW) continue;
+        unsigned int key = masked_key(u, s_runs + m * R * 3, R);
         const int* off = offsets + m * (K + 1);
         const unsigned short* cs = colseq + m * n_win;
         int hi = off[key + 1];
@@ -408,16 +414,19 @@ extern "C" __global__ void masked_scatter_w(
     if (idx >= (long long)M * n_win) return;
     int m = (int)(idx / n_win);
     long long w = idx % n_win;
+    if (by[w] == PAD_WINDOW) return;
     unsigned int key = masked_key(by[w], runs + m * R * 3, R);
     int slot = atomicAdd(&fill[m * K + key], 1);
     colseq[m * n_win + slot] = (unsigned short)seq_of_row[w / Wy];
     colwt[m * n_win + slot] = wby[w];
 }
 
-// masked_join with window weights: counts[s] += wx[i] * colwt[t], exact in
-// uint64 (weights are integers <= 255)
+// masked_join with window weights: counts[s] += wx[b, i] * colwt[t], exact in
+// uint64 (weights are integers <= 255); wx_stride 0 when every row shares one
+// [Wx] row of weights
 extern "C" __global__ void masked_join_w(
     const unsigned int* __restrict__ bx, int Wx, const unsigned char* __restrict__ wx,
+    int wx_stride,
     const unsigned int* __restrict__ runs, int R, int M, long long K,
     const int* __restrict__ offsets, const unsigned short* __restrict__ colseq,
     const unsigned char* __restrict__ colwt,
@@ -434,11 +443,13 @@ extern "C" __global__ void masked_join_w(
     int n_groups = blockDim.x / lanes;
     for (int it = group; it < M * Wx; it += n_groups) {
         int m = it / Wx, i = it % Wx;
-        unsigned int key = masked_key(bx[(long long)b * Wx + i], s_runs + m * R * 3, R);
+        unsigned int u = bx[(long long)b * Wx + i];
+        if (u == PAD_WINDOW) continue;
+        unsigned int key = masked_key(u, s_runs + m * R * 3, R);
         const int* off = offsets + m * (K + 1);
         const unsigned short* cs = colseq + m * n_win;
         const unsigned char* cw = colwt + m * n_win;
-        unsigned long long a = wx[i];
+        unsigned long long a = wx[(long long)b * wx_stride + i];
         int hi = off[key + 1];
         for (int t = off[key] + lane; t < hi; t += lanes)
             atomicAdd(&counts[cs[t]], a * cw[t]);
@@ -481,12 +492,13 @@ def _cuda_kernels():
 
 
 def masked_pairwise_gpu(
-    bx_packed, by_packed, plan, by_rc_packed=None, wx=None, wy=None
+    bx_packed, by_packed, plan, by_rc_packed=None, wx=None, wy=None, wy_rc=None
 ):
     """CUDA version of masked_pairwise(); inputs and result are CuPy arrays.
 
-    bx_packed: [B, Wx] uint32; by_packed, by_rc_packed: [S, Wy] uint32.
-    wx, wy: optional [Wx], [Wy] uint8 window weights (NumPy), as in
+    bx_packed: [B, Wx] uint32; by_packed, by_rc_packed: [S, Wy] uint32, PAD
+    past shorter sequences' windows (skipped).
+    wx, wy, wy_rc: optional row_weights (NumPy uint8, [1 or rows, W]), as in
     masked_pairwise.
     Returns [B, S] float64.
     """
@@ -501,8 +513,12 @@ def masked_pairwise_gpu(
     block = 256
     tile = _GPU_COL_TILE_W if weighted else _GPU_COL_TILE
     if weighted:
-        wx_d = cp.asarray(np.asarray(wx, dtype=np.uint8))
-        wy_np = np.asarray(wy, dtype=np.uint8)
+        wx_np = np.ascontiguousarray(wx, dtype=np.uint8)
+        wx_d = cp.asarray(wx_np)
+        wx_stride = Wx if wx_np.shape[0] > 1 else 0
+        blocks_w = [np.asarray(wy, dtype=np.uint8)] + (
+            [np.asarray(wy_rc, dtype=np.uint8)] if by_rc_packed is not None else []
+        )
 
     for c0 in range(0, S_total, tile):
         c1 = min(c0 + tile, S_total)
@@ -513,11 +529,14 @@ def masked_pairwise_gpu(
         by = cp.ascontiguousarray(cp.concatenate(rows), dtype=cp.uint32)
         seq_of_row = cp.tile(cp.arange(S, dtype=cp.int32), len(rows))
         n_win = by.shape[0] * Wy
-        if weighted:  # an RC window carries its forward weight
+        if weighted:  # the rows' weights, forward block then RC block
             wby = cp.asarray(
                 np.concatenate(
-                    [np.tile(w, S) for w in (wy_np, wy_np[::-1])][: len(rows)]
-                )
+                    [
+                        np.broadcast_to(w if w.shape[0] == 1 else w[c0:c1], (S, Wy))
+                        for w in blocks_w
+                    ]
+                ).ravel()
             )
         res_tile = cp.zeros((B, S), dtype=cp.float64)
         for j, coef, positions in plan:
@@ -573,6 +592,7 @@ def masked_pairwise_gpu(
                             bx,
                             np.int32(Wx),
                             wx_d,
+                            np.int32(wx_stride),
                             runs,
                             np.int32(R),
                             np.int32(M),
@@ -656,7 +676,7 @@ _METAL_MASKED_JOIN = """
         int m = it / Wx;
         int i = it - m * Wx;
         uint w = bx[b * Wx + i];
-        {
+        if (w != 0xFFFFFFFFu) {  // PAD past a shorter sequence's windows
             uint key = 0;
             for (int r = 0; r < R; r++) {
                 uint o = (uint)(m * R + r) * 3;
@@ -680,6 +700,7 @@ _METAL_HIST = """
     if (idx >= M * n_win) return;
     uint m = idx / n_win, w = idx - m * n_win;
     uint v = by[w], key = 0;
+    if (v == 0xFFFFFFFFu) return;  // PAD
     for (uint r = 0; r < R; r++) {
         uint o = (m * R + r) * 3;
         key |= ((v >> runs[o]) & runs[o + 1]) << runs[o + 2];
@@ -696,6 +717,7 @@ _METAL_SCATTER = """
     if (idx >= M * n_win) return;
     uint m = idx / n_win, w = idx - m * n_win;
     uint v = by[w], key = 0;
+    if (v == 0xFFFFFFFFu) return;  // PAD
     for (uint r = 0; r < R; r++) {
         uint o = (m * R + r) * 3;
         key |= ((v >> runs[o]) & runs[o + 1]) << runs[o + 2];

@@ -306,11 +306,12 @@ extern "C" __global__ void lmer_index_query(
     const long long* __restrict__ offsets, const int* __restrict__ ids,
     const unsigned int* __restrict__ masks, const double* __restrict__ weights,
     int n_masks, long long n_lmers, int S, double* __restrict__ out,
-    const unsigned char* __restrict__ wx, const unsigned char* __restrict__ vals,
-    int weighted)
+    const unsigned char* __restrict__ wx, int wx_stride,
+    const unsigned char* __restrict__ vals, int weighted)
 {
     // grid.y = query row; each thread takes one (window, neighbor) item.
-    // wx, vals: window weights of the queries and entries (-t 4/5, weighted = 1)
+    // wx [rows or 1, W], vals: window weights of the queries (wx_stride 0 when
+    // the rows share one) and entries (-t 4/5, weighted = 1)
     long long it = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (it >= n_items) return;
     int b = blockIdx.y;
@@ -320,7 +321,7 @@ extern "C" __global__ void lmer_index_query(
     double wt = weights[t];
     double* row = out + (long long)b * S;
     if (weighted) {
-        wt *= wx[i];
+        wt *= wx[(long long)b * wx_stride + i];
         for (long long e = offsets[v]; e < offsets[v + 1]; e++)
             atomicAdd(&row[ids[e]], wt * vals[e]);
         return;
@@ -371,7 +372,6 @@ class LmerIndex:
         ids = np.tile(np.repeat(np.arange(self.S, dtype=np.int32), W), len(blocks))
         # Window weights (-t 4/5): each entry's, and the query windows' (row_weights)
         self.row_weights = kernel.row_weights
-        self.window_weights = kernel.window_weights
         vals = None
         if (
             kernel.window_weights(W) is not None
@@ -539,8 +539,11 @@ class LmerIndex:
         bx = cp.ascontiguousarray(bx, dtype=cp.uint32)
         B, W = bx.shape
         weighted = vals is not None
+        wx_stride = 0
         if weighted:
-            wx = cp.asarray(self.window_weights(W))
+            wx_np = np.ascontiguousarray(self.row_weights(bx))
+            wx = cp.asarray(wx_np)
+            wx_stride = W if wx_np.shape[0] > 1 else 0
         else:
             wx = vals = cp.zeros(1, dtype=cp.uint8)
         out = cp.zeros((B, self.S), dtype=cp.float64)
@@ -563,7 +566,8 @@ class LmerIndex:
                     np.int64(self.n_lmers),
                     np.int32(self.S),
                     out[b0 : b0 + nb],
-                    wx,
+                    wx[b0:] if wx_stride else wx,
+                    np.int32(wx_stride),
                     vals,
                     np.int32(weighted),
                 ),

@@ -286,12 +286,15 @@ void fused_pairwise_idx(
 
     const bool use_shared = (b_first == b_last);
 
+    // PAD windows (0xFFFFFFFF, past a shorter sequence's) are skipped
     double acc = 0.0;
     for (int i = 0; i < Wx; i++) {
         unsigned int bx_val = use_shared ? s_bx[i]
                                          : bx_packed[b * Wx + i];
+        if (bx_val == 0xFFFFFFFFu) continue;
         for (int j = 0; j < Wy; j++) {
             unsigned int by_val = by_packed[j * S + s];
+            if (by_val == 0xFFFFFFFFu) continue;
             unsigned int x = bx_val ^ by_val;
             unsigned int mismatches = ((x >> 1) | x) & 0x55555555u;
             int mismatch_count = __popc(mismatches);
@@ -327,11 +330,15 @@ void fused_cross_diagonal(
     const int b = blockDim.x * blockIdx.x + threadIdx.x;
     if (b >= B) return;
 
+    // PAD windows (0xFFFFFFFF, past a shorter sequence's) are skipped
     double acc = 0.0;
     for (int i = 0; i < W; i++) {
         unsigned int bx_val = bx_packed[b * W + i];
+        if (bx_val == 0xFFFFFFFFu) continue;
         for (int j = 0; j < W_rc; j++) {
-            unsigned int x = bx_val ^ bx_rc_packed[b * W_rc + j];
+            unsigned int y = bx_rc_packed[b * W_rc + j];
+            if (y == 0xFFFFFFFFu) continue;
+            unsigned int x = bx_val ^ y;
             unsigned int mismatches = ((x >> 1) | x) & 0x55555555u;
             int mismatch_count = __popc(mismatches);
             int matches = l - mismatch_count;
@@ -405,11 +412,15 @@ _METAL_PAIRWISE_SOURCE = """
     uint b = idx / S;
     uint s = idx % S;
 
+    // PAD windows (0xFFFFFFFF, past a shorter sequence's) are skipped
     float acc = 0.0f;
     for (uint i = 0; i < Wx; i++) {
         uint32_t bx_val = bx_packed[b * Wx + i];
+        if (bx_val == 0xFFFFFFFFu) continue;
         for (uint j = 0; j < Wy; j++) {
-            uint32_t xored = bx_val ^ by_packed[s * Wy + j];
+            uint32_t by_val = by_packed[s * Wy + j];
+            if (by_val == 0xFFFFFFFFu) continue;
+            uint32_t xored = bx_val ^ by_val;
             uint32_t mask = ((xored >> 1) | xored) & 0x55555555u;
             uint mm = popcount(mask);
             uint matches = l - mm;
@@ -431,11 +442,15 @@ _METAL_CROSS_DIAGONAL_SOURCE = """
 
     if (idx >= B) return;
 
+    // PAD windows (0xFFFFFFFF, past a shorter sequence's) are skipped
     float acc = 0.0f;
     for (uint i = 0; i < W; i++) {
         uint32_t bx_val = bx_packed[idx * W + i];
+        if (bx_val == 0xFFFFFFFFu) continue;
         for (uint j = 0; j < W_rc; j++) {
-            uint32_t xored = bx_val ^ bx_rc_packed[idx * W_rc + j];
+            uint32_t y = bx_rc_packed[idx * W_rc + j];
+            if (y == 0xFFFFFFFFu) continue;
+            uint32_t xored = bx_val ^ y;
             uint32_t mask = ((xored >> 1) | xored) & 0x55555555u;
             uint mm = popcount(mask);
             uint matches = l - mm;
@@ -639,7 +654,7 @@ class DirectGkmKernel(PackedGkmKernel):
 
         if is_padded(bx):
             raise NotImplementedError(
-                "ISM on sequences of different lengths: docs/design/variable-length.md, stage 4"
+                "ISM on sequences of different lengths: docs/design/variable-length.md, stage 6"
             )
         if device_of(bx) != "cpu":
             return super().raw_diag_mutants(bx, bx_rc, new, new_rc, diag)

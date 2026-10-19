@@ -54,12 +54,20 @@ def _rc_windows(packed, l):
 
 def is_padded(packed) -> bool:
     """Whether any row of packed windows holds PAD_WINDOW."""
-    return packed is not None and bool((packed == PAD_WINDOW).any())
+    if packed is None:
+        return False
+    if is_mlx(packed):
+        packed = np.asarray(packed)
+    return bool((packed == PAD_WINDOW).any())
 
 
 def window_counts(packed) -> np.ndarray:
-    """[R] int64 number of windows (non-PAD) in each row, on CPU."""
-    return np.asarray(to_cpu(packed) != PAD_WINDOW).sum(axis=1).astype(np.int64)
+    """[R] int64 number of windows (non-PAD) in each row, on CPU (counted on
+    packed's device, so only the counts move)."""
+    if is_mlx(packed):
+        packed = np.asarray(packed)
+    n = (packed != PAD_WINDOW).sum(axis=1)
+    return np.asarray(to_cpu(n)).astype(np.int64)
 
 
 def window_spans(packed) -> np.ndarray:
@@ -69,15 +77,6 @@ def window_spans(packed) -> np.ndarray:
     n = valid.sum(axis=1)
     start = np.where(n > 0, valid.argmax(axis=1), 0)
     return np.stack([start, start + n], axis=1).astype(np.int64)
-
-
-def require_cpu_for_lengths(dev):
-    """Sequences of different lengths (PAD windows) run on CPU only for now."""
-    if dev != "cpu":
-        raise NotImplementedError(
-            "sequences of different lengths run on CPU only for now "
-            "(docs/design/variable-length.md, stage 5)"
-        )
 
 
 def device_of(x) -> str:
@@ -130,14 +129,6 @@ class PackedGkmKernel(GkmKernel):
             raise ValueError(
                 f"Sequence length {L} is shorter than window length {self.l}"
             )
-
-    def _uniform_weights(self, packed, rc=False):
-        """[1, W] window weights for rows of W windows each (None when
-        unweighted), on CPU."""
-        if packed is None or self.window_weights(packed.shape[1]) is None:
-            return None
-        w = self.window_weights(packed.shape[1])[None]
-        return np.ascontiguousarray(w[:, ::-1]) if rc else w
 
     def pack(self, x, lengths=None):
         """[B, W] uint32 packed windows of one-hot x, on x's device.
@@ -211,17 +202,8 @@ class PackedGkmKernel(GkmKernel):
         dev = device_of(bx)
         plan = self._masked_plan()
         small = min(bx.shape[0], by.shape[0]) < _MASKED_MIN_ROWS
-        if dev == "cpu":
-            wx, wy = self.row_weights(bx), self.row_weights(by)
-            wy_rc = self.row_weights(by_rc, rc=True)
-        else:
-            # The CUDA and Metal kernels don't skip PAD: the model refuses
-            # padded sequences off the CPU (GkmSVM._check_device), and PAD in
-            # ISM's window sets cancels in new - old, so weights stay [1, W]
-            wx, wy, wy_rc = (
-                self._uniform_weights(a, rc)
-                for a, rc in ((bx, False), (by, False), (by_rc, True))
-            )
+        wx, wy = self.row_weights(bx), self.row_weights(by)
+        wy_rc = self.row_weights(by_rc, rc=True)
         if plan is not None and not (small and self._HAS_BRUTE):
             return _masked(bx, by, plan, by_rc, diag_offset, dev, wx, wy, wy_rc)
         if not self._HAS_BRUTE:
@@ -314,9 +296,9 @@ def _masked(bx, by, plan, by_rc, diag_offset, dev, wx=None, wy=None, wy_rc=None)
             bx, by, plan, by_rc, diag_offset=diag_offset, wx=wx, wy=wy, wy_rc=wy_rc
         )
     if dev == "cuda":
-        # Off the CPU no row is padded (_check_unpadded): weights are one [W] row
-        w1 = (None, None) if wx is None else (wx[0], wy[0])
-        return masked.masked_pairwise_gpu(bx, by, plan, by_rc, wx=w1[0], wy=w1[1])
+        return masked.masked_pairwise_gpu(
+            bx, by, plan, by_rc, wx=wx, wy=wy, wy_rc=wy_rc
+        )
     import mlx.core as mx
 
     if wx is not None:  # Metal counts in int32; weighted windows join on the CPU

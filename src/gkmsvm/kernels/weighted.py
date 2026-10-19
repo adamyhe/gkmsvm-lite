@@ -263,7 +263,7 @@ class CenterWeightedGkmKernel(EstTruncGkmKernel):
         fwd = np.ascontiguousarray(to_cpu(bx))
         if is_padded(fwd):
             raise NotImplementedError(
-                "ISM on sequences of different lengths: docs/design/variable-length.md, stage 4"
+                "ISM on sequences of different lengths: docs/design/variable-length.md, stage 6"
             )
         B, W = fwd.shape
         rc = (

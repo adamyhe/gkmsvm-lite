@@ -37,7 +37,6 @@ def ism(
     Returns:
         [B, 4, L] score deltas.
     """
-    model._require_cpu_if_padded()
     x = model._match_device(x)
     fn = _ism_packed if model._sv_packed() is not None else _ism_mutants
 

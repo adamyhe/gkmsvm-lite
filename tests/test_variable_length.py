@@ -162,15 +162,6 @@ def test_long_sequences_warn():
         model([long, "ACGTACGTAC"])
 
 
-def test_padded_input_off_cpu_raises():
-    pytest.importorskip("mlx.core")
-    rng = np.random.default_rng(5)
-    model, _ = _model(_seqs(rng, 20, 15, 25), rng.normal(size=20), "estimated")
-    model.mlx()
-    with pytest.raises(NotImplementedError, match="CPU only"):
-        model(["ACGTACGTACGTAAC", "ACGTACGTACGTAACGT"])
-
-
 @pytest.mark.parametrize("kernel_type", ["estimated", "gkmrbf", "wgkm"])
 def test_fixed_queries_against_mixed_svs(kernel_type):
     """ISM, mutation impact and to_deltasvm on a model whose SVs differ in
@@ -233,7 +224,9 @@ def test_fixed_queries_against_mixed_svs(kernel_type):
         )
 
 
-@pytest.mark.parametrize("kernel_type", ["gkm_cnt", "estimated", "gkmrbf", "wgkm", "wgkmrbf"])
+@pytest.mark.parametrize(
+    "kernel_type", ["gkm_cnt", "estimated", "gkmrbf", "wgkm", "wgkmrbf"]
+)
 @pytest.mark.parametrize("mode", ["hypothetical", "perturbation", "importance"])
 def test_gkmexplain_on_mixed_svs(kernel_type, mode):
     """Attributions are a sum over SVs (an RBF SV's factor depends on its own
@@ -247,30 +240,130 @@ def test_gkmexplain_on_mixed_svs(kernel_type, mode):
     model, _ = _model(svs, coef, kernel_type)
     x = np.concatenate([_onehot(q) for q in _seqs(rng, 3, 25, 25)])
     expected = sum(
-        np.asarray(gkmexplain(GkmSVM(_onehot(s), c[None], 0.0, kernel_type, PARAMS), x,
-                              mode=mode))
+        np.asarray(
+            gkmexplain(
+                GkmSVM(_onehot(s), c[None], 0.0, kernel_type, PARAMS), x, mode=mode
+            )
+        )
         for s, c in zip(svs, coef)
     )
     for table, index in [(True, True), (False, True), (False, False)]:
         model.use_explain_table, model.use_lmer_index = table, index
         model.clear_caches()
-        np.testing.assert_allclose(gkmexplain(model, x, mode=mode), expected, rtol=1e-10,
-                                   atol=1e-13, err_msg=f"{table=} {index=}")
+        np.testing.assert_allclose(
+            gkmexplain(model, x, mode=mode),
+            expected,
+            rtol=1e-10,
+            atol=1e-13,
+            err_msg=f"{table=} {index=}",
+        )
 
 
-def test_mixed_svs_off_cpu_raise():
+def _device(device):
+    """(function moving an array to device, rtol), or skip."""
+    from gkmsvm.backend import HAS_CUPY, to_gpu, to_mlx
+
+    if device == "cuda":
+        if not HAS_CUPY:
+            pytest.skip("CuPy not installed")
+        return to_gpu, 1e-9
     pytest.importorskip("mlx.core")
+    return to_mlx, 2e-4  # float32
+
+
+def _np(a):
+    from gkmsvm.backend import to_cpu
+
+    return np.asarray(to_cpu(a), dtype=np.float64)
+
+
+def _close(got, expected, rtol, msg):
+    """Relative to the largest value: estimated_full's signed table cancels to
+    ~1e-17 in places."""
+    np.testing.assert_allclose(
+        _np(got), expected, rtol=rtol, atol=rtol * np.abs(expected).max(), err_msg=msg
+    )
+
+
+@pytest.mark.parametrize("device", ["cuda", "mlx"])
+@pytest.mark.parametrize("kernel_type", KERNELS)
+def test_padded_kernels_on_device(device, kernel_type):
+    """CUDA and Metal kernels skip PAD: padded rows and columns through the
+    masked join and brute force, and the self-kernels, equal the CPU's."""
+    from gkmsvm.svm import as_batch
+
+    move, rtol = _device(device)
+
+    rng = np.random.default_rng(10)
+    base = GkmSVM(_onehot("ACGTACGT"), np.ones(1), 0.0, kernel_type, PARAMS).kernel.base
+    x, lx = as_batch(_seqs(rng, 20, 12, 30))
+    y, ly = as_batch(_seqs(rng, 25, 9, 33))
+    bx, bx_rc = base.pack_both(x, lx)
+    by, by_rc = base.pack_both(y, ly)
+    for masked in (True, False):
+        base.use_masked = masked
+        expected = base.raw_packed(bx, by, by_rc)
+        got = base.raw_packed(move(bx), move(by), move(by_rc))
+        _close(got, expected, rtol, f"{masked=}")
+    base.use_masked = True
+    _close(
+        base.raw_diag_packed(move(bx), move(bx_rc)),
+        base.raw_diag_packed(bx, bx_rc),
+        rtol,
+        "diag",
+    )
+
+
+@pytest.mark.parametrize("device", ["cuda", "mlx"])
+@pytest.mark.parametrize("kernel_type", KERNELS)
+def test_mixed_lengths_on_device(device, kernel_type):
+    """Scoring mixed-length queries, and ISM, mutation impact, variant scores,
+    GkmExplain and to_deltasvm on a model with mixed-length SVs, equal the CPU
+    on every path."""
+    from gkmsvm import gkmexplain
     from gkmsvm.explain import mutation_impact
     from gkmsvm.ism import ism
 
-    rng = np.random.default_rng(9)
-    model, _ = _model(_seqs(rng, 20, 15, 25), rng.normal(size=20), "estimated")
-    model.mlx()
-    x = _onehot("ACGTACGTACGTAACGTA")
-    for call in (lambda: ism(model, x), lambda: mutation_impact(model, x, x),
-                 lambda: model.score_variants(x, x)):
-        with pytest.raises(NotImplementedError, match="CPU only"):
-            call()
+    rng = np.random.default_rng(11)
+    svs, queries = _seqs(rng, 30, 10, 40), _seqs(rng, 20, 8, 45)
+    model, _ = _model(svs, rng.normal(size=30), kernel_type)
+    q = np.concatenate([_onehot(s) for s in _seqs(rng, 3, 25, 25)])
+    alt = q.copy()
+    alt[:, :, 12] = np.roll(alt[:, :, 12], 1, axis=1)
+    paths = [(True, False, True), (False, False, True), (False, False, False)]
+    if kernel_type in ("gkm_cnt", "estimated_full", "estimated", "wgkm"):
+        paths.append((False, True, True))
+
+    def run(m):
+        out = {}
+        for index, table, masked in paths:
+            m.use_lmer_index, m.use_lmer_table = index, table
+            m.kernel.base.use_masked = masked
+            m.clear_caches()
+            key = f"{index=} {table=} {masked=}"
+            out[f"score {key}"] = m(queries)
+            out[f"ism {key}"] = ism(m, m._match_device(q))
+            out[f"impact {key}"] = mutation_impact(
+                m, m._match_device(q), m._match_device(alt)
+            )
+            out[f"variants {key}"] = m.score_variants(
+                m._match_device(q), m._match_device(alt)
+            )
+            for mode in ("hypothetical", "perturbation"):
+                m.use_explain_table = table
+                out[f"explain {mode} {key}"] = gkmexplain(
+                    m, m._match_device(q), mode=mode
+                )
+        if kernel_type not in ("gkmrbf", "wgkmrbf"):
+            out["deltasvm"] = m.to_deltasvm(query_norm=True).weights
+        return {k: _np(v) for k, v in out.items()}
+
+    with np.errstate(all="ignore"):
+        expected = run(model)
+        _, rtol = _device(device)
+        got = run(model.cuda() if device == "cuda" else model.mlx())
+    for key in expected:
+        _close(got[key], expected[key], rtol, key)
 
 
 def test_npz_and_lsgkm_round_trip(tmp_path):

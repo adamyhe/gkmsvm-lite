@@ -14,15 +14,14 @@ The main pipeline works on **fixed-length windows**, as the ENCODE gkm-SVM and D
 
 - Importing and scoring LS-GKM models whose SVs differ in length works by default (it can't be avoided: the SVs are the model).
 - Mixed-length queries and training are opt-in: `--variable-length` in the CLI, `lengths=` or a list of sequences in Python.
-- Priorities follow from this. CPU kernels for padded SVs and queries, the importers and serialization come first; GkmExplain and ISM on models with mixed-length SVs (queries still fixed) next. Mixed-length queries for ISM/GkmExplain, mixed-length training, and the CUDA/Metal kernels for padded input come last, as demand shows.
-- Benchmark S3B gives both tools the same 300 bp summit windows.
+- Priorities follow from this. CPU kernels for padded SVs and queries, the importers and serialization come first; GkmExplain and ISM on models with mixed-length SVs (queries still fixed) next. The CUDA/Metal kernels for padded input followed. Mixed-length queries for ISM/GkmExplain and mixed-length training come last, as demand shows.
 
 ## Problem (compatibility)
 
 LS-GKM trains on and scores sequences of any length (up to `MAX_SEQ_LENGTH` = 2048 bp in `libsvm_gkm.h`). Each sequence has its own `seqlen - L + 1` windows. For `-t 4/5`, its window weights come from its own window count (`gkmkernel_new_object`). gkmsvm-lite assumes one length per array everywhere:
 
 - **Importing** an LS-GKM model whose SVs differ in length raises (`importers.build_model`). Many real models are like this, since LS-GKM is usually trained on peaks.
-- **Training and the CLI** stack per-sequence one-hot arrays, so mixed lengths raise. Benchmark S3B gave LS-GKM the variable-length peaks and gkmsvm-lite fixed 300 bp windows (`benchmarks/ctcf_data.py`); it now gives both the windows.
+- **Training and the CLI** stack per-sequence one-hot arrays, so mixed lengths raise. (No benchmark is affected: every one uses fixed windows. S3B trains both tools on the same 300 bp CTCF summit windows; only Lee 2016's original experiment used the variable-length peaks.)
 - **`model()`, ISM, GkmExplain and mutation impact** take `[B, 4, L]` with a single L.
 
 ## What LS-GKM computes
@@ -114,7 +113,7 @@ Using the Beer-lab and kundajelab builds, as for the existing fixtures (`benchma
 2. **Models:** importers (lift the error), `sv_lengths`, npz, `save_lsgkm`.
 3. **Fixed-length pipeline:** `extract_loci` with summits, `center_crop`, `--bed`/`--genome`/`--length`/`--variable-length` in the CLI, `length` in training.
 4. **Interpretation with mixed-length SVs:** ISM, GkmExplain (all paths) and mutation impact for imported models, queries fixed; gkmexplain fixtures. Done: they match the kundajelab fork's gkmexplain on gkmtrain-built mixed-length models.
-5. **Benchmarks:** S3B on the same windows for both tools.
-6. **Later, as needed:** mixed-length queries for ISM/GkmExplain, mixed-length training (Gram, SMO, Nyström), CUDA and Metal kernels for padded input.
+5. **CUDA and Metal:** the brute-force, self-kernel, masked-join (index build and join) and GkmExplain kernels skip PAD; weighted joins, l-mer index queries and GkmExplain take per-row weights. Every path on padded input equals the CPU (`test_padded_kernels_on_device`, `test_mixed_lengths_on_device`).
+6. **Later, as needed:** mixed-length queries for ISM/GkmExplain, mixed-length training (Gram, SMO, Nyström).
 
 Each stage is one commit on one branch.

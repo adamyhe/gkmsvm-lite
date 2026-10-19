@@ -53,7 +53,7 @@ def _add_input_args(
             "--variable-length",
             action="store_true",
             help="Score FASTA records at their own lengths, as LS-GKM does "
-            "(compatibility; CPU only), instead of cropping.",
+            "(compatibility), instead of cropping.",
         )
     parser.add_argument(
         "--allow-other-bases",
