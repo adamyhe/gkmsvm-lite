@@ -9,8 +9,8 @@ that set on hg19:
 
   positives  the wgEncodeBroadHistoneH1hescCtcf SPP optimal peaks (55,782; of
              the two H1-hESC CTCF sets the one with enough peaks for 90k), as
-             300 bp windows centered on each summit. LS-GKM trained on the
-             variable-length peaks; gkmsvm-lite trains on fixed-length windows.
+             300 bp windows centered on each summit (Lee 2016 used the
+             variable-length peaks; here both tools train on these windows).
   negatives  random 300 bp windows without N that overlap no peak, drawn to
              the positives' joint distribution of GC fraction and repeat
              fraction (soft-masked lowercase), in bins of 0.02 x 0.1.
