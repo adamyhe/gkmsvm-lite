@@ -72,13 +72,14 @@
 - [x] lsgkm oracles for every kernel type (`-t 0` to `-t 5`): gkmpredict scores; gkmexplain modes 0/1/4 on every CPU explain path and mode 5 (mutation impact) on every scoring path, with N and odd/even window counts (kundajelab fork, `benchmarks/dev/lsgkm_wgkm_fixtures.py`)
 - [x] N as in LS-GKM (A on the forward strand, T on the reverse); N accepted in every string input; `--allow-other-bases` / `allow_other` reads other letters as N (as gkmpredict does)
 - [x] `-t 0` truncated at `d` mismatches, as LS-GKM
+- [x] Fixed-length pipeline (`--genome` summit windows, `--length` center-crop, 300 bp for training) and sequences of different lengths for compatibility: padded SVs and queries on CPU, CUDA and Metal; imported mixed-length models, npz/LS-GKM round trips; GkmExplain, ISM and mutation impact on mixed-length SVs (gkmpredict and gkmexplain oracles on gkmtrain-built mixed-length models)
 
 ## Next
 
 Gaps found by checking against LS-GKM (2026-10-19), most important first:
 
-- [ ] **Variable-length sequences** — LS-GKM trains on and scores sequences of different lengths; here importing a model whose SVs differ in length raises, `train_gkmsvm` and the CLI require one length, and `model()` takes one length per call. Packed arrays assume one window count per batch: bucket queries by length, pad SVs with `PAD_WINDOW` (pad windows must never match each other), and keep per-sequence self-kernels and `-t 4/5` window weights right.
-- [ ] **Re-run the CUDA and dsQTL checks** — `tests/test_gpu.py` on a CUDA host after the `-t 0` `d` and N-importance fixes, and `benchmarks/agreement_lsgkm.py` (last run 2026-10-16, before the N packing change: mutation impact matched the paper's `gkmexplain -m 5` outputs to ~5e-6). CUDA explain paths are checked against CPU only, not against lsgkm directly.
+- [ ] **Mixed-length training and mixed-length ISM/GkmExplain queries** — scoring, importers, serialization and interpretation on mixed-length SVs are done (below); `train_gkmsvm` and ISM/GkmExplain queries still take one length (`docs/design/variable-length.md`, stage 6). The main pipeline crops to fixed windows, so this is compatibility only.
+- [ ] **Re-run the dsQTL check** — `tests/test_gpu.py` passes on a CUDA host (2026-10-19, after the `-t 0` `d`, N and padding changes); `benchmarks/agreement_lsgkm.py` still to re-run (last run 2026-10-16, before the N packing change: mutation impact matched the paper's `gkmexplain -m 5` outputs to ~5e-6). CUDA explain paths are checked against CPU only, not against lsgkm directly.
 - [ ] **Training oracle as a test** — `train_gkmsvm` gives gkmtrain's models (`-t 0/2/3/4`, with and without N: same SV counts, held-out scores within ~2e-4), checked by hand only; commit gkmtrain fixtures.
 - [ ] **`-w` positive-class weight** — LS-GKM's `-w` sets C to w*C for positives; not exposed.
 - [ ] **Importer and SVR oracles** — the classic gkmSVM and R gkmSVM importers, and `train_gkmsvr` (vs kundajelab/lsgkm-svr), have no reference-tool fixtures.
