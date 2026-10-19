@@ -14,10 +14,10 @@ GkmExplain analytically decomposes the SVM decision function into per-base impor
 from gkmsvm import gkmexplain
 
 # Importance scores — non-zero only at reference bases
-attr = gkmexplain(model, x, mode="importance")    # [B, 4, L]
+attr = gkmexplain(model, x, mode="importance")  # [B, 4, L]
 
 # Hypothetical importance — all 4 bases at each position
-hyp = gkmexplain(model, x, mode="hypothetical")   # [B, 4, L]
+hyp = gkmexplain(model, x, mode="hypothetical")  # [B, 4, L]
 
 # Perturbation effect — discrete kernel Δ per single-base mutation
 pert = gkmexplain(model, x, mode="perturbation")  # [B, 4, L]

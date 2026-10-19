@@ -94,8 +94,10 @@ BASE_MAP = {"A": 0, "C": 1, "G": 2, "T": 3}
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _load_model(model_path: str, device: str, sv_chunk_size: int | None):
     from gkmsvm.serialization import load_model
+
     model = load_model(model_path)
     if sv_chunk_size is not None:
         model.sv_chunk_size = sv_chunk_size
@@ -110,11 +112,12 @@ def _center_crop(seqs: np.ndarray, target_len: int) -> np.ndarray:
     if L <= target_len:
         return seqs
     start = (L - target_len) // 2
-    return seqs[:, :, start:start + target_len]
+    return seqs[:, :, start : start + target_len]
 
 
-def _score_sequences(model, seqs_ohe: np.ndarray, batch_size: int,
-                     device: str, verbose: bool = True) -> np.ndarray:
+def _score_sequences(
+    model, seqs_ohe: np.ndarray, batch_size: int, device: str, verbose: bool = True
+) -> np.ndarray:
     """Score [N, 4, L] one-hot sequences, return [N] scores."""
     return model(seqs_ohe, batch_size=batch_size, verbose=verbose).flatten()
 
@@ -132,6 +135,7 @@ def _get_sv_len(model) -> int:
 # ---------------------------------------------------------------------------
 # Task 4: Chromatin Activity
 # ---------------------------------------------------------------------------
+
 
 def _load_task4_h5(cell_line: str) -> dict | None:
     """Load Task 4 test split from pre-exported H5."""
@@ -161,13 +165,16 @@ def _load_task4_bed(cell_line: str) -> dict | None:
     import pyfaidx
 
     base = os.path.join(WORK_DIR, "task_4_chromatin_activity/processed_data")
-    genome_fa = os.path.join(WORK_DIR,
-        "refs/GRCh38_no_alt_analysis_set_GCA_000001405.15.fasta")
+    genome_fa = os.path.join(
+        WORK_DIR, "refs/GRCh38_no_alt_analysis_set_GCA_000001405.15.fasta"
+    )
 
     beds = {
         "peaks": os.path.join(base, f"cell_line_expanded_peaks/{cell_line}_peaks.bed"),
         "idr_peaks": os.path.join(base, f"cell_line_idr_peaks/{cell_line}.bed"),
-        "nonpeaks": os.path.join(base, f"cell_line_expanded_peaks/{cell_line}_nonpeaks.bed"),
+        "nonpeaks": os.path.join(
+            base, f"cell_line_expanded_peaks/{cell_line}_nonpeaks.bed"
+        ),
     }
     bw_path = os.path.join(base, f"bigwigs/{cell_line}_unstranded.bw")
 
@@ -179,8 +186,13 @@ def _load_task4_bed(cell_line: str) -> dict | None:
     result = {}
 
     for key, bed_path in beds.items():
-        df = pd.read_csv(bed_path, sep="\t", header=None,
-                         usecols=[0, 1, 2], names=["chrom", "start", "end"])
+        df = pd.read_csv(
+            bed_path,
+            sep="\t",
+            header=None,
+            usecols=[0, 1, 2],
+            names=["chrom", "start", "end"],
+        )
         df = df[df["chrom"].isin(CHROMS_TEST)].reset_index(drop=True)
 
         seqs = []
@@ -188,7 +200,7 @@ def _load_task4_bed(cell_line: str) -> dict | None:
             mid = (row["start"] + row["end"]) // 2
             s = mid - DART_SEQ_LEN // 2
             e = s + DART_SEQ_LEN
-            seq_str = str(fa[row["chrom"]][max(0, s):e]).upper()
+            seq_str = str(fa[row["chrom"]][max(0, s) : e]).upper()
             if len(seq_str) < DART_SEQ_LEN:
                 seq_str = seq_str + "N" * (DART_SEQ_LEN - len(seq_str))
             seqs.append(one_hot_encode(seq_str, allow_n=True))
@@ -197,11 +209,17 @@ def _load_task4_bed(cell_line: str) -> dict | None:
 
         if os.path.exists(bw_path):
             import figwig
+
             mid = (df["start"].to_numpy() + df["end"].to_numpy()) // 2
             # figwig needs starts >= 0; bases past a chromosome end are NaN.
             starts = np.maximum(mid - DART_SEQ_LEN // 2 + CROP, 0)
-            vals = figwig.read_bigwig(bw_path, df["chrom"].to_numpy(), starts,
-                                      DART_SEQ_LEN - 2 * CROP, n_jobs=-1)
+            vals = figwig.read_bigwig(
+                bw_path,
+                df["chrom"].to_numpy(),
+                starts,
+                DART_SEQ_LEN - 2 * CROP,
+                n_jobs=-1,
+            )
             entry["counts"] = np.log1p(np.nansum(vals, axis=1))
 
         result[key] = entry
@@ -218,9 +236,14 @@ def _subsample(seqs, n: int | None, *others, seed: int = 0):
     return (seqs[idx], *(o[idx] for o in others))
 
 
-def run_task4_cell_line(model, cell_line: str, device: str,
-                        batch_size: int, verbose: bool,
-                        max_seqs: int | None = None) -> dict:
+def run_task4_cell_line(
+    model,
+    cell_line: str,
+    device: str,
+    batch_size: int,
+    verbose: bool,
+    max_seqs: int | None = None,
+) -> dict:
     """Run Task 4 for a single cell line on test chromosomes.
 
     max_seqs subsamples each sequence class (for quick validation runs).
@@ -243,7 +266,8 @@ def run_task4_cell_line(model, cell_line: str, device: str,
     nonpeak_counts = None
     if "counts" in nonpeaks:
         nonpeak_seqs, nonpeak_counts = _subsample(
-            nonpeaks["seqs"], max_seqs, np.asarray(nonpeaks["counts"]))
+            nonpeaks["seqs"], max_seqs, np.asarray(nonpeaks["counts"])
+        )
     else:
         (nonpeak_seqs,) = _subsample(nonpeaks["seqs"], max_seqs)
     idr_seqs = _center_crop(idr_seqs, sv_len)
@@ -258,11 +282,12 @@ def run_task4_cell_line(model, cell_line: str, device: str,
     nonpeak_scores = _score_sequences(model, nonpeak_seqs, batch_size, device, verbose)
     elapsed = time.perf_counter() - t0
     total_seqs = len(idr_seqs) + len(nonpeak_seqs)
-    print(f"  Scored {total_seqs} sequences in {elapsed:.1f}s "
-          f"({total_seqs/elapsed:.1f} seq/s)")
+    print(
+        f"  Scored {total_seqs} sequences in {elapsed:.1f}s "
+        f"({total_seqs / elapsed:.1f} seq/s)"
+    )
 
-    labels = np.concatenate([np.ones(len(idr_scores)),
-                             np.zeros(len(nonpeak_scores))])
+    labels = np.concatenate([np.ones(len(idr_scores)), np.zeros(len(nonpeak_scores))])
     all_scores = np.concatenate([idr_scores, nonpeak_scores])
 
     auroc = roc_auc_score(labels, all_scores)
@@ -280,22 +305,30 @@ def run_task4_cell_line(model, cell_line: str, device: str,
 
     if "counts" in data["peaks"] and nonpeak_counts is not None:
         peak_seqs, counts = _subsample(
-            data["peaks"]["seqs"], max_seqs, np.asarray(data["peaks"]["counts"]))
+            data["peaks"]["seqs"], max_seqs, np.asarray(data["peaks"]["counts"])
+        )
         peak_seqs = _center_crop(peak_seqs, sv_len)
         print(f"  Scoring all peaks ({len(peak_seqs)}) for quantitative eval...")
         peak_scores = _score_sequences(model, peak_seqs, batch_size, device, verbose)
         # As DART-Eval: over peaks, and over peaks plus background regions
         all_scores = np.concatenate([peak_scores, nonpeak_scores])
         all_counts = np.concatenate([counts, nonpeak_counts])
-        for name, x, y in (("peaks", peak_scores, counts), ("all", all_scores, all_counts)):
+        for name, x, y in (
+            ("peaks", peak_scores, counts),
+            ("all", all_scores, all_counts),
+        ):
             result[f"pearson_{name}"] = pearsonr(x, y)[0]
             result[f"spearman_{name}"] = spearmanr(x, y)[0]
-            print(f"  Quantitative ({name}): Pearson={result[f'pearson_{name}']:.4f}, "
-                  f"Spearman={result[f'spearman_{name}']:.4f}")
+            print(
+                f"  Quantitative ({name}): Pearson={result[f'pearson_{name}']:.4f}, "
+                f"Spearman={result[f'spearman_{name}']:.4f}"
+            )
         result["n_peaks"] = len(peak_scores)
 
-    print(f"  Classification: AUROC={auroc:.4f}, AUPRC={auprc:.4f} "
-          f"(base rate {result['auprc_baseline']:.4f})")
+    print(
+        f"  Classification: AUROC={auroc:.4f}, AUPRC={auprc:.4f} "
+        f"(base rate {result['auprc_baseline']:.4f})"
+    )
     return result
 
 
@@ -303,8 +336,8 @@ def run_task4_cell_line(model, cell_line: str, device: str,
 # Task 5: Variant Effect Prediction
 # ---------------------------------------------------------------------------
 
-def _load_task5_h5(task_key: str,
-                   indices: np.ndarray | None = None) -> dict | None:
+
+def _load_task5_h5(task_key: str, indices: np.ndarray | None = None) -> dict | None:
     """Load Task 5 allele sequences from pre-exported H5.
 
     If indices is provided, only loads those rows (avoids OOM on caQTL's
@@ -312,8 +345,7 @@ def _load_task5_h5(task_key: str,
     """
     import h5py
 
-    h5_path = os.path.join(WORK_DIR,
-                           "task_5_variant_effect_prediction/data.h5")
+    h5_path = os.path.join(WORK_DIR, "task_5_variant_effect_prediction/data.h5")
     if not os.path.exists(h5_path):
         return None
 
@@ -337,10 +369,14 @@ def _load_task5_h5(task_key: str,
         }
 
 
-def _extract_variant_seqs(variant_df: pd.DataFrame, genome_fa: str,
-                          chrom_col: str, pos_col: str,
-                          a1_col: str, a2_col: str,
-                          ) -> tuple[np.ndarray, np.ndarray]:
+def _extract_variant_seqs(
+    variant_df: pd.DataFrame,
+    genome_fa: str,
+    chrom_col: str,
+    pos_col: str,
+    a1_col: str,
+    a2_col: str,
+) -> tuple[np.ndarray, np.ndarray]:
     """Extract allele1 and allele2 sequences from genome FASTA."""
     from gkmsvm.codec import one_hot_encode
     import pyfaidx
@@ -355,8 +391,8 @@ def _extract_variant_seqs(variant_df: pd.DataFrame, genome_fa: str,
         allele1 = row[a1_col]
         allele2 = row[a2_col]
 
-        left = str(fa[chrom][max(0, pos - half):pos]).upper()
-        right = str(fa[chrom][pos + 1:pos + half]).upper()
+        left = str(fa[chrom][max(0, pos - half) : pos]).upper()
+        right = str(fa[chrom][pos + 1 : pos + half]).upper()
 
         a1_seq = left + allele1 + right
         a2_seq = left + allele2 + right
@@ -382,13 +418,21 @@ def _check_alleles(a1_seqs: np.ndarray, alleles) -> None:
     bases = np.array(list("ACGT"))[a1_seqs[:, :, center].argmax(axis=1)]
     mismatch = (bases != np.asarray(alleles, dtype=str)).mean()
     if mismatch > 0.01:
-        raise ValueError(f"{mismatch:.1%} of allele-1 sequences don't match the variant "
-                         "table's allele1: data.h5 and the TSV are from different versions")
+        raise ValueError(
+            f"{mismatch:.1%} of allele-1 sequences don't match the variant "
+            "table's allele1: data.h5 and the TSV are from different versions"
+        )
 
 
-def _vep_kernel(model, a1_seqs: np.ndarray, a2_seqs: np.ndarray,
-                sv_len: int, batch_size: int, device: str,
-                verbose: bool) -> np.ndarray:
+def _vep_kernel(
+    model,
+    a1_seqs: np.ndarray,
+    a2_seqs: np.ndarray,
+    sv_len: int,
+    batch_size: int,
+    device: str,
+    verbose: bool,
+) -> np.ndarray:
     """VEP via full kernel: score(alt) - score(ref)."""
     a1_crop = _center_crop(a1_seqs, sv_len)
     a2_crop = _center_crop(a2_seqs, sv_len)
@@ -400,9 +444,15 @@ def _vep_kernel(model, a1_seqs: np.ndarray, a2_seqs: np.ndarray,
     return s2 - s1
 
 
-def _vep_gkmexplain(model, a1_seqs: np.ndarray, a2_seqs: np.ndarray,
-                    sv_len: int, batch_size: int, device: str,
-                    verbose: bool) -> np.ndarray:
+def _vep_gkmexplain(
+    model,
+    a1_seqs: np.ndarray,
+    a2_seqs: np.ndarray,
+    sv_len: int,
+    batch_size: int,
+    device: str,
+    verbose: bool,
+) -> np.ndarray:
     """VEP via model.score_variants(method='gkmexplain')."""
     a1_crop = _center_crop(a1_seqs, sv_len)
     a2_crop = _center_crop(a2_seqs, sv_len)
@@ -411,17 +461,30 @@ def _vep_gkmexplain(model, a1_seqs: np.ndarray, a2_seqs: np.ndarray,
     print(f"  [gkmexplain] Computing via score_variants(method='gkmexplain')...")
 
     return model.score_variants(
-        a1_crop, a2_crop, method="gkmexplain",
-        batch_size=batch_size, verbose=verbose,
+        a1_crop,
+        a2_crop,
+        method="gkmexplain",
+        batch_size=batch_size,
+        verbose=verbose,
     ).flatten()
 
 
-def _run_vep_task(model, df: pd.DataFrame, a1_seqs: np.ndarray,
-                  a2_seqs: np.ndarray, sv_len: int,
-                  label_filter_fn, sig_label, ctrl_label,
-                  effect_col: str | None,
-                  vep_method: str, batch_size: int, device: str,
-                  verbose: bool, flip: bool = False) -> dict:
+def _run_vep_task(
+    model,
+    df: pd.DataFrame,
+    a1_seqs: np.ndarray,
+    a2_seqs: np.ndarray,
+    sv_len: int,
+    label_filter_fn,
+    sig_label,
+    ctrl_label,
+    effect_col: str | None,
+    vep_method: str,
+    batch_size: int,
+    device: str,
+    verbose: bool,
+    flip: bool = False,
+) -> dict:
     """Shared VEP evaluation logic for dsQTL and caQTL.
 
     Effects are allele2 - allele1, or allele1 - allele2 with flip (dsQTLs),
@@ -443,11 +506,13 @@ def _run_vep_task(model, df: pd.DataFrame, a1_seqs: np.ndarray,
         a2_sub = a2_seqs
 
     if vep_method == "kernel":
-        logfc_sub = _vep_kernel(model, a1_sub, a2_sub, sv_len,
-                                batch_size, device, verbose)
+        logfc_sub = _vep_kernel(
+            model, a1_sub, a2_sub, sv_len, batch_size, device, verbose
+        )
     elif vep_method == "gkmexplain":
-        logfc_sub = _vep_gkmexplain(model, a1_sub, a2_sub, sv_len,
-                                    batch_size, device, verbose)
+        logfc_sub = _vep_gkmexplain(
+            model, a1_sub, a2_sub, sv_len, batch_size, device, verbose
+        )
     else:
         raise ValueError(f"Unknown VEP method: {vep_method}")
 
@@ -463,8 +528,9 @@ def _run_vep_task(model, df: pd.DataFrame, a1_seqs: np.ndarray,
     print(f"  Evaluated variants: {len(df_used)} ({n_sig} sig, {n_ctrl} ctrl)")
 
     labels = np.concatenate([np.zeros(n_ctrl), np.ones(n_sig)])
-    abs_scores = np.concatenate([np.abs(ctrl["llm_logfc"].values),
-                                 np.abs(sig["llm_logfc"].values)])
+    abs_scores = np.concatenate(
+        [np.abs(ctrl["llm_logfc"].values), np.abs(sig["llm_logfc"].values)]
+    )
 
     auroc = roc_auc_score(labels, abs_scores)
     auprc = average_precision_score(labels, abs_scores)
@@ -481,28 +547,38 @@ def _run_vep_task(model, df: pd.DataFrame, a1_seqs: np.ndarray,
     if effect_col and effect_col in sig.columns:
         sig_with_effect = sig.dropna(subset=[effect_col])
         if len(sig_with_effect) > 10:
-            r_p, _ = pearsonr(sig_with_effect["llm_logfc"],
-                              sig_with_effect[effect_col])
-            r_s, _ = spearmanr(sig_with_effect["llm_logfc"],
-                               sig_with_effect[effect_col])
+            r_p, _ = pearsonr(sig_with_effect["llm_logfc"], sig_with_effect[effect_col])
+            r_s, _ = spearmanr(
+                sig_with_effect["llm_logfc"], sig_with_effect[effect_col]
+            )
             result["pearson_effect"] = r_p
             result["spearman_effect"] = r_s
-            print(f"  Effect size: Pearson={r_p:.4f}, Spearman={r_s:.4f} "
-                  f"(n={len(sig_with_effect)})")
+            print(
+                f"  Effect size: Pearson={r_p:.4f}, Spearman={r_s:.4f} "
+                f"(n={len(sig_with_effect)})"
+            )
 
-    print(f"  Classification: AUROC={auroc:.4f}, AUPRC={auprc:.4f} "
-          f"(base rate {result['auprc_baseline']:.4f})")
+    print(
+        f"  Classification: AUROC={auroc:.4f}, AUPRC={auprc:.4f} "
+        f"(base rate {result['auprc_baseline']:.4f})"
+    )
     return result, df
 
 
-def run_task5_dsqtl(model, device: str, batch_size: int, verbose: bool,
-                    vep_method: str = "kernel",
-                    save_scores_dir: str | None = None,
-                    max_variants: int | None = None) -> dict:
+def run_task5_dsqtl(
+    model,
+    device: str,
+    batch_size: int,
+    verbose: bool,
+    vep_method: str = "kernel",
+    save_scores_dir: str | None = None,
+    max_variants: int | None = None,
+) -> dict:
     """Run Task 5 dsQTL benchmark (Yoruban LCL dsQTLs, hg19)."""
     tsv_path = os.path.join(
-        WORK_DIR, "task_5_variant_effect_prediction/input_data/"
-        "yoruban.dsqtls.benchmarking.tsv")
+        WORK_DIR,
+        "task_5_variant_effect_prediction/input_data/yoruban.dsqtls.benchmarking.tsv",
+    )
 
     if not os.path.exists(tsv_path):
         print(f"  SKIP dsQTL: missing {tsv_path}", file=sys.stderr)
@@ -525,9 +601,13 @@ def run_task5_dsqtl(model, device: str, batch_size: int, verbose: bool,
             return {}
         print(f"  Extracting sequences from FASTA ({len(df)} variants)...")
         a1_seqs, a2_seqs = _extract_variant_seqs(
-            df, genome_fa,
-            chrom_col="var.chrom", pos_col="var.pos",
-            a1_col="var.allele1", a2_col="var.allele2")
+            df,
+            genome_fa,
+            chrom_col="var.chrom",
+            pos_col="var.pos",
+            a1_col="var.allele1",
+            a2_col="var.allele2",
+        )
 
     if max_variants and max_variants < len(df):
         print(f"  Truncating to {max_variants} variants")
@@ -542,19 +622,30 @@ def run_task5_dsqtl(model, device: str, batch_size: int, verbose: bool,
 
     t0 = time.perf_counter()
     result, df_scored = _run_vep_task(
-        model, df, a1_seqs, a2_seqs, sv_len,
-        label_filter_fn=label_filter, sig_label=1, ctrl_label=-1,
+        model,
+        df,
+        a1_seqs,
+        a2_seqs,
+        sv_len,
+        label_filter_fn=label_filter,
+        sig_label=1,
+        ctrl_label=-1,
         effect_col="obs.estimate",
-        vep_method=vep_method, batch_size=batch_size,
-        device=device, verbose=verbose, flip=True)
+        vep_method=vep_method,
+        batch_size=batch_size,
+        device=device,
+        verbose=verbose,
+        flip=True,
+    )
     result["task"] = "dsQTL"
     result["elapsed"] = time.perf_counter() - t0
     print(f"  Elapsed: {result['elapsed']:.1f}s")
 
     if save_scores_dir:
         os.makedirs(save_scores_dir, exist_ok=True)
-        scores_df = df_scored[["var.chrom", "var.pos", "var.allele1",
-                               "var.allele2", "llm_logfc"]].copy()
+        scores_df = df_scored[
+            ["var.chrom", "var.pos", "var.allele1", "var.allele2", "llm_logfc"]
+        ].copy()
         # DART-Eval reads dsQTL effects as allele1_scores - allele2_scores
         scores_df["allele1_scores"] = scores_df["llm_logfc"]
         scores_df["allele2_scores"] = 0.0
@@ -565,14 +656,19 @@ def run_task5_dsqtl(model, device: str, batch_size: int, verbose: bool,
     return result
 
 
-def run_task5_caqtl(model, device: str, batch_size: int, verbose: bool,
-                    vep_method: str = "kernel",
-                    save_scores_dir: str | None = None,
-                    max_variants: int | None = None) -> dict:
+def run_task5_caqtl(
+    model,
+    device: str,
+    batch_size: int,
+    verbose: bool,
+    vep_method: str = "kernel",
+    save_scores_dir: str | None = None,
+    max_variants: int | None = None,
+) -> dict:
     """Run Task 5 caQTL benchmark (African caQTLs, hg38)."""
     tsv_path = os.path.join(
-        WORK_DIR, "task_5_variant_effect_prediction/input_data/"
-        "Afr.CaQTLS.tsv")
+        WORK_DIR, "task_5_variant_effect_prediction/input_data/Afr.CaQTLS.tsv"
+    )
 
     if not os.path.exists(tsv_path):
         print(f"  SKIP caQTL: missing {tsv_path}", file=sys.stderr)
@@ -586,8 +682,7 @@ def run_task5_caqtl(model, device: str, batch_size: int, verbose: bool,
 
     mask = (df["IsUsed"] == True) & (df["in_peaks"] == True)
     keep_idx = np.where(mask.values)[0]
-    print(f"  Pre-filtering: {len(keep_idx)}/{len(df)} variants "
-          f"(IsUsed & in_peaks)")
+    print(f"  Pre-filtering: {len(keep_idx)}/{len(df)} variants (IsUsed & in_peaks)")
 
     if max_variants and max_variants < len(keep_idx):
         keep_idx = keep_idx[:max_variants]
@@ -601,16 +696,21 @@ def run_task5_caqtl(model, device: str, batch_size: int, verbose: bool,
         _check_alleles(a1_seqs, df["allele1"].to_numpy()[keep_idx])
     else:
         genome_fa = os.path.join(
-            WORK_DIR, "refs/GRCh38_no_alt_analysis_set_GCA_000001405.15.fasta")
+            WORK_DIR, "refs/GRCh38_no_alt_analysis_set_GCA_000001405.15.fasta"
+        )
         if not os.path.exists(genome_fa):
             print(f"  SKIP caQTL: missing {genome_fa}", file=sys.stderr)
             return {}
         df_sub = df.iloc[keep_idx].reset_index(drop=True)
         print(f"  Extracting sequences from FASTA ({len(df_sub)} variants)...")
         a1_seqs, a2_seqs = _extract_variant_seqs(
-            df_sub, genome_fa,
-            chrom_col="chr_hg38", pos_col="pos_hg38",
-            a1_col="allele1", a2_col="allele2")
+            df_sub,
+            genome_fa,
+            chrom_col="chr_hg38",
+            pos_col="pos_hg38",
+            a1_col="allele1",
+            a2_col="allele2",
+        )
 
     df_filtered = df.iloc[keep_idx].reset_index(drop=True)
     df_filtered["_label"] = df_filtered["label"]
@@ -622,19 +722,29 @@ def run_task5_caqtl(model, device: str, batch_size: int, verbose: bool,
 
     t0 = time.perf_counter()
     result, df_scored = _run_vep_task(
-        model, df_filtered, a1_seqs, a2_seqs, sv_len,
-        label_filter_fn=label_filter, sig_label=1, ctrl_label=0,
+        model,
+        df_filtered,
+        a1_seqs,
+        a2_seqs,
+        sv_len,
+        label_filter_fn=label_filter,
+        sig_label=1,
+        ctrl_label=0,
         effect_col=beta_col,
-        vep_method=vep_method, batch_size=batch_size,
-        device=device, verbose=verbose)
+        vep_method=vep_method,
+        batch_size=batch_size,
+        device=device,
+        verbose=verbose,
+    )
     result["task"] = "caQTL"
     result["elapsed"] = time.perf_counter() - t0
     print(f"  Elapsed: {result['elapsed']:.1f}s")
 
     if save_scores_dir:
         os.makedirs(save_scores_dir, exist_ok=True)
-        scores_df = df_scored[["chr_hg38", "pos_hg38", "allele1",
-                               "allele2", "llm_logfc"]].copy()
+        scores_df = df_scored[
+            ["chr_hg38", "pos_hg38", "allele1", "allele2", "llm_logfc"]
+        ].copy()
         scores_df["allele1_scores"] = 0.0
         scores_df["allele2_scores"] = scores_df["llm_logfc"]
         out_path = os.path.join(save_scores_dir, "caqtl_scores.tsv")
@@ -648,46 +758,85 @@ def run_task5_caqtl(model, device: str, batch_size: int, verbose: bool,
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("-m", "--model", required=True,
-                        help="Model file (.npz or .model.txt[.gz]).")
-    parser.add_argument("--task", default="all",
-                        choices=["all", "activity", "vep"],
-                        help="Which DART-Eval tasks to run.")
-    parser.add_argument("--cell-lines", nargs="+", default=CELL_LINES,
-                        choices=CELL_LINES,
-                        help="Cell lines for Task 4 (default: all 5).")
-    parser.add_argument("--vep-method", default="kernel",
-                        choices=["kernel", "gkmexplain"],
-                        help="VEP scoring method (default: kernel).")
-    parser.add_argument("--device", default="cpu",
-                        choices=["cpu", "cuda"],
-                        help="Compute device (default: cpu).")
-    parser.add_argument("--batch-size", type=int, default=256,
-                        help="Batch size (default: 256).")
-    parser.add_argument("--sv-chunk-size", default=None,
-                        type=lambda s: None if s.lower() == 'none' else int(s),
-                        help="SV chunk size (default: None = no chunking).")
-    parser.add_argument("--work-dir", default=None,
-                        help="DART-Eval data directory (overrides DART_WORK_DIR).")
-    parser.add_argument("--output", default=None,
-                        help="Save results summary to TSV file.")
-    parser.add_argument("--save-scores", default=None, metavar="DIR",
-                        help="Save VEP allele scores in DART-Eval TSV format.")
-    parser.add_argument("--vep-tasks", default="all",
-                        choices=["all", "dsqtl", "caqtl"],
-                        help="Which VEP datasets to run (default: all).")
-    parser.add_argument("--max-variants", type=int, default=None,
-                        help="Max variants to score (for quick validation runs).")
-    parser.add_argument("--max-seqs", type=int, default=None,
-                        help="Task 4: random subsample of each sequence class "
-                        "(for quick validation runs).")
-    parser.add_argument("-v", "--verbose", action="store_true",
-                        help="Show progress bars.")
+    parser.add_argument(
+        "-m", "--model", required=True, help="Model file (.npz or .model.txt[.gz])."
+    )
+    parser.add_argument(
+        "--task",
+        default="all",
+        choices=["all", "activity", "vep"],
+        help="Which DART-Eval tasks to run.",
+    )
+    parser.add_argument(
+        "--cell-lines",
+        nargs="+",
+        default=CELL_LINES,
+        choices=CELL_LINES,
+        help="Cell lines for Task 4 (default: all 5).",
+    )
+    parser.add_argument(
+        "--vep-method",
+        default="kernel",
+        choices=["kernel", "gkmexplain"],
+        help="VEP scoring method (default: kernel).",
+    )
+    parser.add_argument(
+        "--device",
+        default="cpu",
+        choices=["cpu", "cuda"],
+        help="Compute device (default: cpu).",
+    )
+    parser.add_argument(
+        "--batch-size", type=int, default=256, help="Batch size (default: 256)."
+    )
+    parser.add_argument(
+        "--sv-chunk-size",
+        default=None,
+        type=lambda s: None if s.lower() == "none" else int(s),
+        help="SV chunk size (default: None = no chunking).",
+    )
+    parser.add_argument(
+        "--work-dir",
+        default=None,
+        help="DART-Eval data directory (overrides DART_WORK_DIR).",
+    )
+    parser.add_argument(
+        "--output", default=None, help="Save results summary to TSV file."
+    )
+    parser.add_argument(
+        "--save-scores",
+        default=None,
+        metavar="DIR",
+        help="Save VEP allele scores in DART-Eval TSV format.",
+    )
+    parser.add_argument(
+        "--vep-tasks",
+        default="all",
+        choices=["all", "dsqtl", "caqtl"],
+        help="Which VEP datasets to run (default: all).",
+    )
+    parser.add_argument(
+        "--max-variants",
+        type=int,
+        default=None,
+        help="Max variants to score (for quick validation runs).",
+    )
+    parser.add_argument(
+        "--max-seqs",
+        type=int,
+        default=None,
+        help="Task 4: random subsample of each sequence class "
+        "(for quick validation runs).",
+    )
+    parser.add_argument(
+        "-v", "--verbose", action="store_true", help="Show progress bars."
+    )
     args = parser.parse_args()
 
     global WORK_DIR
@@ -703,12 +852,12 @@ def main():
         if not os.path.exists(h5):
             tasks_needed.append("task_4")
     if args.task in ("all", "vep"):
-        h5 = os.path.join(WORK_DIR,
-                          "task_5_variant_effect_prediction/data.h5")
+        h5 = os.path.join(WORK_DIR, "task_5_variant_effect_prediction/data.h5")
         if not os.path.exists(h5):
             tasks_needed.append("task_5")
     if tasks_needed:
         from dart_download import download_dart_data
+
         download_dart_data(WORK_DIR, tasks=tuple(tasks_needed))
 
     print(f"DART-Eval benchmark")
@@ -718,18 +867,25 @@ def main():
 
     model = _load_model(args.model, args.device, args.sv_chunk_size)
     sv_len = _get_sv_len(model)
-    print(f"  SVs: {model.num_support_vectors}, "
-          f"kernel: {model.kernel_type}, "
-          f"L={model.kernel.l}, k={model.kernel.k}, "
-          f"SV length: {sv_len} bp")
+    print(
+        f"  SVs: {model.num_support_vectors}, "
+        f"kernel: {model.kernel_type}, "
+        f"L={model.kernel.l}, k={model.kernel.k}, "
+        f"SV length: {sv_len} bp"
+    )
 
     results = []
 
     if args.task in ("all", "activity"):
         for cell_line in args.cell_lines:
             r = run_task4_cell_line(
-                model, cell_line, args.device, args.batch_size, args.verbose,
-                max_seqs=args.max_seqs)
+                model,
+                cell_line,
+                args.device,
+                args.batch_size,
+                args.verbose,
+                max_seqs=args.max_seqs,
+            )
             if r:
                 results.append(r)
 
@@ -740,21 +896,29 @@ def main():
 
     if args.task in ("all", "vep"):
         if args.vep_tasks in ("all", "dsqtl"):
-            r = run_task5_dsqtl(model, args.device, args.batch_size,
-                                args.verbose,
-                                vep_method=args.vep_method,
-                                save_scores_dir=args.save_scores,
-                                max_variants=args.max_variants)
+            r = run_task5_dsqtl(
+                model,
+                args.device,
+                args.batch_size,
+                args.verbose,
+                vep_method=args.vep_method,
+                save_scores_dir=args.save_scores,
+                max_variants=args.max_variants,
+            )
             if r:
                 results.append(r)
             gc.collect()
 
         if args.vep_tasks in ("all", "caqtl"):
-            r = run_task5_caqtl(model, args.device, args.batch_size,
-                                args.verbose,
-                                vep_method=args.vep_method,
-                                save_scores_dir=args.save_scores,
-                                max_variants=args.max_variants)
+            r = run_task5_caqtl(
+                model,
+                args.device,
+                args.batch_size,
+                args.verbose,
+                vep_method=args.vep_method,
+                save_scores_dir=args.save_scores,
+                max_variants=args.max_variants,
+            )
             if r:
                 results.append(r)
 
@@ -767,32 +931,49 @@ def main():
     if activity_results:
         print(f"\nTask 4 — Chromatin Activity (peak vs nonpeak classification)")
         cols = ["pearson_peaks", "spearman_peaks", "pearson_all", "spearman_all"]
-        print(f"  {'Cell line':<12} {'AUROC':>8} {'AUPRC':>8} {'base':>8} "
-              + " ".join(f"{c:>14}" for c in cols))
+        print(
+            f"  {'Cell line':<12} {'AUROC':>8} {'AUPRC':>8} {'base':>8} "
+            + " ".join(f"{c:>14}" for c in cols)
+        )
         for r in activity_results:
-            vals = " ".join(f"{r[c]:>14.4f}" if c in r else f"{'N/A':>14}" for c in cols)
-            print(f"  {r['cell_line']:<12} {r['auroc']:>8.4f} {r['auprc']:>8.4f} "
-                  f"{r['auprc_baseline']:>8.4f} {vals}")
+            vals = " ".join(
+                f"{r[c]:>14.4f}" if c in r else f"{'N/A':>14}" for c in cols
+            )
+            print(
+                f"  {r['cell_line']:<12} {r['auroc']:>8.4f} {r['auprc']:>8.4f} "
+                f"{r['auprc_baseline']:>8.4f} {vals}"
+            )
 
     vep_results = [r for r in results if "task" in r]
     if vep_results:
         print(f"\nTask 5 — Variant Effect Prediction ({args.vep_method})")
-        print(f"  {'Task':<12} {'AUROC':>8} {'AUPRC':>8} {'base':>8} "
-              f"{'Pearson':>8} {'n_sig':>8} {'n_ctrl':>8}")
-        print(f"  {'-'*12} {'-'*8} {'-'*8} {'-'*8} {'-'*8} {'-'*8} {'-'*8}")
+        print(
+            f"  {'Task':<12} {'AUROC':>8} {'AUPRC':>8} {'base':>8} "
+            f"{'Pearson':>8} {'n_sig':>8} {'n_ctrl':>8}"
+        )
+        print(
+            f"  {'-' * 12} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8}"
+        )
         for r in vep_results:
             pear_key = [k for k in r if k.startswith("pearson")]
             pear = f"{r[pear_key[0]]:.4f}" if pear_key else "N/A"
-            print(f"  {r['task']:<12} {r['auroc']:>8.4f} "
-                  f"{r['auprc']:>8.4f} {r['auprc_baseline']:>8.4f} {pear:>8} "
-                  f"{r['n_sig']:>8} {r['n_ctrl']:>8}")
+            print(
+                f"  {r['task']:<12} {r['auroc']:>8.4f} "
+                f"{r['auprc']:>8.4f} {r['auprc_baseline']:>8.4f} {pear:>8} "
+                f"{r['n_sig']:>8} {r['n_ctrl']:>8}"
+            )
 
     if args.output and results:
         from _common import write_tsv
 
-        write_tsv(args.output, pd.DataFrame(results), f"DART-Eval, task {args.task}",
-                  args.device, model=os.path.basename(args.model),
-                  vep_method=args.vep_method)
+        write_tsv(
+            args.output,
+            pd.DataFrame(results),
+            f"DART-Eval, task {args.task}",
+            args.device,
+            model=os.path.basename(args.model),
+            vep_method=args.vep_method,
+        )
 
 
 if __name__ == "__main__":

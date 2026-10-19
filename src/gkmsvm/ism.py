@@ -43,12 +43,12 @@ def ism(
     bs = batch_size if batch_size is not None else (1 if verbose else None)
     if bs is not None and x.shape[0] > bs:
         from tqdm import tqdm
+
         xp = get_array_module(x)
         chunks = range(0, x.shape[0], bs)
         if verbose:
-            chunks = tqdm(chunks, desc="ISM",
-                          total=(x.shape[0] + bs - 1) // bs)
-        return xp.concatenate([fn(model, x[s:s + bs]) for s in chunks], axis=0)
+            chunks = tqdm(chunks, desc="ISM", total=(x.shape[0] + bs - 1) // bs)
+        return xp.concatenate([fn(model, x[s : s + bs]) for s in chunks], axis=0)
 
     return fn(model, x)
 
@@ -87,7 +87,7 @@ def _ism_packed(model, x):
         fn = _ism_kernel
         rows = min(rows, model._MAX_SCORE_BYTES // (6 * L * 8 * S))
     rows = max(1, rows)
-    parts = [fn(model, x[s:s + rows], table) for s in range(0, B, rows)]
+    parts = [fn(model, x[s : s + rows], table) for s in range(0, B, rows)]
     out = parts[0] if len(parts) == 1 else xp.concatenate(parts, axis=0)
     return out.astype(float_dtype(out))
 
@@ -110,14 +110,18 @@ def _ism_table(model, x, table):
     slot_wt = _slot_weights(base.base, L)
     if slot_wt is None:
         ref = table[bx].sum(axis=1)  # [B]
-        k_new = ref + (table[new].sum(axis=3) - table[old].sum(axis=2)[None])  # [4, L, B]
+        k_new = ref + (
+            table[new].sum(axis=3) - table[old].sum(axis=2)[None]
+        )  # [4, L, B]
     else:
         ft = np.float32 if is_mlx(x) else np.float64
         wx = dev(base.base.window_weights(L - base.l + 1).astype(ft))
         slot_wt = dev(slot_wt.astype(ft))
         ref = (table[bx] * wx).sum(axis=1)
-        k_new = ref + ((table[new] * slot_wt[:, None]).sum(axis=3)
-                       - (table[old] * slot_wt[:, None]).sum(axis=2)[None])
+        k_new = ref + (
+            (table[new] * slot_wt[:, None]).sum(axis=3)
+            - (table[old] * slot_wt[:, None]).sum(axis=2)[None]
+        )
     if base.normalize:
         k_new = k_new / xp.sqrt(xp.clip(mut_diag.astype(ref.dtype), 1e-10, None))
         ref = ref / xp.sqrt(xp.clip(diag_ref.astype(ref.dtype), 1e-10, None))
@@ -136,14 +140,27 @@ def _ism_index(model, x, _table=None):
     bx, bx_rc = base.pack_both(x)
     old, new, diag_ref, mut_diag = _mutants(base, x, bx, bx_rc)
     inv_dx, inv_ds = model._inv_norms(diag_ref, x.shape[0])
-    inv_dmut = (np.ones(new.shape[:3]) if mut_diag is None
-                else 1 / np.sqrt(np.clip(np.asarray(mut_diag, dtype=np.float64), 1e-20, None)))
+    inv_dmut = (
+        np.ones(new.shape[:3])
+        if mut_diag is None
+        else 1 / np.sqrt(np.clip(np.asarray(mut_diag, dtype=np.float64), 1e-20, None))
+    )
     gamma = kernel.gamma if isinstance(kernel, RbfKernel) else np.nan
     coef = model.coefficients
     ref = index.pairwise(bx)  # [B, S]
     ref_score = index.reduce(bx, inv_dx, inv_ds, coef, gamma)
-    out = index.mutants(old, new, ref, ref_score, inv_dx, inv_dmut, inv_ds, coef, gamma,
-                        _slot_weights(base, x.shape[2]))
+    out = index.mutants(
+        old,
+        new,
+        ref,
+        ref_score,
+        inv_dx,
+        inv_dmut,
+        inv_ds,
+        coef,
+        gamma,
+        _slot_weights(base, x.shape[2]),
+    )
     return out.transpose(2, 0, 1)
 
 
@@ -161,7 +178,9 @@ def _ism_kernel(model, x, _table=None):
     ref_raw = model._sv_raw(bx)  # [B, S]
     if base.normalize:
         diag_sv = model._sv_diag()
-        ref_k = ref_raw / xp.clip(xp.sqrt(diag_ref[:, None] * diag_sv[None, :]), 1e-10, None)
+        ref_k = ref_raw / xp.clip(
+            xp.sqrt(diag_ref[:, None] * diag_sv[None, :]), 1e-10, None
+        )
     else:
         ref_k = ref_raw
     ref_score = (kernel.finish(ref_k) * coefs).sum(axis=1)  # [B]
@@ -179,17 +198,27 @@ def _ism_kernel(model, x, _table=None):
         n = p1 - p0
         if slot_wt is None:
             old_pw = model._sv_raw(dev(old[p0:p1].reshape(n * B, l))).reshape(n, B, S)
-            new_pw = model._sv_raw(dev(new[:, p0:p1].reshape(4 * n * B, l))).reshape(4, n, B, S)
+            new_pw = model._sv_raw(dev(new[:, p0:p1].reshape(4 * n * B, l))).reshape(
+                4, n, B, S
+            )
         else:
             wt = slot_wt[p0:p1] / float(base.window_weights(1)[0])  # [n, l]
             wt = dev(wt.astype(np.float32 if is_mlx(x) else np.float64))
-            old_pw = (model._sv_raw(dev(old[p0:p1].reshape(n * B * l, 1))).reshape(n, B, l, S)
-                      * wt[:, None, :, None]).sum(axis=2)
-            new_pw = (model._sv_raw(dev(new[:, p0:p1].reshape(4 * n * B * l, 1)))
-                      .reshape(4, n, B, l, S) * wt[None, :, None, :, None]).sum(axis=3)
+            old_pw = (
+                model._sv_raw(dev(old[p0:p1].reshape(n * B * l, 1))).reshape(n, B, l, S)
+                * wt[:, None, :, None]
+            ).sum(axis=2)
+            new_pw = (
+                model._sv_raw(dev(new[:, p0:p1].reshape(4 * n * B * l, 1))).reshape(
+                    4, n, B, l, S
+                )
+                * wt[None, :, None, :, None]
+            ).sum(axis=3)
         k_new = ref_raw + (new_pw - old_pw[None])  # [4, n, B, S]
         if base.normalize:
-            k_new = k_new / xp.clip(xp.sqrt(mut_diag[:, p0:p1, :, None] * diag_sv), 1e-10, None)
+            k_new = k_new / xp.clip(
+                xp.sqrt(mut_diag[:, p0:p1, :, None] * diag_sv), 1e-10, None
+            )
         scores.append((kernel.finish(k_new) * coefs).sum(axis=3))  # [4, n, B]
     scores = scores[0] if len(scores) == 1 else xp.concatenate(scores, axis=1)
     return (scores - ref_score).transpose(2, 0, 1)

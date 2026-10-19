@@ -40,8 +40,9 @@ def test_index_matches_brute(name, rc):
     assert lmer_index.applies(kernel)
     index = lmer_index.LmerIndex(kernel, by, by_rc)
     bx = kernel.pack(X)
-    np.testing.assert_allclose(index.pairwise(bx), kernel.raw_packed(bx, by, by_rc),
-                               rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(
+        index.pairwise(bx), kernel.raw_packed(bx, by, by_rc), rtol=1e-12, atol=1e-12
+    )
 
 
 def test_index_skips_padding():
@@ -52,14 +53,18 @@ def test_index_skips_padding():
     bx = kernel.pack(_onehot(3, 20, rng))
     padded = np.concatenate([bx, np.full((3, 5), PAD_WINDOW, dtype=np.uint32)], axis=1)
     # Padding shifts the per-thread window chunks, so only the summation order differs
-    np.testing.assert_allclose(index.pairwise(padded), index.pairwise(bx), rtol=1e-12, atol=0)
+    np.testing.assert_allclose(
+        index.pairwise(padded), index.pairwise(bx), rtol=1e-12, atol=0
+    )
 
 
 def test_applies():
     assert lmer_index.applies(EstTruncGkmKernel(11, 7, d=3))
     assert not lmer_index.applies(DirectGkmKernel(11, 7))  # 31,714 neighbors per window
     assert not lmer_index.applies(EstTruncGkmKernel(13, 7, d=2))  # l > MAX_L
-    assert lmer_index.applies(CenterWeightedGkmKernel(8, 5, M=3, H=2.0))  # 1,000 neighbors (d=3)
+    assert lmer_index.applies(
+        CenterWeightedGkmKernel(8, 5, M=3, H=2.0)
+    )  # 1,000 neighbors (d=3)
 
 
 MODELS = [
@@ -80,7 +85,10 @@ def test_model_scores_match_pairwise(kernel_type, params):
     rng = np.random.default_rng(3)
     model = _model(kernel_type, params, rng)
     x = _onehot(20, 40, rng)
-    expected = model.kernel.pairwise(x, model.support_sequences) @ model.coefficients + model.bias
+    expected = (
+        model.kernel.pairwise(x, model.support_sequences) @ model.coefficients
+        + model.bias
+    )
     np.testing.assert_allclose(model(x).ravel(), expected, rtol=1e-10, atol=1e-12)
     model.use_lmer_index = False  # takes effect without clearing caches
     np.testing.assert_allclose(model(x).ravel(), expected, rtol=1e-10, atol=1e-12)
@@ -95,8 +103,9 @@ def test_mutation_impact_index_vs_join(kernel_type, params):
     alt[:, :, 20] = np.eye(4)[(ref[:, :, 20].argmax(1) + 1) % 4]
     got = model.score_variants(ref, alt, method="gkmexplain")
     model.use_lmer_index = False  # takes effect without clearing caches
-    np.testing.assert_allclose(got, model.score_variants(ref, alt, method="gkmexplain"),
-                               rtol=1e-10, atol=1e-12)
+    np.testing.assert_allclose(
+        got, model.score_variants(ref, alt, method="gkmexplain"), rtol=1e-10, atol=1e-12
+    )
 
 
 KERNEL_OBJS = {
@@ -114,8 +123,9 @@ def test_gram_and_columns_match_pairwise(name):
     rng = np.random.default_rng(5)
     X = _onehot(40, 30, rng)
     expected = kernel.pairwise(X, X)
-    np.testing.assert_allclose(compute_gram(kernel, X, chunk_size=16), expected,
-                               rtol=1e-10, atol=1e-12)
+    np.testing.assert_allclose(
+        compute_gram(kernel, X, chunk_size=16), expected, rtol=1e-10, atol=1e-12
+    )
     cache = KernelColumnCache(kernel, X)
     assert cache._use_fast and cache._index is not None
     for use_index in (True, False):  # one query row each; the masked join

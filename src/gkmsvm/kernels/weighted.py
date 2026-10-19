@@ -113,8 +113,10 @@ def _weighted_block_delta(f, nf, a_s, a_e, wf, c, nc, c_s, c_e, wc, table):
         for j in range(c.shape[0]):
             cj = c[j]
             cj_new = nc[j - c_s] if c_s <= j < c_e else cj
-            row += wc[j] * (table[_packed_mismatches(u_new, cj_new)]
-                            - table[_packed_mismatches(u, cj)])
+            row += wc[j] * (
+                table[_packed_mismatches(u_new, cj_new)]
+                - table[_packed_mismatches(u, cj)]
+            )
         d += wf[i] * row
     for i in range(f.shape[0]):  # unchanged rows, changed columns
         if a_s <= i < a_e:
@@ -122,8 +124,10 @@ def _weighted_block_delta(f, nf, a_s, a_e, wf, c, nc, c_s, c_e, wc, table):
         u = f[i]
         row = 0.0
         for j in range(c_s, c_e):
-            row += wc[j] * (table[_packed_mismatches(u, nc[j - c_s])]
-                            - table[_packed_mismatches(u, c[j])])
+            row += wc[j] * (
+                table[_packed_mismatches(u, nc[j - c_s])]
+                - table[_packed_mismatches(u, c[j])]
+            )
         d += wf[i] * row
     return d
 
@@ -144,10 +148,23 @@ def _mutant_diag_weighted_numba(fwd, rc, new, new_rc, diag, w, table, l):
         r_s, r_e = max(0, q - l + 1), min(q + 1, W)
         for v in range(4):
             nf = new[v, p, b]
-            d = _weighted_block_delta(fwd[b], nf, a_s, a_e, w, fwd[b], nf, a_s, a_e, w, table)
+            d = _weighted_block_delta(
+                fwd[b], nf, a_s, a_e, w, fwd[b], nf, a_s, a_e, w, table
+            )
             if has_rc:
-                d += _weighted_block_delta(fwd[b], nf, a_s, a_e, w, rc[b], new_rc[v, p, b],
-                                           r_s, r_e, w_rc, table)
+                d += _weighted_block_delta(
+                    fwd[b],
+                    nf,
+                    a_s,
+                    a_e,
+                    w,
+                    rc[b],
+                    new_rc[v, p, b],
+                    r_s,
+                    r_e,
+                    w_rc,
+                    table,
+                )
             out[v, p, b] = diag[b] + d
     return out
 
@@ -188,7 +205,9 @@ class CenterWeightedGkmKernel(EstTruncGkmKernel):
         include_rc: bool = True,
     ):
         if not 1 <= M <= 255:
-            raise ValueError(f"M must be in 1..255 (LS-GKM stores weights as uint8), got {M}")
+            raise ValueError(
+                f"M must be in 1..255 (LS-GKM stores weights as uint8), got {M}"
+            )
         if H <= 0:
             raise ValueError(f"H must be positive, got {H}")
         super().__init__(l, k, d=d, normalize=normalize, include_rc=include_rc)
@@ -205,9 +224,14 @@ class CenterWeightedGkmKernel(EstTruncGkmKernel):
     def _brute(self, bx, by, dev, wx=None, wy=None):
         """Weighted pair loop on CPU; the result is on bx's device."""
         out = _brute_weighted_numba(
-            np.ascontiguousarray(to_cpu(bx)), wx.astype(np.float64),
-            np.ascontiguousarray(to_cpu(by)), wy.astype(np.float64),
-            self._mismatch_table, self.l, self._min_matches)
+            np.ascontiguousarray(to_cpu(bx)),
+            wx.astype(np.float64),
+            np.ascontiguousarray(to_cpu(by)),
+            wy.astype(np.float64),
+            self._mismatch_table,
+            self.l,
+            self._min_matches,
+        )
         return _on_device(out, bx)
 
     def raw_diag_packed(self, bx, bx_rc=None):
@@ -216,20 +240,37 @@ class CenterWeightedGkmKernel(EstTruncGkmKernel):
         fwd = np.ascontiguousarray(to_cpu(bx))
         by = fwd if bx_rc is None else np.concatenate([fwd, to_cpu(bx_rc)], axis=1)
         w = self.window_weights(fwd.shape[1]).astype(np.float64)
-        return _on_device(_self_diagonal_weighted_numba(
-            fwd, np.ascontiguousarray(by), w, self._mismatch_table, self.l), bx)
+        return _on_device(
+            _self_diagonal_weighted_numba(
+                fwd, np.ascontiguousarray(by), w, self._mismatch_table, self.l
+            ),
+            bx,
+        )
 
     def raw_diag_mutants(self, bx, bx_rc, new, new_rc, diag):
         """See PackedGkmKernel.raw_diag_mutants; on CPU, only pairs touching a
         changed window; the result is on bx's device."""
         fwd = np.ascontiguousarray(to_cpu(bx))
         B, W = fwd.shape
-        rc = np.zeros((B, 0), np.uint32) if bx_rc is None else np.ascontiguousarray(to_cpu(bx_rc))
+        rc = (
+            np.zeros((B, 0), np.uint32)
+            if bx_rc is None
+            else np.ascontiguousarray(to_cpu(bx_rc))
+        )
         new_rc = np.zeros((4, 1, 1, 1), np.uint32) if new_rc is None else new_rc
-        return _on_device(_mutant_diag_weighted_numba(
-            fwd, rc, np.ascontiguousarray(new), np.ascontiguousarray(new_rc),
-            np.asarray(to_cpu(diag), dtype=np.float64),
-            self.window_weights(W).astype(np.float64), self._mismatch_table, self.l), bx)
+        return _on_device(
+            _mutant_diag_weighted_numba(
+                fwd,
+                rc,
+                np.ascontiguousarray(new),
+                np.ascontiguousarray(new_rc),
+                np.asarray(to_cpu(diag), dtype=np.float64),
+                self.window_weights(W).astype(np.float64),
+                self._mismatch_table,
+                self.l,
+            ),
+            bx,
+        )
 
 
 class CenterWeightedRbfGkmKernel(RbfKernel):
@@ -248,8 +289,9 @@ class CenterWeightedRbfGkmKernel(RbfKernel):
         include_rc: bool = True,
     ):
         super().__init__(
-            CenterWeightedGkmKernel(l, k, d=d, M=M, H=H, normalize=True,
-                                    include_rc=include_rc),
+            CenterWeightedGkmKernel(
+                l, k, d=d, M=M, H=H, normalize=True, include_rc=include_rc
+            ),
             gamma,
         )
         self.d = d

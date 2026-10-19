@@ -86,8 +86,8 @@ Models trained or saved with gkmsvm-lite use a NumPy `.npz` format. The unified 
 from gkmsvm import load_model
 
 # Auto-detects format
-model = load_model("model.npz")        # native npz
-model = load_model("model.txt.gz")     # LS-GKM text
+model = load_model("model.npz")  # native npz
+model = load_model("model.txt.gz")  # LS-GKM text
 ```
 
 ### Saving models
@@ -116,11 +116,13 @@ Train a binary classifier on positive and negative DNA sequences:
 from gkmsvm import train_gkmsvm
 
 model = train_gkmsvm(
-    pos_seqs=["ACGTACGT...", ...],   # positive sequences (strings or arrays)
-    neg_seqs=["TGCATGCA...", ...],   # negative sequences
-    kernel_type="estimated",          # -t 2 (default), or "direct", "rbf", etc.
-    l=11, k=7, d=3,                  # kernel parameters
-    C=1.0,                            # regularization
+    pos_seqs=["ACGTACGT...", ...],  # positive sequences (strings or arrays)
+    neg_seqs=["TGCATGCA...", ...],  # negative sequences
+    kernel_type="estimated",  # -t 2 (default), or "direct", "rbf", etc.
+    l=11,
+    k=7,
+    d=3,  # kernel parameters
+    C=1.0,  # regularization
 )
 
 # Score new sequences
@@ -137,12 +139,14 @@ Train a regression model on sequences with continuous labels (e.g., chromatin ac
 from gkmsvm import train_gkmsvr
 
 model = train_gkmsvr(
-    sequences=["ACGTACGT...", ...],   # DNA sequences
-    labels=[0.5, 1.2, -0.3, ...],    # continuous target values
+    sequences=["ACGTACGT...", ...],  # DNA sequences
+    labels=[0.5, 1.2, -0.3, ...],  # continuous target values
     kernel_type="estimated",
-    l=11, k=7, d=3,
+    l=11,
+    k=7,
+    d=3,
     C=1.0,
-    epsilon=0.1,                      # tube width — errors within ±epsilon are ignored
+    epsilon=0.1,  # tube width — errors within ±epsilon are ignored
 )
 
 # Predict continuous values
@@ -159,9 +163,9 @@ Training needs kernel values between pairs of training sequences.
 - **Auto** (`solver="auto"`, default): libsvm when the Gram fits in 75% of available RAM (and under `max_gram_gb`), else SMO with a warning.
 
 ```python
-model = train_gkmsvm(pos, neg, solver="libsvm")                      # needs N^2 memory
-model = train_gkmsvm(pos, neg, solver="smo", cache_size=2048)        # O(cache_size x N)
-model = train_gkmsvm(pos, neg, solver="nystrom", n_components=500)   # approximate
+model = train_gkmsvm(pos, neg, solver="libsvm")  # needs N^2 memory
+model = train_gkmsvm(pos, neg, solver="smo", cache_size=2048)  # O(cache_size x N)
+model = train_gkmsvm(pos, neg, solver="nystrom", n_components=500)  # approximate
 
 # SVR uses the precomputed Gram (or Nyström); SMO SVR is not implemented,
 # so SVR training needs O(N^2) memory.
@@ -186,11 +190,14 @@ All six kernel types are supported for both training and inference:
 ```python
 # Weighted kernel example
 model = train_gkmsvm(
-    pos, neg,
+    pos,
+    neg,
     kernel_type="weighted",
-    l=11, k=7, d=3,
-    M=50,     # weight of the center window (1-255)
-    H=50.0,   # half-life of the weights, in bp from the center
+    l=11,
+    k=7,
+    d=3,
+    M=50,  # weight of the center window (1-255)
+    H=50.0,  # half-life of the weights, in bp from the center
 )
 ```
 
@@ -199,9 +206,7 @@ model = train_gkmsvm(
 A typical workflow for training on ATAC-seq peaks:
 
 ```python
-from gkmsvm import (
-    train_gkmsvm, read_fasta, one_hot_encode, ism, gkmexplain
-)
+from gkmsvm import train_gkmsvm, read_fasta, one_hot_encode, ism, gkmexplain
 
 # Load sequences
 pos_records = read_fasta("positive_peaks.fa")
@@ -219,6 +224,7 @@ model.save("my_model.npz")
 test_records = read_fasta("test.fa")
 test_seqs = [one_hot_encode(seq) for _, seq in test_records]
 import numpy as np
+
 x = np.stack(test_seqs)
 scores = model(x)
 

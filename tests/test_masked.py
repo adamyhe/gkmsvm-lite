@@ -48,16 +48,20 @@ def test_masked_equals_brute(name):
     assert plan is not None
 
     ref = _fused_pairwise_packed_numba(bx, by, t, l, mm)
-    np.testing.assert_allclose(masked_pairwise(bx, by, plan), ref, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(
+        masked_pairwise(bx, by, plan), ref, rtol=1e-12, atol=1e-12
+    )
 
     ref_rc = ref + _fused_pairwise_packed_numba(bx, by_rc, t, l, mm)
-    np.testing.assert_allclose(masked_pairwise(bx, by, plan, by_rc), ref_rc,
-                               rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(
+        masked_pairwise(bx, by, plan, by_rc), ref_rc, rtol=1e-12, atol=1e-12
+    )
 
 
 @pytest.mark.parametrize("kind", ["t2", "t3"])
 def test_pairwise_dispatch_matches_brute(kind):
     """kernel.pairwise uses the masked path above _MASKED_MIN_ROWS; compare to forced brute."""
+
     def make():
         if kind == "t3":
             return RbfGkmKernel(9, 6, d=3, gamma=2.0)
@@ -82,7 +86,10 @@ class TestWeighted:
 
     @staticmethod
     def _pair(rc, rbf=False):
-        from gkmsvm.kernels.weighted import CenterWeightedGkmKernel, CenterWeightedRbfGkmKernel
+        from gkmsvm.kernels.weighted import (
+            CenterWeightedGkmKernel,
+            CenterWeightedRbfGkmKernel,
+        )
 
         if rbf:
             a = CenterWeightedRbfGkmKernel(8, 5, M=3, H=2.0, gamma=2.0, include_rc=rc)
@@ -103,7 +110,9 @@ class TestWeighted:
         fast, ref = self._pair(rc, rbf)
         np.testing.assert_allclose(fast.pairwise(X, Y), ref.pairwise(X, Y), rtol=1e-12)
         if not rbf:
-            np.testing.assert_allclose(fast._raw_diagonal(X), ref._raw_diagonal(X), rtol=1e-12)
+            np.testing.assert_allclose(
+                fast._raw_diagonal(X), ref._raw_diagonal(X), rtol=1e-12
+            )
 
     def test_self_gram_panels(self):
         """Self-Gram column panels (diag_offset) weight windows too."""

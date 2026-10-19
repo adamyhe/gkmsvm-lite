@@ -37,8 +37,9 @@ from _common import write_tsv
 from dart_eval import CELL_LINES, DART_SEQ_LEN
 
 
-def load_train_split(work_dir: str, cell_line: str, n_pos: int, n_neg: int,
-                     seq_len: int, seed: int = 0):
+def load_train_split(
+    work_dir: str, cell_line: str, n_pos: int, n_neg: int, seq_len: int, seed: int = 0
+):
     """Top n_pos IDR peaks by counts and n_neg random nonpeaks, [N, 4, seq_len]."""
     import h5py
 
@@ -49,13 +50,18 @@ def load_train_split(work_dir: str, cell_line: str, n_pos: int, n_neg: int,
         counts = train["idr_peaks"]["counts"][:]
         pos_idx = np.sort(np.argsort(-counts, kind="stable")[:n_pos])
         n_bg = train["nonpeaks"]["seqs"].shape[0]
-        neg_idx = np.sort(np.random.default_rng(seed).choice(n_bg, min(n_neg, n_bg),
-                                                             replace=False))
-        pos = train["idr_peaks"]["seqs"][:, lo:lo + seq_len][pos_idx]
-        neg = train["nonpeaks"]["seqs"][:, lo:lo + seq_len][neg_idx]
+        neg_idx = np.sort(
+            np.random.default_rng(seed).choice(n_bg, min(n_neg, n_bg), replace=False)
+        )
+        pos = train["idr_peaks"]["seqs"][:, lo : lo + seq_len][pos_idx]
+        neg = train["nonpeaks"]["seqs"][:, lo : lo + seq_len][neg_idx]
     # DART-Eval stores [N, L, 4] uint8
-    return (pos.transpose(0, 2, 1).astype(np.float32),
-            neg.transpose(0, 2, 1).astype(np.float32), len(counts), n_bg)
+    return (
+        pos.transpose(0, 2, 1).astype(np.float32),
+        neg.transpose(0, 2, 1).astype(np.float32),
+        len(counts),
+        n_bg,
+    )
 
 
 def main():
@@ -64,8 +70,11 @@ def main():
     )
     parser.add_argument("--cell-line", required=True, choices=CELL_LINES)
     parser.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
-    parser.add_argument("--work-dir", default=None,
-                        help="DART-Eval data (default: $DART_WORK_DIR or data/dart-eval)")
+    parser.add_argument(
+        "--work-dir",
+        default=None,
+        help="DART-Eval data (default: $DART_WORK_DIR or data/dart-eval)",
+    )
     parser.add_argument("--n-pos", type=int, default=10_000)
     parser.add_argument("--n-neg", type=int, default=10_000)
     parser.add_argument("--seq-len", type=int, default=300)
@@ -77,12 +86,18 @@ def main():
     from gkmsvm import train_gkmsvm
     from gkmsvm.serialization import save_npz
 
-    work_dir = (args.work_dir or os.environ.get("DART_WORK_DIR")
-                or os.path.join(os.path.dirname(__file__), "data", "dart-eval"))
-    pos, neg, n_idr, n_bg = load_train_split(work_dir, args.cell_line, args.n_pos,
-                                             args.n_neg, args.seq_len)
-    print(f"{args.cell_line}: {len(pos)} of {n_idr} training IDR peaks, "
-          f"{len(neg)} of {n_bg} training nonpeaks, {args.seq_len} bp")
+    work_dir = (
+        args.work_dir
+        or os.environ.get("DART_WORK_DIR")
+        or os.path.join(os.path.dirname(__file__), "data", "dart-eval")
+    )
+    pos, neg, n_idr, n_bg = load_train_split(
+        work_dir, args.cell_line, args.n_pos, args.n_neg, args.seq_len
+    )
+    print(
+        f"{args.cell_line}: {len(pos)} of {n_idr} training IDR peaks, "
+        f"{len(neg)} of {n_bg} training nonpeaks, {args.seq_len} bp"
+    )
 
     params = dict(kernel_type="estimated", l=11, k=7, d=3, C=1.0)
     t0 = time.perf_counter()
@@ -96,13 +111,24 @@ def main():
     print(f"Saved {args.model_output}")
 
     if args.output:
-        row = {"cell_line": args.cell_line, "n_pos": len(pos), "n_neg": len(neg),
-               "n_idr_train": n_idr, "n_nonpeaks_train": n_bg,
-               "n_sv": model.num_support_vectors, "train_s": train_s}
-        write_tsv(args.output, pd.DataFrame([row]),
-                  "gkm-SVM retrained on DART-Eval's Task 4 training chromosomes",
-                  args.device, model=os.path.basename(args.model_output),
-                  seq_len=args.seq_len, **params)
+        row = {
+            "cell_line": args.cell_line,
+            "n_pos": len(pos),
+            "n_neg": len(neg),
+            "n_idr_train": n_idr,
+            "n_nonpeaks_train": n_bg,
+            "n_sv": model.num_support_vectors,
+            "train_s": train_s,
+        }
+        write_tsv(
+            args.output,
+            pd.DataFrame([row]),
+            "gkm-SVM retrained on DART-Eval's Task 4 training chromosomes",
+            args.device,
+            model=os.path.basename(args.model_output),
+            seq_len=args.seq_len,
+            **params,
+        )
 
 
 if __name__ == "__main__":

@@ -30,18 +30,25 @@ class KernelColumnCache:
         if self._use_fast:
             self._packed, self._packed_rc = base.pack_both(X)
             self._X = None
-            diag = base.raw_diag_packed(self._packed, self._packed_rc).astype(float_dtype(X))
+            diag = base.raw_diag_packed(self._packed, self._packed_rc).astype(
+                float_dtype(X)
+            )
             from gkmsvm.kernels import lmer_index
 
-            self._index = (lmer_index.LmerIndex(base, self._packed, self._packed_rc)
-                           if lmer_index.applies(base) else None)
+            self._index = (
+                lmer_index.LmerIndex(base, self._packed, self._packed_rc)
+                if lmer_index.applies(base)
+                else None
+            )
         else:
             self._X = X
             self._index = None
             diag = base._raw_diagonal(X)
         self._diag = to_cpu(diag).astype(np.float64)
         # The diagonal where the columns are normalized (CuPy: on the GPU)
-        self._diag_xp = self._diag if self._xp is np or self._mlx else self._xp.asarray(self._diag)
+        self._diag_xp = (
+            self._diag if self._xp is np or self._mlx else self._xp.asarray(self._diag)
+        )
 
     def compute_columns(self, indices) -> dict:
         """Normalized columns {i: K(i, :)} for `indices`, in one kernel call (uncached).
@@ -60,8 +67,12 @@ class KernelColumnCache:
         if not self._use_fast:
             cols = kernel.pairwise(self._X, self._X[xp.asarray(idx)])
             cols = to_cpu(cols) if self._mlx else cols
-            return {i: xp.ascontiguousarray(cols[:, b]) if not self._mlx else
-                    np.ascontiguousarray(cols[:, b]) for b, i in enumerate(indices)}
+            return {
+                i: xp.ascontiguousarray(cols[:, b])
+                if not self._mlx
+                else np.ascontiguousarray(cols[:, b])
+                for b, i in enumerate(indices)
+            }
         if self._mlx:
             import mlx.core as mx
 
@@ -134,12 +145,14 @@ def smo_solve(
 # C solver with kernel column callback (LIBSVM-style architecture)
 # ---------------------------------------------------------------------------
 
+
 def _load_csmo():
     """Load the compiled C SMO solver. Returns None if unavailable."""
     import ctypes
 
     try:
         import gkmsvm._csmo as _csmo_mod
+
         return ctypes.CDLL(_csmo_mod.__file__)
     except (ImportError, OSError):
         return None
@@ -159,7 +172,9 @@ def _get_csmo():
 
 import ctypes as _ct
 
-_COLUMN_CB = _ct.CFUNCTYPE(None, _ct.c_int, _ct.c_int, _ct.POINTER(_ct.c_double), _ct.c_void_p)
+_COLUMN_CB = _ct.CFUNCTYPE(
+    None, _ct.c_int, _ct.c_int, _ct.POINTER(_ct.c_double), _ct.c_void_p
+)
 
 
 # Most columns computed per kernel-cache miss in the C solver: the requested
@@ -189,7 +204,7 @@ def _prefetch_candidates(state, y, C, k, fresh):
     columns already cached or staged (the likeliest ones usually are).
     """
     N = y.shape[0]
-    alpha, G = state[:N], state[N:2 * N]
+    alpha, G = state[:N], state[N : 2 * N]
     score = -y * G
     up = fresh & (((y > 0) & (alpha < C)) | ((y < 0) & (alpha > 0)))
     low = fresh & (((y > 0) & (alpha > 0)) | ((y < 0) & (alpha < C)))
@@ -221,14 +236,16 @@ def _smo_csolver(kernel, X, y, C, tol, max_iter, cache_size, verbose):
     # Columns live in the C solver's cache; this object only computes them
     cache = KernelColumnCache(kernel, X)
 
-    y_np = to_cpu(y).astype(np.float64) if mlx_input else np.asarray(
-        to_cpu(y) if xp is not np else y, dtype=np.float64
+    y_np = (
+        to_cpu(y).astype(np.float64)
+        if mlx_input
+        else np.asarray(to_cpu(y) if xp is not np else y, dtype=np.float64)
     )
 
     # Written by the C solver: alpha in state[:N], gradient in state[N:2N],
     # 1.0 in state[2N:] for columns in its cache
     state = np.zeros(3 * N, dtype=np.float64)
-    in_cache = state[2 * N:]
+    in_cache = state[2 * N :]
     max_batch = max(1, _SMO_PREFETCH) if cache._use_fast else 1
     # With the l-mer index a column costs one query row, so prefetch only
     # fills empty slots: replacing unrequested prefetches would just churn
@@ -258,7 +275,9 @@ def _smo_csolver(kernel, X, y, C, tol, max_iter, cache_size, verbose):
             if room > 0:
                 fresh = in_cache == 0
                 fresh[idx] = False
-                extra = _prefetch_candidates(state, y_np, C, min(max_batch - 1, room), fresh)
+                extra = _prefetch_candidates(
+                    state, y_np, C, min(max_batch - 1, room), fresh
+                )
         try:
             return cache.compute_columns([idx, *extra])
         except Exception as exc:  # noqa: BLE001 - fall back to one column
@@ -266,8 +285,11 @@ def _smo_csolver(kernel, X, y, C, tol, max_iter, cache_size, verbose):
                 raise
             import warnings
 
-            warnings.warn(f"SMO column prefetch failed ({exc!r}); computing columns singly",
-                          RuntimeWarning, stacklevel=2)
+            warnings.warn(
+                f"SMO column prefetch failed ({exc!r}); computing columns singly",
+                RuntimeWarning,
+                stacklevel=2,
+            )
             return cache.compute_columns([idx])
 
     def _column_callback(idx, n, out_ptr, c_cache):
@@ -320,7 +342,9 @@ def _smo_csolver(kernel, X, y, C, tol, max_iter, cache_size, verbose):
     if errors:
         raise RuntimeError("SMO kernel column computation failed") from errors[0]
     if verbose:
-        print(f"  Column cache {cache_size} columns; {stats['prefetched']} columns "
-              f"prefetched in {stats['batches']} batches")
+        print(
+            f"  Column cache {cache_size} columns; {stats['prefetched']} columns "
+            f"prefetched in {stats['batches']} batches"
+        )
 
     return alpha_out, float(rho_out[0])

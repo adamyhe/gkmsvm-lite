@@ -31,17 +31,17 @@ score = model(x)  # [1, 1]
 # Variant effect prediction
 ref = one_hot_encode("ACGTACGTACGTACGT")[None, ...]
 alt = one_hot_encode("ACGTACGAACGTACGT")[None, ...]
-delta = model.score_variants(ref, alt)                         # score(alt) - score(ref)
-impact = model.score_variants(ref, alt, method="gkmexplain")   # lsgkm gkmexplain -m 5
+delta = model.score_variants(ref, alt)  # score(alt) - score(ref)
+impact = model.score_variants(ref, alt, method="gkmexplain")  # lsgkm gkmexplain -m 5
 
 # Attribution
 hyp = gkmexplain(model, x, mode="hypothetical")  # [1, 4, 16], -t 0/1/2 models
-attr = gkmexplain(model, x, mode="importance")   # hypothetical × input
-deltas = ism(model, x)                           # [1, 4, 16] mutation deltas, any kernel
+attr = gkmexplain(model, x, mode="importance")  # hypothetical × input
+deltas = ism(model, x)  # [1, 4, 16] mutation deltas, any kernel
 
 # GPU acceleration
 model.cuda()  # NVIDIA
-model.mlx()   # Apple Silicon
+model.mlx()  # Apple Silicon
 ```
 
 Speed and memory against LS-GKM are in [docs/performance.md](docs/performance.md).
@@ -78,11 +78,11 @@ model.save("my_model.npz")
 
 ```python
 from gkmsvm import (
-    load_lsgkm_model,      # LS-GKM / kundajelab/lsgkm
-    load_classic_model,     # C gkmSVM (LIBSVM-style format)
-    load_r_gkmsvm_model,   # R gkmSVM (Ghandi et al. 2016)
-    load_deltasvm_model,    # DeltaSVM k-mer weights
-    load_model,             # auto-detect npz or LS-GKM text
+    load_lsgkm_model,  # LS-GKM / kundajelab/lsgkm
+    load_classic_model,  # C gkmSVM (LIBSVM-style format)
+    load_r_gkmsvm_model,  # R gkmSVM (Ghandi et al. 2016)
+    load_deltasvm_model,  # DeltaSVM k-mer weights
+    load_model,  # auto-detect npz or LS-GKM text
 )
 ```
 

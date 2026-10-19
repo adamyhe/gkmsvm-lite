@@ -71,9 +71,7 @@ def write_fasta(
             )
 
 
-def _write_onehot_fasta(
-    arr: np.ndarray, path: Path, headers: list[str] | None
-) -> None:
+def _write_onehot_fasta(arr: np.ndarray, path: Path, headers: list[str] | None) -> None:
     """Convert [B, 4, L] one-hot array to FASTA."""
     if arr.ndim != 3 or arr.shape[1] != 4:
         raise ValueError(f"Expected [B, 4, L] array, got shape {list(arr.shape)}")
@@ -135,7 +133,10 @@ def extract_loci(
 
     if isinstance(loci, (str, Path)):
         loci = pd.read_csv(
-            loci, sep="\t", header=None, names=["chrom", "start", "end"],
+            loci,
+            sep="\t",
+            header=None,
+            names=["chrom", "start", "end"],
             usecols=[0, 1, 2],
         )
 

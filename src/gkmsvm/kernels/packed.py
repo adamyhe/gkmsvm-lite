@@ -66,7 +66,9 @@ class PackedGkmKernel(GkmKernel):
 
     def _check_length(self, L: int) -> None:
         if L < self.l:
-            raise ValueError(f"Sequence length {L} is shorter than window length {self.l}")
+            raise ValueError(
+                f"Sequence length {L} is shorter than window length {self.l}"
+            )
 
     def pack(self, x):
         """[B, W] uint32 packed windows of one-hot x, on x's device.
@@ -81,7 +83,7 @@ class PackedGkmKernel(GkmKernel):
         base = (xp.argmax(to_cpu(x) if dev == "mlx" else x, axis=1)).astype(xp.uint32)
         packed = xp.zeros((B, W), dtype=xp.uint32)
         for k in range(self.l):
-            packed |= base[:, k:k + W] << xp.uint32(2 * k)
+            packed |= base[:, k : k + W] << xp.uint32(2 * k)
         if dev == "mlx":
             import mlx.core as mx
 
@@ -129,7 +131,9 @@ class PackedGkmKernel(GkmKernel):
         if plan is not None and not (small and self._HAS_BRUTE):
             return _masked(bx, by, plan, by_rc, diag_offset, dev, wx, wy)
         if not self._HAS_BRUTE:
-            raise ValueError(f"{type(self).__name__} needs the masked join (use_masked=True)")
+            raise ValueError(
+                f"{type(self).__name__} needs the masked join (use_masked=True)"
+            )
         if wx is None:
             raw = self._brute(bx, by, dev)
             if by_rc is not None:
@@ -150,7 +154,8 @@ class PackedGkmKernel(GkmKernel):
     def raw_diag_packed(self, bx, bx_rc=None):
         """K_raw(x, x) [B]: each row's windows against themselves (and its RC)."""
         return self._brute_cross_diag(
-            bx, bx if bx_rc is None else _concat_windows(bx, bx_rc), device_of(bx))
+            bx, bx if bx_rc is None else _concat_windows(bx, bx_rc), device_of(bx)
+        )
 
     def _brute_cross_diag(self, bx, by, dev):
         """[B]: sum of g over row b of bx against row b of by."""
@@ -181,7 +186,9 @@ class PackedGkmKernel(GkmKernel):
 
         dev = {"cpu": np.asarray, "cuda": to_gpu, "mlx": to_mlx}[device_of(bx)]
         mut_rc = None if new_rc is None else dev(mutate(to_cpu(bx_rc), new_rc, True))
-        return self.raw_diag_packed(dev(mutate(fwd, new, False)), mut_rc).reshape(4, L, B)
+        return self.raw_diag_packed(dev(mutate(fwd, new, False)), mut_rc).reshape(
+            4, L, B
+        )
 
     # -- GkmKernel interface --------------------------------------------------
 
@@ -189,12 +196,18 @@ class PackedGkmKernel(GkmKernel):
         by, by_rc = self.pack_both(y)
         return self.raw_packed(self.pack(x), by, by_rc).astype(float_dtype(x))
 
-    def _raw_diagonal(self, x: np.ndarray, *, chunk_size: int | None = None) -> np.ndarray:
+    def _raw_diagonal(
+        self, x: np.ndarray, *, chunk_size: int | None = None
+    ) -> np.ndarray:
         xp = get_array_module(x)
         B = x.shape[0]
         if chunk_size is not None and chunk_size < B:
-            return xp.concatenate([self._raw_diagonal(x[s:s + chunk_size])
-                                   for s in range(0, B, chunk_size)])
+            return xp.concatenate(
+                [
+                    self._raw_diagonal(x[s : s + chunk_size])
+                    for s in range(0, B, chunk_size)
+                ]
+            )
         return self.raw_diag_packed(*self.pack_both(x)).astype(float_dtype(x))
 
 
@@ -202,15 +215,22 @@ def _masked(bx, by, plan, by_rc, diag_offset, dev, wx=None, wy=None):
     from gkmsvm.kernels import masked
 
     if dev == "cpu":
-        return masked.masked_pairwise(bx, by, plan, by_rc, diag_offset=diag_offset,
-                                      wx=wx, wy=wy)
+        return masked.masked_pairwise(
+            bx, by, plan, by_rc, diag_offset=diag_offset, wx=wx, wy=wy
+        )
     if dev == "cuda":
         return masked.masked_pairwise_gpu(bx, by, plan, by_rc, wx=wx, wy=wy)
     import mlx.core as mx
 
     if wx is not None:  # Metal counts in int32; weighted windows join on the CPU
-        out = masked.masked_pairwise(np.asarray(bx), np.asarray(by), plan,
-                                     None if by_rc is None else np.asarray(by_rc), wx=wx, wy=wy)
+        out = masked.masked_pairwise(
+            np.asarray(bx),
+            np.asarray(by),
+            plan,
+            None if by_rc is None else np.asarray(by_rc),
+            wx=wx,
+            wy=wy,
+        )
         return mx.array(out.astype(np.float32))
     # Exact integer counts combined in float64; Metal holds float32
     return mx.array(masked.masked_pairwise_mlx(bx, by, plan, by_rc).astype(np.float32))

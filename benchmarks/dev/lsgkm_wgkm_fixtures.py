@@ -55,7 +55,22 @@ MODELS = {
     "t0": ["-t", "0", "-l", "10", "-k", "6"],
     "t1": ["-t", "1", "-l", "11", "-k", "7", "-d", "3"],
     "t4": ["-t", "4", "-l", "11", "-k", "7", "-d", "3", "-M", "20", "-H", "10"],
-    "t5": ["-t", "5", "-l", "10", "-k", "6", "-d", "3", "-M", "50", "-H", "30", "-g", "2.0"],
+    "t5": [
+        "-t",
+        "5",
+        "-l",
+        "10",
+        "-k",
+        "6",
+        "-d",
+        "3",
+        "-M",
+        "50",
+        "-H",
+        "30",
+        "-g",
+        "2.0",
+    ],
 }
 
 
@@ -66,11 +81,13 @@ def random_seq(rng, n):
 def add_n(rng, s):
     w = rng.randint(5, 20)
     a = rng.randrange(len(s) - w)
-    return s[:a] + "N" * w + s[a + w:]
+    return s[:a] + "N" * w + s[a + w :]
 
 
 def run(cmd):
-    p = subprocess.run(cmd, capture_output=True, text=True, errors="replace", check=False)
+    p = subprocess.run(
+        cmd, capture_output=True, text=True, errors="replace", check=False
+    )
     if p.returncode:
         sys.exit(f"{' '.join(cmd)} failed ({p.returncode}):\n{p.stderr[-2000:]}")
 
@@ -79,12 +96,21 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--conda-env", default="lsgkm")
     ap.add_argument("--bin-dir", default=None, help="LS-GKM binaries if not in the env")
-    ap.add_argument("--explain-bin", default=None,
-                    help="directory with the kundajelab/lsgkm fork's gkmexplain")
-    ap.add_argument("--models", default=",".join(MODELS),
-                    help=f"comma-separated models to train (default: {','.join(MODELS)})")
-    ap.add_argument("--explain-only", action="store_true",
-                    help="only run gkmexplain on the fixture models and FASTAs already written")
+    ap.add_argument(
+        "--explain-bin",
+        default=None,
+        help="directory with the kundajelab/lsgkm fork's gkmexplain",
+    )
+    ap.add_argument(
+        "--models",
+        default=",".join(MODELS),
+        help=f"comma-separated models to train (default: {','.join(MODELS)})",
+    )
+    ap.add_argument(
+        "--explain-only",
+        action="store_true",
+        help="only run gkmexplain on the fixture models and FASTAs already written",
+    )
     args = ap.parse_args()
 
     explain = None
@@ -117,7 +143,7 @@ def main():
     for length in (100, 85):
         seqs = [random_seq(rng, length) for _ in range(12)]
         mid = length // 2 - len(MOTIF) // 2
-        seqs[:4] = [s[:mid] + MOTIF + s[mid + len(MOTIF):] for s in seqs[:4]]
+        seqs[:4] = [s[:mid] + MOTIF + s[mid + len(MOTIF) :] for s in seqs[:4]]
         seqs += [add_n(rng, s) for s in seqs[:8]]
         tests[length] = FIXTURES / f"lsgkm_wgkm_test{length}.fa"
         write_seqs(tests[length], seqs, "t")
@@ -125,15 +151,32 @@ def main():
     for name in args.models.split(","):
         opts = MODELS[name]
         prefix = workdir / name
-        run([train, *opts, "-c", "1.0", str(workdir / "pos.fa"), str(workdir / "neg.fa"),
-             str(prefix)])
+        run(
+            [
+                train,
+                *opts,
+                "-c",
+                "1.0",
+                str(workdir / "pos.fa"),
+                str(workdir / "neg.fa"),
+                str(prefix),
+            ]
+        )
         model = Path(f"{prefix}.model.txt")
-        with open(model, "rb") as src, gzip.open(FIXTURES / f"lsgkm_wgkm_{name}.model.txt.gz",
-                                                 "wb") as dst:
+        with (
+            open(model, "rb") as src,
+            gzip.open(FIXTURES / f"lsgkm_wgkm_{name}.model.txt.gz", "wb") as dst,
+        ):
             shutil.copyfileobj(src, dst)
         for length, fa in tests.items():
-            run([predict, str(fa), str(model),
-                 str(FIXTURES / f"lsgkm_wgkm_{name}_test{length}.pred.txt")])
+            run(
+                [
+                    predict,
+                    str(fa),
+                    str(model),
+                    str(FIXTURES / f"lsgkm_wgkm_{name}_test{length}.pred.txt"),
+                ]
+            )
     if explain is not None:
         run_explain(explain)
     print("wrote:", *sorted(p.name for p in FIXTURES.glob("lsgkm_wgkm_*")), sep="\n  ")
@@ -150,16 +193,34 @@ def run_explain(explain):
             length = int(fa.stem.removeprefix("lsgkm_wgkm_test"))
             # mode 5 explains the central base, so needs an odd length
             modes = [m for m in EXPLAIN_MODES if m != 5 or length % 2]
-            jobs.append((f"lsgkm_wgkm_{name}.model.txt.gz", fa,
-                         f"lsgkm_wgkm_{name}_test{length}", modes))
+            jobs.append(
+                (
+                    f"lsgkm_wgkm_{name}.model.txt.gz",
+                    fa,
+                    f"lsgkm_wgkm_{name}_test{length}",
+                    modes,
+                )
+            )
     for kind in ("est", "rbf"):  # mode 5 outputs are already lsgkm_mode5_{kind}.txt
-        jobs.append((f"lsgkm_mode5_{kind}.model.txt.gz", FIXTURES / "lsgkm_mode5_test51.fa",
-                     f"lsgkm_mode5_{kind}", [m for m in EXPLAIN_MODES if m != 5]))
+        jobs.append(
+            (
+                f"lsgkm_mode5_{kind}.model.txt.gz",
+                FIXTURES / "lsgkm_mode5_test51.fa",
+                f"lsgkm_mode5_{kind}",
+                [m for m in EXPLAIN_MODES if m != 5],
+            )
+        )
         # The same -t 2/-t 3 models on the sets with N stretches and both window parities
         for fa in sorted(FIXTURES.glob("lsgkm_wgkm_test*.fa")):
             length = int(fa.stem.removeprefix("lsgkm_wgkm_test"))
-            jobs.append((f"lsgkm_mode5_{kind}.model.txt.gz", fa, f"lsgkm_mode5_{kind}_test{length}",
-                         [m for m in EXPLAIN_MODES if m != 5 or length % 2]))
+            jobs.append(
+                (
+                    f"lsgkm_mode5_{kind}.model.txt.gz",
+                    fa,
+                    f"lsgkm_mode5_{kind}_test{length}",
+                    [m for m in EXPLAIN_MODES if m != 5 or length % 2],
+                )
+            )
     for model_gz, fa, prefix, modes in jobs:
         # Plain text, without the "norc 0" line the fork rejects (RC on is its default)
         model = workdir / model_gz.removesuffix(".gz")

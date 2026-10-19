@@ -22,8 +22,11 @@ class OptionalBuildExt(build_ext):
         if linker:
             seen = set()
             self.compiler.linker_so = [
-                arg for arg in linker
-                if not (arg.startswith("-Wl,-rpath,") and (arg in seen or seen.add(arg)))
+                arg
+                for arg in linker
+                if not (
+                    arg.startswith("-Wl,-rpath,") and (arg in seen or seen.add(arg))
+                )
             ]
         try:
             super().build_extension(ext)

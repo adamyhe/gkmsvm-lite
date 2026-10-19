@@ -92,7 +92,12 @@ def load_classic_model(
         raise ValueError("Model file missing rho field")
 
     return build_model(
-        header, coefficients, sequences, bias=header["rho"][0],
-        n_expected=header.get("total_sv"), dtype=dtype, sv_chunk_size=sv_chunk_size,
+        header,
+        coefficients,
+        sequences,
+        bias=header["rho"][0],
+        n_expected=header.get("total_sv"),
+        dtype=dtype,
+        sv_chunk_size=sv_chunk_size,
         device=device,
     )

@@ -11,7 +11,8 @@ import numpy as np
 
 def _add_device_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "--device", default="auto",
+        "--device",
+        default="auto",
         choices=["auto", "cpu", "cuda", "mlx"],
         help="Compute device (default: auto).",
     )
@@ -19,7 +20,8 @@ def _add_device_arg(parser: argparse.ArgumentParser) -> None:
 
 def _add_bases_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "--allow-other-bases", action="store_true",
+        "--allow-other-bases",
+        action="store_true",
         help="Read letters other than ACGTN (IUPAC codes, ...) as N, scored as A as "
         "LS-GKM does, instead of stopping with an error. N is always allowed.",
     )
@@ -27,36 +29,61 @@ def _add_bases_arg(parser: argparse.ArgumentParser) -> None:
 
 def _add_kernel_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "-t", "--kernel-type", default="estimated",
+        "-t",
+        "--kernel-type",
+        default="estimated",
         help="Kernel type: 0-5, or name (default: estimated).",
     )
     parser.add_argument("-l", type=int, default=11, help="L-mer length (default: 11).")
-    parser.add_argument("-k", type=int, default=7, help="K informative positions (default: 7).")
+    parser.add_argument(
+        "-k", type=int, default=7, help="K informative positions (default: 7)."
+    )
     parser.add_argument("-d", type=int, default=3, help="Max mismatches (default: 3).")
-    parser.add_argument("--no-rc", action="store_true", help="Disable reverse complement.")
-    parser.add_argument("--gamma", type=float, default=1.0, help="RBF gamma (for -t 3, 5).")
-    parser.add_argument("-M", type=int, default=None,
-                        help="Center window weight, 1-255 (for -t 4, 5; default: 50).")
-    parser.add_argument("-H", type=float, default=None,
-                        help="Window weight half-life in bp (for -t 4, 5; default: 50).")
+    parser.add_argument(
+        "--no-rc", action="store_true", help="Disable reverse complement."
+    )
+    parser.add_argument(
+        "--gamma", type=float, default=1.0, help="RBF gamma (for -t 3, 5)."
+    )
+    parser.add_argument(
+        "-M",
+        type=int,
+        default=None,
+        help="Center window weight, 1-255 (for -t 4, 5; default: 50).",
+    )
+    parser.add_argument(
+        "-H",
+        type=float,
+        default=None,
+        help="Window weight half-life in bp (for -t 4, 5; default: 50).",
+    )
 
 
 def _load_model(path: str, device: str = "cpu"):
     from gkmsvm.serialization import load_model
+
     return load_model(path, device=device)
 
 
 def _read_seqs(path: str) -> list[tuple[str, str]]:
     from gkmsvm.fasta import read_fasta
+
     return read_fasta(path)
 
 
-def _encode_seqs(records: list[tuple[str, str]], args: argparse.Namespace) -> np.ndarray:
+def _encode_seqs(
+    records: list[tuple[str, str]], args: argparse.Namespace
+) -> np.ndarray:
     from gkmsvm.codec import one_hot_encode
+
     # N (and with --allow-other-bases any letter) encodes as all-zero, scored
     # as A, as in LS-GKM
-    return np.stack([one_hot_encode(seq, allow_n=True, allow_other=args.allow_other_bases)
-                     for name, seq in records])
+    return np.stack(
+        [
+            one_hot_encode(seq, allow_n=True, allow_other=args.allow_other_bases)
+            for name, seq in records
+        ]
+    )
 
 
 def _write_tsv(path: str | None, columns: tuple[str, str], names, values) -> None:
@@ -72,8 +99,11 @@ def _write_tsv(path: str | None, columns: tuple[str, str], names, values) -> Non
 def _save_model(model, path: str) -> None:
     """Save as .npz, or LS-GKM text for any other extension."""
     model.save(path, fmt="npz" if Path(path).suffix == ".npz" else "lsgkm")
-    print(f"Saved model to {path} "
-          f"({model.num_support_vectors} SVs, bias={model.bias:.4f})", file=sys.stderr)
+    print(
+        f"Saved model to {path} "
+        f"({model.num_support_vectors} SVs, bias={model.bias:.4f})",
+        file=sys.stderr,
+    )
 
 
 def cmd_predict(args: argparse.Namespace) -> None:
@@ -103,12 +133,16 @@ def cmd_train(args: argparse.Namespace) -> None:
     neg_seqs = [seq for _, seq in neg_records]
 
     model = train_gkmsvm(
-        pos_seqs, neg_seqs,
+        pos_seqs,
+        neg_seqs,
         kernel_type=args.kernel_type,
-        l=args.l, k=args.k, d=args.d,
+        l=args.l,
+        k=args.k,
+        d=args.d,
         C=args.C,
         gamma=args.gamma,
-        M=args.M, H=args.H,
+        M=args.M,
+        H=args.H,
         include_rc=not args.no_rc,
         solver=args.solver,
         cache_size=args.cache_size,
@@ -136,13 +170,17 @@ def cmd_trainsvr(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     model = train_gkmsvr(
-        seqs, labels,
+        seqs,
+        labels,
         kernel_type=args.kernel_type,
-        l=args.l, k=args.k, d=args.d,
+        l=args.l,
+        k=args.k,
+        d=args.d,
         C=args.C,
         epsilon=args.epsilon,
         gamma=args.gamma,
-        M=args.M, H=args.H,
+        M=args.M,
+        H=args.H,
         include_rc=not args.no_rc,
         solver=args.solver,
         device=args.device,
@@ -212,7 +250,8 @@ def cmd_deltasvm(args: argparse.Namespace) -> None:
     from gkmsvm.importers.deltasvm import load_deltasvm_model
 
     dsvm = load_deltasvm_model(
-        args.weights, args.l,
+        args.weights,
+        args.l,
         include_rc=not args.no_rc,
         device=args.device,
     )
@@ -223,18 +262,22 @@ def cmd_deltasvm(args: argparse.Namespace) -> None:
     X = dsvm._match_device(X)
 
     from gkmsvm.backend import to_cpu
+
     scores = to_cpu(dsvm(X, verbose=args.verbose).flatten())
     _write_tsv(args.output, ("name", "score"), names, scores)
 
 
 def cmd_to_deltasvm(args: argparse.Namespace) -> None:
     model = _load_model(args.model, device=args.device)
-    dsvm = model.to_deltasvm(device="cpu", query_norm=args.query_norm, verbose=args.verbose)
+    dsvm = model.to_deltasvm(
+        device="cpu", query_norm=args.query_norm, verbose=args.verbose
+    )
 
     output = Path(args.output)
     _save_deltasvm_weights(dsvm, output)
 
     from gkmsvm.backend import to_cpu
+
     n_nonzero = int((to_cpu(dsvm.weights) != 0).sum())
     n_total = dsvm.weights.shape[0]
     print(
@@ -282,9 +325,14 @@ def cmd_score_variants(args: argparse.Namespace) -> None:
 
     X_ref = model._match_device(X_ref)
     X_alt = model._match_device(X_alt)
-    deltas = to_cpu(model.score_variants(
-        X_ref, X_alt, method=args.method, verbose=args.verbose,
-    )).ravel()
+    deltas = to_cpu(
+        model.score_variants(
+            X_ref,
+            X_alt,
+            method=args.method,
+            verbose=args.verbose,
+        )
+    ).ravel()
     _write_tsv(args.output, ("name", "delta"), ref_names, deltas)
 
 
@@ -295,22 +343,25 @@ def cmd_import(args: argparse.Namespace) -> None:
 
     if fmt == "lsgkm":
         from gkmsvm.importers.lsgkm import load_lsgkm_model
+
         model = load_lsgkm_model(inp, device="cpu")
     elif fmt == "classic":
         from gkmsvm.importers.classic import load_classic_model
+
         model = load_classic_model(inp, device="cpu")
     elif fmt == "r_gkmsvm":
         from gkmsvm.importers.r_gkmsvm import load_r_gkmsvm_model
+
         model = load_r_gkmsvm_model(inp, device="cpu")
     else:
         print(f"Unknown format: {fmt}", file=sys.stderr)
         sys.exit(1)
 
     from gkmsvm.serialization import save_npz
+
     save_npz(model, output)
     print(
-        f"Imported {fmt} model → {output} "
-        f"({model.num_support_vectors} SVs)",
+        f"Imported {fmt} model → {output} ({model.num_support_vectors} SVs)",
         file=sys.stderr,
     )
 
@@ -321,16 +372,23 @@ def build_parser() -> argparse.ArgumentParser:
         description="Gapped k-mer SVM for DNA sequence analysis.",
     )
     parser.add_argument(
-        "-v", "--verbose", action="store_true", help="Show progress.",
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Show progress.",
     )
     sub = parser.add_subparsers(dest="command")
 
     # ── predict ──────────────────────────────────────────────────────
     p = sub.add_parser("predict", help="Score sequences with a trained model.")
-    p.add_argument("-m", "--model", required=True, help="Model file (.npz or .model.txt).")
+    p.add_argument(
+        "-m", "--model", required=True, help="Model file (.npz or .model.txt)."
+    )
     p.add_argument("-i", "--input", required=True, help="Input FASTA file.")
     p.add_argument("-o", "--output", default=None, help="Output TSV (default: stdout).")
-    p.add_argument("--batch-size", type=int, default=100, help="Batch size (default: 100).")
+    p.add_argument(
+        "--batch-size", type=int, default=100, help="Batch size (default: 100)."
+    )
     _add_device_arg(p)
     _add_bases_arg(p)
 
@@ -338,14 +396,22 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("train", help="Train a gkm-SVM classifier.")
     p.add_argument("-p", "--positives", required=True, help="Positive sequences FASTA.")
     p.add_argument("-n", "--negatives", required=True, help="Negative sequences FASTA.")
-    p.add_argument("-o", "--output", required=True, help="Output model (.npz or .model.txt).")
+    p.add_argument(
+        "-o", "--output", required=True, help="Output model (.npz or .model.txt)."
+    )
     p.add_argument("-C", type=float, default=1.0, help="Regularization (default: 1.0).")
     p.add_argument(
-        "--solver", default="auto", choices=["auto", "libsvm", "smo", "nystrom"],
+        "--solver",
+        default="auto",
+        choices=["auto", "libsvm", "smo", "nystrom"],
         help="Solver (default: auto: libsvm if the Gram fits in RAM, else smo).",
     )
-    p.add_argument("--cache-size", type=int, default=None,
-                   help="SMO kernel-column cache size (default: sized from available RAM).")
+    p.add_argument(
+        "--cache-size",
+        type=int,
+        default=None,
+        help="SMO kernel-column cache size (default: sized from available RAM).",
+    )
     _add_kernel_args(p)
     _add_device_arg(p)
     _add_bases_arg(p)
@@ -354,11 +420,17 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("trainsvr", help="Train a gkm-SVR regressor.")
     p.add_argument("-i", "--input", required=True, help="Sequences FASTA.")
     p.add_argument("--labels", required=True, help="Labels file (one value per line).")
-    p.add_argument("-o", "--output", required=True, help="Output model (.npz or .model.txt).")
-    p.add_argument("-C", type=float, default=1.0, help="Regularization (default: 1.0).")
-    p.add_argument("--epsilon", type=float, default=0.1, help="SVR epsilon (default: 0.1).")
     p.add_argument(
-        "--solver", default="auto", choices=["auto", "libsvm", "nystrom"],
+        "-o", "--output", required=True, help="Output model (.npz or .model.txt)."
+    )
+    p.add_argument("-C", type=float, default=1.0, help="Regularization (default: 1.0).")
+    p.add_argument(
+        "--epsilon", type=float, default=0.1, help="SVR epsilon (default: 0.1)."
+    )
+    p.add_argument(
+        "--solver",
+        default="auto",
+        choices=["auto", "libsvm", "nystrom"],
         help="Solver (default: auto).",
     )
     _add_kernel_args(p)
@@ -369,24 +441,31 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("ism", help="In-silico mutagenesis.")
     p.add_argument("-m", "--model", required=True, help="Model file.")
     p.add_argument("-i", "--input", required=True, help="Input FASTA.")
-    p.add_argument("-o", "--output", required=True, help="Output .npz file (scores + names).")
+    p.add_argument(
+        "-o", "--output", required=True, help="Output .npz file (scores + names)."
+    )
     _add_device_arg(p)
     _add_bases_arg(p)
 
     # ── explain ──────────────────────────────────────────────────────
     p = sub.add_parser(
-        "explain", help="GkmExplain attribution scores.",
+        "explain",
+        help="GkmExplain attribution scores.",
         epilog="Outputs two npz files for modisco: "
         "modisco motifs -s SEQS -a ATTR -n 2000 -o results.h5",
     )
     p.add_argument("-m", "--model", required=True, help="Model file.")
     p.add_argument("-i", "--input", required=True, help="Input FASTA.")
     p.add_argument(
-        "-o", "--output", required=True,
+        "-o",
+        "--output",
+        required=True,
         help="Attributions .npz file (hypothetical, [B,4,L] as arr_0).",
     )
     p.add_argument(
-        "-s", "--sequences-output", required=True,
+        "-s",
+        "--sequences-output",
+        required=True,
         help="Sequences .npz file (one-hot, [B,4,L] as arr_0).",
     )
     _add_device_arg(p)
@@ -404,13 +483,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     # ── to-deltasvm ──────────────────────────────────────────────────
     p = sub.add_parser(
-        "to-deltasvm", help="Convert a trained model to DeltaSVM weights.",
+        "to-deltasvm",
+        help="Convert a trained model to DeltaSVM weights.",
     )
-    p.add_argument("-m", "--model", required=True, help="Model file (.npz or .model.txt).")
+    p.add_argument(
+        "-m", "--model", required=True, help="Model file (.npz or .model.txt)."
+    )
     p.add_argument("-o", "--output", required=True, help="Output DeltaSVM weight file.")
-    p.add_argument("--query-norm", action="store_true",
-                   help="Keep each l-mer's normalization (weights = gkmpredict on the "
-                   "l-mer minus bias, as lsgkm deltaSVM weights; implied for RBF).")
+    p.add_argument(
+        "--query-norm",
+        action="store_true",
+        help="Keep each l-mer's normalization (weights = gkmpredict on the "
+        "l-mer minus bias, as lsgkm deltaSVM weights; implied for RBF).",
+    )
     _add_device_arg(p)
 
     # ── score-variants ──────────────────────────────────────────────
@@ -422,9 +507,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ref", required=True, help="Reference sequences FASTA.")
     p.add_argument("--alt", required=True, help="Alternate sequences FASTA.")
     p.add_argument("-o", "--output", default=None, help="Output TSV (default: stdout).")
-    p.add_argument("--method", default="kernel", choices=["kernel", "gkmexplain"],
-                   help="kernel: score(alt) - score(ref); gkmexplain: mutation impact "
-                   "(lsgkm gkmexplain -m 5). Default: kernel.")
+    p.add_argument(
+        "--method",
+        default="kernel",
+        choices=["kernel", "gkmexplain"],
+        help="kernel: score(alt) - score(ref); gkmexplain: mutation impact "
+        "(lsgkm gkmexplain -m 5). Default: kernel.",
+    )
     _add_device_arg(p)
     _add_bases_arg(p)
 
@@ -433,7 +522,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-i", "--input", required=True, help="Input model file.")
     p.add_argument("-o", "--output", required=True, help="Output .npz file.")
     p.add_argument(
-        "-f", "--format", required=True,
+        "-f",
+        "--format",
+        required=True,
         choices=["lsgkm", "classic", "r_gkmsvm"],
         help="Source format.",
     )

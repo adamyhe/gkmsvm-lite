@@ -55,31 +55,113 @@ ASSAY_KEYWORDS = {
 
 # Known cell type abbreviations
 CELL_TYPES = [
-    "A549", "Ag04449", "Ag04450", "Ag09309", "Ag09319", "Ag10803",
-    "Aoaf", "Be2c", "Bj", "Caco2", "Cmk", "Dnd41",
-    "Ecc1", "Gm06990", "Gm10847", "Gm12801", "Gm12864", "Gm12865",
-    "Gm12866", "Gm12867", "Gm12868", "Gm12869", "Gm12870", "Gm12871",
-    "Gm12872", "Gm12873", "Gm12874", "Gm12875", "Gm12878", "Gm12891",
-    "Gm12892", "Gm15510", "Gm18505", "Gm18507", "Gm18526", "Gm18951",
-    "Gm19099", "Gm19193", "Gm19238", "Gm19239", "Gm19240",
-    "H1hesc", "H7hesc", "H9es", "Hae", "Hbmec", "Hcf", "Hcfaa",
-    "Hcm", "Hcpe", "Hct116", "Hee", "Hela", "Helas3",
-    "Hepg2", "Hipec", "Hl60", "Hmec", "Hmf", "Hmvecdblad",
-    "Hpaf", "Hpdlf", "Hpf", "Hrce", "Hre", "Hrpe",
-    "Hsmm", "Hsmmtube", "Htr8", "Huvec",
-    "Imr90", "Ishikawa",
+    "A549",
+    "Ag04449",
+    "Ag04450",
+    "Ag09309",
+    "Ag09319",
+    "Ag10803",
+    "Aoaf",
+    "Be2c",
+    "Bj",
+    "Caco2",
+    "Cmk",
+    "Dnd41",
+    "Ecc1",
+    "Gm06990",
+    "Gm10847",
+    "Gm12801",
+    "Gm12864",
+    "Gm12865",
+    "Gm12866",
+    "Gm12867",
+    "Gm12868",
+    "Gm12869",
+    "Gm12870",
+    "Gm12871",
+    "Gm12872",
+    "Gm12873",
+    "Gm12874",
+    "Gm12875",
+    "Gm12878",
+    "Gm12891",
+    "Gm12892",
+    "Gm15510",
+    "Gm18505",
+    "Gm18507",
+    "Gm18526",
+    "Gm18951",
+    "Gm19099",
+    "Gm19193",
+    "Gm19238",
+    "Gm19239",
+    "Gm19240",
+    "H1hesc",
+    "H7hesc",
+    "H9es",
+    "Hae",
+    "Hbmec",
+    "Hcf",
+    "Hcfaa",
+    "Hcm",
+    "Hcpe",
+    "Hct116",
+    "Hee",
+    "Hela",
+    "Helas3",
+    "Hepg2",
+    "Hipec",
+    "Hl60",
+    "Hmec",
+    "Hmf",
+    "Hmvecdblad",
+    "Hpaf",
+    "Hpdlf",
+    "Hpf",
+    "Hrce",
+    "Hre",
+    "Hrpe",
+    "Hsmm",
+    "Hsmmtube",
+    "Htr8",
+    "Huvec",
+    "Imr90",
+    "Ishikawa",
     "Jurkat",
-    "K562", "Lncap",
-    "Mcf7", "Mcf10aer",
-    "Nb4", "Nhdfad", "Nhek", "Nhlf",
-    "Osteoblast", "Osteobl",
-    "Panc1", "Panislets", "Pfsk1", "Progfib",
-    "Raji", "Rptec",
-    "Saec", "Sknmc", "Sknshra", "Sknshmc", "Sknshsy5y", "Sknshsysy",
-    "Sknshramc", "Sknmcmc", "Sknshra",
-    "T47d", "Th1", "Th2", "Trexhek293",
-    "U2os", "U87", "Urothelia",
-    "Werirb1", "Wi38",
+    "K562",
+    "Lncap",
+    "Mcf7",
+    "Mcf10aer",
+    "Nb4",
+    "Nhdfad",
+    "Nhek",
+    "Nhlf",
+    "Osteoblast",
+    "Osteobl",
+    "Panc1",
+    "Panislets",
+    "Pfsk1",
+    "Progfib",
+    "Raji",
+    "Rptec",
+    "Saec",
+    "Sknmc",
+    "Sknshra",
+    "Sknshmc",
+    "Sknshsy5y",
+    "Sknshsysy",
+    "Sknshramc",
+    "Sknmcmc",
+    "Sknshra",
+    "T47d",
+    "Th1",
+    "Th2",
+    "Trexhek293",
+    "U2os",
+    "U87",
+    "Urothelia",
+    "Werirb1",
+    "Wi38",
 ]
 
 # Build case-insensitive lookup
@@ -120,14 +202,14 @@ def parse_filename(filename: str) -> dict:
     if not name.startswith("wgEncode"):
         info["conditions"] = name
         return info
-    name = name[len("wgEncode"):]
+    name = name[len("wgEncode") :]
 
     # Extract source lab
     for src in sorted(SOURCES.keys(), key=len, reverse=True):
         if name.startswith(src):
             info["source"] = src
             info["source_full"] = SOURCES[src]
-            name = name[len(src):]
+            name = name[len(src) :]
             break
 
     # Extract assay keyword
@@ -135,7 +217,7 @@ def parse_filename(filename: str) -> dict:
         if name.startswith(kw):
             info["assay_keyword"] = kw
             info["assay"] = ASSAY_KEYWORDS[kw]
-            name = name[len(kw):]
+            name = name[len(kw) :]
             break
 
     # Extract cell type (greedy match against known cell types)
@@ -147,13 +229,16 @@ def parse_filename(filename: str) -> dict:
 
     if matched_cell:
         info["cell_type"] = _CELL_LOWER[matched_cell]
-        name = name[len(matched_cell):]
+        name = name[len(matched_cell) :]
 
     # Remaining text: target factor + conditions
     # Split at first uppercase-to-lowercase boundary after initial caps
     # e.g., "Atf3V0416101AlnRep0" → target="Atf3", conditions="V0416101AlnRep0"
     # Heuristic: target is the first CamelCase word
-    m = re.match(r"([A-Z][a-z0-9]*(?:[A-Z][a-z0-9]*)*?)((?:V\d|Sc\d|Pcr|Std|Ucd|Iggab|Iggmus|Ifn|Aln|sc-|ab\d|Rep|Dm).*)?$", name)
+    m = re.match(
+        r"([A-Z][a-z0-9]*(?:[A-Z][a-z0-9]*)*?)((?:V\d|Sc\d|Pcr|Std|Ucd|Iggab|Iggmus|Ifn|Aln|sc-|ab\d|Rep|Dm).*)?$",
+        name,
+    )
     if m:
         info["target"] = m.group(1)
         info["conditions"] = m.group(2) or ""
@@ -263,7 +348,9 @@ def main():
         description="Scrape Zenodo/Kipoi LS-GKM model metadata"
     )
     parser.add_argument(
-        "--outdir", type=Path, default=Path("data/encode_gkmsvm"),
+        "--outdir",
+        type=Path,
+        default=Path("data/encode_gkmsvm"),
     )
     args = parser.parse_args()
     args.outdir.mkdir(parents=True, exist_ok=True)

@@ -120,8 +120,10 @@ Or programmatically (the `modisco` package, kundajelab/tfmodisco, still imports 
 
 ```python
 import modiscolite
+
 pos_patterns, neg_patterns = modiscolite.tfmodisco.TFMoDISco(
-    hypothetical_contribs=attr.transpose(0, 2, 1), one_hot=seqs.transpose(0, 2, 1),
+    hypothetical_contribs=attr.transpose(0, 2, 1),
+    one_hot=seqs.transpose(0, 2, 1),
     max_seqlets_per_metacluster=50000,
 )
 ```

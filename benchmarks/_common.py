@@ -40,8 +40,9 @@ LSGKM_THREADS = (1, 4, 16)
 
 def _run(cmd: list[str], cwd: Path | None = None) -> str | None:
     try:
-        out = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=30,
-                             check=False)
+        out = subprocess.run(
+            cmd, cwd=cwd, capture_output=True, text=True, timeout=30, check=False
+        )
     except (OSError, subprocess.TimeoutExpired):
         return None
     return out.stdout.strip() if out.returncode == 0 else None
@@ -124,8 +125,10 @@ def _versions() -> str:
         f"gkmsvm-lite {lite}",
         f"python {platform.python_version()}",
         f"numpy {np.__version__}",
-        (f"numba {numba.__version__} ({numba.get_num_threads()} threads, "
-         f"{numba.threading_layer()} layer)"),
+        (
+            f"numba {numba.__version__} ({numba.get_num_threads()} threads, "
+            f"{numba.threading_layer()} layer)"
+        ),
     ]
     try:
         import cupy as cp
@@ -159,12 +162,17 @@ def set_cpu_threads(n: int) -> int:
             f"{n} threads requested but this process can use {usable} CPU(s) "
             "(affinity or cgroup limit); CPU timings will not reflect that thread "
             "count. Request more cores from the scheduler.",
-            RuntimeWarning, stacklevel=2,
+            RuntimeWarning,
+            stacklevel=2,
         )
     n = max(1, min(n, numba.config.NUMBA_NUM_THREADS))
     numba.set_num_threads(n)
-    for var in ("NUMBA_NUM_THREADS", "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
-                "MKL_NUM_THREADS"):
+    for var in (
+        "NUMBA_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+    ):
         _CHILD_THREAD_ENV[var] = str(n)
     return n
 
@@ -174,7 +182,9 @@ def lsgkm_default_threads() -> int:
     return max(t for t in LSGKM_THREADS if t <= usable_cores())
 
 
-def lsgkm_binary(name: str, conda_env: str = "lsgkm", bin_dir: str | None = None) -> str | None:
+def lsgkm_binary(
+    name: str, conda_env: str = "lsgkm", bin_dir: str | None = None
+) -> str | None:
     """Path to an LS-GKM binary: from ``conda_env`` if it has one, else ``bin_dir/name``.
 
     The conda build comes first because its gkmpredict takes -T; ``bin_dir``
@@ -192,14 +202,20 @@ def lsgkm_binary(name: str, conda_env: str = "lsgkm", bin_dir: str | None = None
 def lsgkm_has_option(binary: str, option: str) -> bool:
     """Whether an LS-GKM binary's usage text lists ``option`` (e.g. ``-T``)."""
     try:
-        out = subprocess.run([binary], capture_output=True, text=True, timeout=30, check=False)
+        out = subprocess.run(
+            [binary], capture_output=True, text=True, timeout=30, check=False
+        )
     except (OSError, subprocess.TimeoutExpired):
         return False
     import re
 
     # Usage lines may indent options with tabs: match on any whitespace
-    return re.search(rf"(^|\s){re.escape(option)}(\s|$)", out.stdout + out.stderr,
-                     re.MULTILINE) is not None
+    return (
+        re.search(
+            rf"(^|\s){re.escape(option)}(\s|$)", out.stdout + out.stderr, re.MULTILINE
+        )
+        is not None
+    )
 
 
 # mLS-GKM (Howard & Harmston 2026, github.com/harmstonlab/mLS-GKM): LS-GKM with
@@ -232,7 +248,9 @@ def mlsgkm_version(bin_dir: str | None) -> str | None:
     """git commit of an mLS-GKM checkout (bin_dir is <checkout>/bin), if any."""
     if not bin_dir:
         return None
-    commit = _run(["git", "rev-parse", "--short", "HEAD"], cwd=Path(bin_dir).resolve().parent)
+    commit = _run(
+        ["git", "rev-parse", "--short", "HEAD"], cwd=Path(bin_dir).resolve().parent
+    )
     return f"mLS-GKM {commit}" if commit else "mLS-GKM"
 
 
@@ -249,7 +267,9 @@ def provenance(device: str | None = None, **extra) -> dict[str, str]:
     """Key/value header describing how a result was produced."""
     info = {
         "commit": _git_commit(),
-        "date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        "date": datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y-%m-%d %H:%M UTC"
+        ),
         "host": socket.gethostname(),
         "command": " ".join([Path(sys.argv[0]).name] + sys.argv[1:]),
         "cpu": f"{_cpu_model()}, {os.cpu_count()} logical cores, {usable_cores()} usable",
@@ -308,7 +328,7 @@ def read_seqs(path) -> list[str]:
     import gzip
 
     path = Path(path)
-    with (gzip.open(path, "rt") if path.suffix == ".gz" else open(path)) as f:
+    with gzip.open(path, "rt") if path.suffix == ".gz" else open(path) as f:
         records = f.read().split(">")[1:]
     return ["".join(r.splitlines()[1:]) for r in records]
 
@@ -352,8 +372,13 @@ def run_measured(cmd: list[str], timeout: float | None = None) -> Measured:
     with tempfile.TemporaryFile("w+") as out, tempfile.TemporaryFile("w+") as err:
         t0 = time.perf_counter()
         # Popen returns once the child has exec'd, so every poll sees its own memory
-        proc = subprocess.Popen(cmd, stdout=out, stderr=err, text=True,
-                                env={**os.environ, **_CHILD_THREAD_ENV})
+        proc = subprocess.Popen(
+            cmd,
+            stdout=out,
+            stderr=err,
+            text=True,
+            env={**os.environ, **_CHILD_THREAD_ENV},
+        )
         status = "ok"
         while True:
             h = _vm_hwm_mb(proc.pid)
@@ -376,8 +401,11 @@ def run_measured(cmd: list[str], timeout: float | None = None) -> Measured:
         err.seek(0)
         stdout, stderr = out.read(), err.read()
     # ru_maxrss is KiB on Linux, bytes on macOS
-    rss = hwm if hwm is not None else usage.ru_maxrss / (
-        1024**2 if sys.platform == "darwin" else 1024)
+    rss = (
+        hwm
+        if hwm is not None
+        else usage.ru_maxrss / (1024**2 if sys.platform == "darwin" else 1024)
+    )
     return Measured(status, wall, rss, stdout, stderr)
 
 
@@ -385,7 +413,7 @@ def worker_result(stdout: str) -> dict | None:
     """Parse the ``RESULT {json}`` line a benchmark worker prints last."""
     for line in reversed(stdout.splitlines()):
         if line.startswith("RESULT "):
-            return json.loads(line[len("RESULT "):])
+            return json.loads(line[len("RESULT ") :])
     return None
 
 
@@ -425,8 +453,17 @@ def _jit_workload(device: str) -> None:
     alt[:, :, 30] = np.roll(X[:, :, 30], 1, axis=1)
     for kernel in ("estimated", "rbf"):
         for solver in ("libsvm", "smo", "nystrom"):
-            model = train_gkmsvm(seqs[:40], seqs[40:], kernel_type=kernel, l=6, k=4, d=2,
-                                 solver=solver, device=device, verbose=False)
+            model = train_gkmsvm(
+                seqs[:40],
+                seqs[40:],
+                kernel_type=kernel,
+                l=6,
+                k=4,
+                d=2,
+                solver=solver,
+                device=device,
+                verbose=False,
+            )
         if device == "cuda":
             model.cuda()
         for table, index in ((True, True), (False, True), (False, False)):
@@ -454,7 +491,9 @@ def warm_jit_cache(device: str) -> None:
     """
     t0 = time.perf_counter()
     for dev in ["cpu", "cuda"] if device == "cuda" else ["cpu"]:
-        m = run_measured([sys.executable, str(Path(__file__).resolve()), "--warm-jit", dev])
+        m = run_measured(
+            [sys.executable, str(Path(__file__).resolve()), "--warm-jit", dev]
+        )
         if m.status != "ok":
             print(f"JIT warm-up on {dev} {m.status}: {m.stderr[-500:]}")
     print(f"JIT cache warm-up: {time.perf_counter() - t0:.0f}s")

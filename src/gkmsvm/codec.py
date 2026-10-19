@@ -19,8 +19,8 @@ _OHE_MAPPING = np.full(256, -2, dtype=np.int8)
 for _i, _b in enumerate(BASES):
     _OHE_MAPPING[ord(_b)] = _i
     _OHE_MAPPING[ord(_b.lower())] = _i
-_OHE_MAPPING[ord('N')] = -1
-_OHE_MAPPING[ord('n')] = -1
+_OHE_MAPPING[ord("N")] = -1
+_OHE_MAPPING[ord("n")] = -1
 
 
 @numba.njit(cache=True)
@@ -33,8 +33,10 @@ def _fast_one_hot(out, seq, mapping, allow_n, allow_other):
             if not allow_n:
                 raise ValueError("Invalid base in sequence (pass allow_n=True for N)")
         elif not allow_other:
-            raise ValueError("Invalid base in sequence (pass allow_other=True to read "
-                             "non-ACGTN letters as N)")
+            raise ValueError(
+                "Invalid base in sequence (pass allow_other=True to read "
+                "non-ACGTN letters as N)"
+            )
 
 
 def one_hot_encode(
@@ -126,8 +128,10 @@ def encode_batch(
     if not sequences:
         raise ValueError("Sequence list must be non-empty")
 
-    encoded = [one_hot_encode(s, dtype=dtype, allow_n=allow_n, allow_other=allow_other)
-               for s in sequences]
+    encoded = [
+        one_hot_encode(s, dtype=dtype, allow_n=allow_n, allow_other=allow_other)
+        for s in sequences
+    ]
     lengths = [t.shape[1] for t in encoded]
     L_max = max(lengths)
     B = len(sequences)

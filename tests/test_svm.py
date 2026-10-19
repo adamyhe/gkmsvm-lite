@@ -11,11 +11,13 @@ from gkmsvm.svm import GkmSVM
 @pytest.fixture
 def small_model():
     """A small GkmSVM with 3 support vectors, l=3, k=2."""
-    svs = np.stack([
-        one_hot_encode("ACGT"),
-        one_hot_encode("AAAA"),
-        one_hot_encode("CCCC"),
-    ])
+    svs = np.stack(
+        [
+            one_hot_encode("ACGT"),
+            one_hot_encode("AAAA"),
+            one_hot_encode("CCCC"),
+        ]
+    )
     coefs = np.array([0.5, -0.3, 0.2], dtype=np.float32)
     return GkmSVM(
         support_sequences=svs,
@@ -130,15 +132,21 @@ class TestGkmSVMChunked:
         coefs = np.random.RandomState(42).randn(20).astype(np.float32)
         queries = np.stack([one_hot_encode(s) for s in seqs[:5]])
 
-        model = GkmSVM(svs, coefs, -0.1, "gkm_esttrunc",
-                        {"L": 11, "k": 7, "d": 3, "include_rc": True})
+        model = GkmSVM(
+            svs,
+            coefs,
+            -0.1,
+            "gkm_esttrunc",
+            {"L": 11, "k": 7, "d": 3, "include_rc": True},
+        )
         full = model(queries)
 
         for chunk in [3, 7, 10, 20]:
             model.sv_chunk_size = chunk
             chunked = model(queries)
-            np.testing.assert_allclose(full, chunked, atol=1e-6,
-                err_msg=f"chunk_size={chunk}")
+            np.testing.assert_allclose(
+                full, chunked, atol=1e-6, err_msg=f"chunk_size={chunk}"
+            )
 
 
 class TestGkmSVMVariants:
@@ -157,7 +165,9 @@ class TestGkmSVMVariants:
         small_model._MIN_BATCH_BYTES = 0  # keep batch_size=2 as given
         np.testing.assert_allclose(
             small_model.score_variants(ref, alt, batch_size=2),
-            small_model(alt) - small_model(ref), rtol=1e-6)
+            small_model(alt) - small_model(ref),
+            rtol=1e-6,
+        )
 
     def test_min_batch_size(self, small_model):
         assert small_model._min_batch_size(None) is None
@@ -181,7 +191,10 @@ class TestToDeltaSVM:
         svs = np.stack([one_hot_encode(s) for s in seqs[:5]])
         coefs = np.array([0.5, -0.3, 0.2, -0.1, 0.4], dtype=np.float32)
         model = GkmSVM(
-            svs, coefs, bias=-0.05, kernel_type="gkm_cnt",
+            svs,
+            coefs,
+            bias=-0.05,
+            kernel_type="gkm_cnt",
             kernel_params={"L": 3, "k": 2, "include_rc": True},
         )
         dsvm = model.to_deltasvm()
@@ -212,7 +225,7 @@ class TestToDeltaSVM:
             ref = one_hot_encode(seq)[np.newaxis]
             p = 25
             new_b = "C" if seq[p] != "C" else "A"
-            alt = one_hot_encode(seq[:p] + new_b + seq[p + 1:])[np.newaxis]
+            alt = one_hot_encode(seq[:p] + new_b + seq[p + 1 :])[np.newaxis]
             svm_d.append((model(alt) - model(ref)).item())
             dsvm_d.append((dsvm(alt) - dsvm(ref)).item())
 
@@ -223,7 +236,10 @@ class TestToDeltaSVM:
         svs = np.stack([one_hot_encode("A" * 20)])
         coefs = np.array([1.0], dtype=np.float32)
         model = GkmSVM(
-            svs, coefs, bias=0.0, kernel_type="gkm_cnt",
+            svs,
+            coefs,
+            bias=0.0,
+            kernel_type="gkm_cnt",
             kernel_params={"L": 15, "k": 7, "include_rc": False},
         )
         with pytest.raises(ValueError, match="l <= 14"):
@@ -241,7 +257,7 @@ class TestNPacking:
         for _ in range(n):
             s = [rng.choice("ACGT") for _ in range(length)]
             a = rng.randrange(length - 8)
-            s[a:a + 8] = "N" * 8
+            s[a : a + 8] = "N" * 8
             seqs.append("".join(s))
         return seqs
 
@@ -249,8 +265,13 @@ class TestNPacking:
     def test_rc_windows_read_n_as_t(self, kernel_type):
         from gkmsvm.codec import reverse_complement
 
-        model = GkmSVM(np.stack([one_hot_encode("ACGTACGTACGT")]), np.ones(1), 0.0,
-                       kernel_type, {"L": 6, "k": 4, "d": 2, "gamma": 1.0})
+        model = GkmSVM(
+            np.stack([one_hot_encode("ACGTACGTACGT")]),
+            np.ones(1),
+            0.0,
+            kernel_type,
+            {"L": 6, "k": 4, "d": 2, "gamma": 1.0},
+        )
         base = model.kernel.base
         seqs = self._seqs_with_n(5, 40, seed=0)
         x = np.stack([one_hot_encode(s, allow_n=True) for s in seqs])
@@ -266,10 +287,12 @@ class TestNPacking:
         from gkmsvm.explain import gkmexplain
 
         rng = np.random.default_rng(0)
-        svs = np.stack([one_hot_encode(s, allow_n=True)
-                        for s in self._seqs_with_n(40, 50, seed=1)])
-        model = GkmSVM(svs, rng.normal(size=40), 0.3, "gkm_esttrunc",
-                       {"L": 8, "k": 5, "d": 2})
+        svs = np.stack(
+            [one_hot_encode(s, allow_n=True) for s in self._seqs_with_n(40, 50, seed=1)]
+        )
+        model = GkmSVM(
+            svs, rng.normal(size=40), 0.3, "gkm_esttrunc", {"L": 8, "k": 5, "d": 2}
+        )
         x = np.stack([one_hot_encode(s) for s in TestNPacking._acgt(20, 50, seed=2)])
         model.use_lmer_table = True
         table = model(x)

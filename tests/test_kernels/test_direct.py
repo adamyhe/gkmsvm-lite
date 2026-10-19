@@ -121,7 +121,9 @@ def _flat_windows(x, l):
 
 def _table_oracle(kernel, x, y):
     """K_raw from one-hot window match counts and the mismatch table."""
-    matches = np.einsum("bif,sjf->bsij", _flat_windows(x, kernel.l), _flat_windows(y, kernel.l))
+    matches = np.einsum(
+        "bif,sjf->bsij", _flat_windows(x, kernel.l), _flat_windows(y, kernel.l)
+    )
     mism = np.clip(np.rint(kernel.l - matches).astype(np.int64), 0, kernel.l)
     return np.asarray(kernel._mismatch_table)[mism].sum(axis=(-2, -1))
 
@@ -139,8 +141,10 @@ class TestTableOracle:
 
     def test_esttrunc(self):
         from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
+
         kernel = EstTruncGkmKernel(11, 7, d=3, normalize=False, include_rc=False)
         import random
+
         rng = random.Random(77)
         seqs = ["".join(rng.choice("ACGT") for _ in range(30)) for _ in range(10)]
         x = np.stack([one_hot_encode(s) for s in seqs[:4]])
@@ -165,8 +169,8 @@ class TestDirectGkmKernelEdgeCases:
 
     def test_different_lengths(self):
         kernel = DirectGkmKernel(l=3, k=2, normalize=True, include_rc=False)
-        x = one_hot_encode("ACGT")[np.newaxis]     # 2 windows
-        y = one_hot_encode("ACGTAC")[np.newaxis]   # 4 windows
+        x = one_hot_encode("ACGT")[np.newaxis]  # 2 windows
+        y = one_hot_encode("ACGTAC")[np.newaxis]  # 4 windows
         k = kernel.pairwise(x, y)
         assert k.shape == (1, 1)
         assert 0.0 <= float(k[0, 0]) <= 1.0
@@ -187,8 +191,11 @@ def test_self_kernel_all_pairs(l, k, d, include_rc):
     """raw_diag_packed (symmetric half, 4-row blocks) equals the sum over every window pair."""
     from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
 
-    kernel = (DirectGkmKernel(l=l, k=k, include_rc=include_rc) if d is None
-              else EstTruncGkmKernel(l, k, d=d, include_rc=include_rc))
+    kernel = (
+        DirectGkmKernel(l=l, k=k, include_rc=include_rc)
+        if d is None
+        else EstTruncGkmKernel(l, k, d=d, include_rc=include_rc)
+    )
     rng = np.random.default_rng(0)
     x = np.eye(4)[rng.integers(0, 4, (12, 60))].transpose(0, 2, 1)
     x[::3, :, rng.integers(0, 60, 5)] = 0  # rows with N take the unpaired RC path
@@ -212,4 +219,6 @@ def test_d_truncates_like_lsgkm():
     np.testing.assert_array_equal(trunc._mismatch_table[:5], [330, 120, 36, 8, 0])
     x = one_hot_encode("ACGT" * 8)[None]
     assert GkmSVM(x, np.ones(1), 0.0, "gkm_cnt", {"L": 11, "k": 7}).kernel.d is None
-    assert GkmSVM(x, np.ones(1), 0.0, "gkm_cnt", {"L": 11, "k": 7, "d": 3}).kernel.d == 3
+    assert (
+        GkmSVM(x, np.ones(1), 0.0, "gkm_cnt", {"L": 11, "k": 7, "d": 3}).kernel.d == 3
+    )

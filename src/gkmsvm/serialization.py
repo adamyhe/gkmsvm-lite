@@ -159,4 +159,5 @@ def load_model(path: str | Path, *, device: str = "cpu"):
         return load_npz(path, device=device)
 
     from gkmsvm.importers.lsgkm import load_lsgkm_model
+
     return load_lsgkm_model(str(path), device=device)
