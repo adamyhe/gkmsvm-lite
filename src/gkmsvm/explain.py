@@ -732,8 +732,9 @@ def gkmexplain(
         verbose: Show tqdm progress bar over input batches.
 
     Returns:
-        [B, 4, L] attribution scores; 0 past each sequence's length, NaN for
-        sequences shorter than l (with a warning).
+        [B, 4, L] float64 attribution scores on the model's device (NumPy for
+        a model on MLX, which explains on CPU); 0 past each sequence's
+        length, NaN for sequences shorter than l (with a warning).
     """
     resolved = _MODE_ALIASES.get(mode)
     if resolved is None:
@@ -748,11 +749,11 @@ def gkmexplain(
     if is_mlx(x):
         # Metal can't accumulate in float64, which the completeness axiom needs
         warnings.warn(
-            "GkmExplain does not have an MLX kernel — falling back to CPU. "
-            "This will be slower than MLX inference.",
+            "GkmExplain does not have an MLX kernel: it runs on CPU and returns "
+            "a NumPy float64 array.",
             stacklevel=2,
         )
-        from gkmsvm.backend import to_cpu, to_mlx
+        from gkmsvm.backend import to_cpu
 
         # A CPU copy of the model, kept with the model's caches so its packed
         # SVs, norms and l-mer weights are built once
@@ -772,7 +773,7 @@ def gkmexplain(
             cpu_model.use_explain_table = model.use_explain_table
             model._sv_cache["cpu_model"] = cpu_model
         out = _gkmexplain(cpu_model, to_cpu(x), lengths, resolved, batch_size, verbose)
-        return to_mlx(_per_position(out, lengths, short).astype(np.float32))
+        return _per_position(out, lengths, short)
     out = _gkmexplain(model, x, lengths, resolved, batch_size, verbose)
     return _per_position(out, lengths, short)
 

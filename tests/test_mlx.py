@@ -222,7 +222,7 @@ class TestMLXIsm:
 
 
 # ---------------------------------------------------------------------------
-# GkmExplain (CPU fallback — verifies explain still works when model is on MLX)
+# GkmExplain (runs on CPU for a model on MLX and returns NumPy)
 # ---------------------------------------------------------------------------
 
 
@@ -687,7 +687,7 @@ def test_gkmexplain_mlx_reuses_cpu_model():
     """The MLX fallback keeps one CPU copy of the model (its caches survive calls)."""
     import warnings
 
-    from gkmsvm.backend import is_mlx, to_mlx
+    from gkmsvm.backend import to_mlx
     from gkmsvm.explain import gkmexplain
 
     rng = np.random.default_rng(0)
@@ -707,6 +707,8 @@ def test_gkmexplain_mlx_reuses_cpu_model():
         first = gkmexplain(model, to_mlx(x), mode="hypothetical")
         cpu_model = model._sv_cache["cpu_model"]
         second = gkmexplain(model, to_mlx(x), mode="importance")
-    assert is_mlx(first) and model._sv_cache["cpu_model"] is cpu_model
-    np.testing.assert_allclose(np.array(first), expected, rtol=1e-6)
-    np.testing.assert_allclose(np.array(second), expected * x, rtol=1e-6)
+    # Explained on CPU, so NumPy float64
+    assert isinstance(first, np.ndarray) and first.dtype == np.float64
+    assert model._sv_cache["cpu_model"] is cpu_model
+    np.testing.assert_allclose(first, expected, rtol=1e-6)
+    np.testing.assert_allclose(second, expected * x, rtol=1e-6)

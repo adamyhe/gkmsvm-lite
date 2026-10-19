@@ -105,7 +105,7 @@ scores = model(x)  # inputs are moved to the model's device; outputs stay there
 model.cpu()  # back to CPU
 ```
 
-Moving a model drops its device caches (packed SVs, l-mer index), which are rebuilt on the first call. MLX runs custom Metal kernels and returns float32 scores (Metal has no float64); GkmExplain attribution on MLX falls back to CPU. Apple Silicon's memory is shared between CPU and GPU, so other processes compete for it. Timings are in [performance](performance.md).
+Moving a model drops its device caches (packed SVs, l-mer index), which are rebuilt on the first call. MLX runs custom Metal kernels and returns float32 scores (Metal has no float64); GkmExplain attribution on an MLX model runs on CPU and returns a NumPy float64 array. Apple Silicon's memory is shared between CPU and GPU, so other processes compete for it. Timings are in [performance](performance.md).
 
 ## Memory management
 
