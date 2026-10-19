@@ -948,7 +948,7 @@ def _explain_lmer_cuda(model, x, V, index, coef, inv_ds, masks, levels, table_a,
         V = c["explain_V_cuda"]
         offsets = ids = None
     else:
-        offsets, ids, _, _ = index._arrays("cuda")
+        offsets, ids = index._arrays("cuda")[:2]
         coef_d = cp.asarray(coef)
         inv_ds_d = cp.asarray(inv_ds)
     masks, levels = cp.asarray(masks), cp.asarray(levels)
