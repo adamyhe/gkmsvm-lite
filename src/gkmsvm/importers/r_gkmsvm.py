@@ -64,15 +64,16 @@ def load_r_gkmsvm_model(
         candidate = path.parent / f"{stem}_svseq.fa"
         if candidate.exists():
             return _load_twofile(path, candidate, dtype, sv_chunk_size, device)
-        raise FileNotFoundError(
-            f"Expected companion file {candidate} for {path}"
-        )
+        raise FileNotFoundError(f"Expected companion file {candidate} for {path}")
 
     return _load_gkmmodel(path, dtype, sv_chunk_size, device)
 
 
 def _load_gkmmodel(
-    path: Path, dtype, sv_chunk_size, device="cpu",
+    path: Path,
+    dtype,
+    sv_chunk_size,
+    device="cpu",
 ) -> GkmSVM:
     """Parse unified .gkmmodel format with #-prefixed headers."""
     header: dict = {}
@@ -117,7 +118,11 @@ def _load_gkmmodel(
 
 
 def _load_twofile(
-    alpha_path: Path, svseq_path: Path, dtype, sv_chunk_size, device="cpu",
+    alpha_path: Path,
+    svseq_path: Path,
+    dtype,
+    sv_chunk_size,
+    device="cpu",
 ) -> GkmSVM:
     """Parse legacy two-file format: _svalpha.out + _svseq.fa."""
     header: dict = {}
@@ -148,12 +153,20 @@ def _load_twofile(
     return _build_model(header, coefficients, sequences, dtype, sv_chunk_size, device)
 
 
-def _build_model(header, coefficients, sequences, dtype, sv_chunk_size, device) -> GkmSVM:
+def _build_model(
+    header, coefficients, sequences, dtype, sv_chunk_size, device
+) -> GkmSVM:
     if header.get("rho") is None:
         raise ValueError("Model file missing #rho header")
     header = {"L": 11, "k": 7, "d": 3, **header}
     return build_model(
-        header, coefficients, sequences, bias=header["rho"][0],
-        n_expected=header.get("nsv"), default_kernel="gkm_esttrunc", dtype=dtype,
-        sv_chunk_size=sv_chunk_size, device=device,
+        header,
+        coefficients,
+        sequences,
+        bias=header["rho"][0],
+        n_expected=header.get("nsv"),
+        default_kernel="gkm_esttrunc",
+        dtype=dtype,
+        sv_chunk_size=sv_chunk_size,
+        device=device,
     )

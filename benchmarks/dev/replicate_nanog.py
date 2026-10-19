@@ -77,6 +77,7 @@ def download_data(skip_ref_scores=False):
 
 def read_fasta(path):
     from gkmsvm.fasta import read_fasta as _read_fasta
+
     return _read_fasta(path)
 
 
@@ -102,9 +103,11 @@ def _parse_lsgkm_explain_scores(path):
 def _to_device(arr, device):
     if device == "cuda":
         from gkmsvm.backend import to_gpu
+
         return to_gpu(arr)
     elif device == "mlx":
         from gkmsvm.backend import to_mlx
+
         return to_mlx(arr)
     return arr
 
@@ -112,6 +115,7 @@ def _to_device(arr, device):
 def _to_numpy(arr, device):
     if device == "cuda":
         from gkmsvm.backend import to_cpu
+
         return to_cpu(arr)
     return np.asarray(arr)
 
@@ -137,11 +141,17 @@ def main():
         help="Solver for training",
     )
     parser.add_argument(
-        "--batch-size", type=int, default=50,
+        "--batch-size",
+        type=int,
+        default=50,
         help="Batch size for GkmExplain (lower if GPU OOM)",
     )
-    parser.add_argument("-v", "--verbose", action="store_true",
-                        help="Show progress bars during scoring and attribution")
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Show progress bars during scoring and attribution",
+    )
     args = parser.parse_args()
 
     print("=" * 70)
@@ -188,8 +198,12 @@ def main():
     neg_x = _to_device(neg_x_np, args.device)
 
     t0 = time.perf_counter()
-    pos_scores = _to_numpy(ref_model(pos_x, verbose=args.verbose).squeeze(-1), args.device)
-    neg_scores = _to_numpy(ref_model(neg_x, verbose=args.verbose).squeeze(-1), args.device)
+    pos_scores = _to_numpy(
+        ref_model(pos_x, verbose=args.verbose).squeeze(-1), args.device
+    )
+    neg_scores = _to_numpy(
+        ref_model(neg_x, verbose=args.verbose).squeeze(-1), args.device
+    )
     t_score = time.perf_counter() - t0
 
     print(f"  Scored {len(pos_scores) + len(neg_scores)} sequences in {t_score:.2f}s")
@@ -198,6 +212,7 @@ def main():
     print(f"  Separation: {pos_scores.mean() - neg_scores.mean():.4f}")
 
     from sklearn.metrics import roc_auc_score
+
     all_scores = np.concatenate([pos_scores, neg_scores])
     all_labels = np.concatenate([np.ones(len(pos_scores)), np.zeros(len(neg_scores))])
     auc = roc_auc_score(all_labels, all_scores)
@@ -219,8 +234,13 @@ def main():
 
         t0 = time.perf_counter()
         our_model = train_gkmsvm(
-            pos_seqs, neg_seqs,
-            kernel_type="estimated", l=11, k=7, d=3, C=1.0,
+            pos_seqs,
+            neg_seqs,
+            kernel_type="estimated",
+            l=11,
+            k=7,
+            d=3,
+            C=1.0,
             solver=args.solver,
             device=args.device if args.device != "auto" else "auto",
             verbose=args.verbose,
@@ -254,13 +274,21 @@ def main():
     from gkmsvm.explain import gkmexplain
 
     t0 = time.perf_counter()
-    hyp_scores = _to_numpy(gkmexplain(
-        exp_model, pos_x_np, mode="hypothetical",
-        batch_size=args.batch_size, verbose=args.verbose,
-    ), explain_device)
+    hyp_scores = _to_numpy(
+        gkmexplain(
+            exp_model,
+            pos_x_np,
+            mode="hypothetical",
+            batch_size=args.batch_size,
+            verbose=args.verbose,
+        ),
+        explain_device,
+    )
     t_explain = time.perf_counter() - t0
-    print(f"  GkmExplain: {len(pos_x_np)} seqs in {t_explain:.1f}s "
-          f"({len(pos_x_np)/t_explain:.1f} seq/s)")
+    print(
+        f"  GkmExplain: {len(pos_x_np)} seqs in {t_explain:.1f}s "
+        f"({len(pos_x_np) / t_explain:.1f} seq/s)"
+    )
     imp_scores = hyp_scores * pos_x_np
 
     # Completeness check on full set
@@ -311,8 +339,8 @@ def main():
         try:
             from modiscolite import tfmodisco
         except ImportError:
-            print("  modisco-lite not installed. Install with: "
-                  "uv pip install --system modisco-lite")
+            # kundajelab/tfmodisco (tfmodisco-lite merged into it), imported as modiscolite
+            print("  modisco not installed. Install with: uv pip install modisco")
             print("  Skipping TF-MoDISco.")
         else:
             # modisco expects [N, L, 4] — transpose from our [N, 4, L]
@@ -321,14 +349,17 @@ def main():
 
             t0 = time.perf_counter()
             pos_patterns, neg_patterns = tfmodisco.TFMoDISco(
-                onehot_NL4, hyp_NL4,
+                onehot_NL4,
+                hyp_NL4,
                 verbose=True,
             )
             t_modisco = time.perf_counter() - t0
             print(f"  TF-MoDISco completed in {t_modisco:.1f}s")
 
-            for label, patterns in [("Positive", pos_patterns),
-                                    ("Negative", neg_patterns)]:
+            for label, patterns in [
+                ("Positive", pos_patterns),
+                ("Negative", neg_patterns),
+            ]:
                 if patterns is None:
                     print(f"\n  {label} patterns: none found")
                     continue
@@ -337,13 +368,15 @@ def main():
                     n_seqlets = len(pattern.seqlets)
                     ic = _information_content(pattern.sequence)
                     consensus = _consensus_from_ppm(pattern.sequence)
-                    print(f"    Pattern {i}: {n_seqlets} seqlets, "
-                          f"IC={ic:.1f} bits, consensus={consensus}")
+                    print(
+                        f"    Pattern {i}: {n_seqlets} seqlets, "
+                        f"IC={ic:.1f} bits, consensus={consensus}"
+                    )
 
             out_path = DATA_DIR / "modisco_results.h5"
             from modiscolite import io as modisco_io
-            modisco_io.save_hdf5(out_path, pos_patterns, neg_patterns,
-                                 window_size=21)
+
+            modisco_io.save_hdf5(out_path, pos_patterns, neg_patterns, window_size=21)
             print(f"\n  Results saved to {out_path}")
     else:
         print("\n[7/7] Skipping TF-MoDISco (--skip-modisco)")

@@ -31,9 +31,7 @@ class TestTrainGkmsvm:
         pos = _random_seqs_str(20, 20, rng)
         neg = _random_seqs_str(20, 20, rng)
 
-        model = train_gkmsvm(
-            pos, neg, kernel_type="direct", l=7, k=5, C=1.0
-        )
+        model = train_gkmsvm(pos, neg, kernel_type="direct", l=7, k=5, C=1.0)
 
         assert model.num_support_vectors > 0
         assert model.kernel_type == "gkm_cnt"
@@ -43,9 +41,7 @@ class TestTrainGkmsvm:
         pos = _random_onehot(20, 20, rng)
         neg = _random_onehot(20, 20, rng)
 
-        model = train_gkmsvm(
-            pos, neg, kernel_type="estimated", l=7, k=5, d=3, C=1.0
-        )
+        model = train_gkmsvm(pos, neg, kernel_type="estimated", l=7, k=5, d=3, C=1.0)
 
         assert model.num_support_vectors > 0
         assert model.kernel_type == "gkm_esttrunc"
@@ -55,11 +51,10 @@ class TestTrainGkmsvm:
         pos = ["AAAAAAAAAAAAAAACCCCC"] * 15 + _random_seqs_str(5, 20, rng)
         neg = ["TTTTTTTTTTTTTTTGGGGG"] * 15 + _random_seqs_str(5, 20, rng)
 
-        model = train_gkmsvm(
-            pos, neg, kernel_type="direct", l=7, k=5, C=10.0
-        )
+        model = train_gkmsvm(pos, neg, kernel_type="direct", l=7, k=5, C=10.0)
 
         from gkmsvm.codec import one_hot_encode
+
         x_pos = one_hot_encode("AAAAAAAAAAAAAAACCCCC")[None, ...]
         x_neg = one_hot_encode("TTTTTTTTTTTTTTTGGGGG")[None, ...]
 
@@ -73,9 +68,7 @@ class TestTrainGkmsvm:
         pos = _random_seqs_str(15, 20, rng)
         neg = _random_seqs_str(15, 20, rng)
 
-        model = train_gkmsvm(
-            pos, neg, kernel_type="direct", l=7, k=5, C=1.0
-        )
+        model = train_gkmsvm(pos, neg, kernel_type="direct", l=7, k=5, C=1.0)
 
         x = _random_onehot(3, 20, rng)
         scores = model(x)
@@ -86,9 +79,7 @@ class TestTrainGkmsvm:
         pos = _random_seqs_str(15, 20, rng)
         neg = _random_seqs_str(15, 20, rng)
 
-        model = train_gkmsvm(
-            pos, neg, kernel_type="estimated", l=7, k=5, d=2, C=1.0
-        )
+        model = train_gkmsvm(pos, neg, kernel_type="estimated", l=7, k=5, d=2, C=1.0)
 
         params = model.kernel_params
         assert params["L"] == 7
@@ -100,14 +91,13 @@ class TestTrainGkmsvm:
         pos = _random_seqs_str(15, 20, rng)
         neg = _random_seqs_str(15, 20, rng)
 
-        model = train_gkmsvm(
-            pos, neg, kernel_type="direct", l=7, k=5, C=1.0
-        )
+        model = train_gkmsvm(pos, neg, kernel_type="direct", l=7, k=5, C=1.0)
 
         path = tmp_path / "trained.npz"
         model.save(str(path))
 
         from gkmsvm import load_model
+
         loaded = load_model(str(path))
 
         x = _random_onehot(3, 20, rng)
@@ -119,7 +109,12 @@ class TestTrainGkmsvm:
         neg = _random_seqs_str(15, 20, rng)
 
         model = train_gkmsvm(
-            pos, neg, kernel_type="direct", l=7, k=5, C=1.0,
+            pos,
+            neg,
+            kernel_type="direct",
+            l=7,
+            k=5,
+            C=1.0,
             sv_chunk_size=5,
         )
 
@@ -143,7 +138,12 @@ class TestTrainGkmsvm:
         neg = _random_seqs_str(15, 20, rng)
 
         model = train_gkmsvm(
-            pos, neg, kernel_type="direct", l=7, k=5, C=1.0,
+            pos,
+            neg,
+            kernel_type="direct",
+            l=7,
+            k=5,
+            C=1.0,
             device="cpu",
         )
         assert model.num_support_vectors > 0
@@ -156,7 +156,11 @@ class TestTrainGkmsvm:
 
         with pytest.raises(ValueError, match="Unknown device"):
             train_gkmsvm(
-                pos, neg, kernel_type="direct", l=7, k=5,
+                pos,
+                neg,
+                kernel_type="direct",
+                l=7,
+                k=5,
                 device="tpu",
             )
 
@@ -166,8 +170,15 @@ class TestTrainGkmsvm:
         neg = _random_seqs_str(30, 20, rng)
 
         model = train_gkmsvm(
-            pos, neg, kernel_type="direct", l=7, k=5, C=1.0,
-            solver="nystrom", n_components=20, device="cpu",
+            pos,
+            neg,
+            kernel_type="direct",
+            l=7,
+            k=5,
+            C=1.0,
+            solver="nystrom",
+            n_components=20,
+            device="cpu",
         )
         assert model.num_support_vectors > 0
 
@@ -181,8 +192,14 @@ class TestTrainGkmsvm:
         neg = _random_seqs_str(30, 20, rng)
 
         model = train_gkmsvm(
-            pos, neg, kernel_type="direct", l=7, k=5, C=1.0,
-            solver="smo", device="cpu",
+            pos,
+            neg,
+            kernel_type="direct",
+            l=7,
+            k=5,
+            C=1.0,
+            solver="smo",
+            device="cpu",
         )
         assert model.num_support_vectors > 0
 
@@ -196,12 +213,24 @@ class TestTrainGkmsvm:
         neg = _random_seqs_str(25, 20, rng)
 
         model_gram = train_gkmsvm(
-            pos, neg, kernel_type="direct", l=7, k=5, C=1.0,
-            solver="libsvm", device="cpu",
+            pos,
+            neg,
+            kernel_type="direct",
+            l=7,
+            k=5,
+            C=1.0,
+            solver="libsvm",
+            device="cpu",
         )
         model_smo = train_gkmsvm(
-            pos, neg, kernel_type="direct", l=7, k=5, C=1.0,
-            solver="smo", device="cpu",
+            pos,
+            neg,
+            kernel_type="direct",
+            l=7,
+            k=5,
+            C=1.0,
+            solver="smo",
+            device="cpu",
         )
 
         x = _random_onehot(10, 20, rng)
@@ -212,12 +241,14 @@ class TestTrainGkmsvm:
     def test_csmo_solver_loaded(self):
         """Verify C SMO solver compiles and loads."""
         from gkmsvm.solver import _get_csmo
+
         lib = _get_csmo()
         assert lib is not None, "C SMO solver failed to compile/load"
 
     def test_auto_solver_smo_fallback_warns(self):
         """Auto solver warns when falling back to SMO."""
         import warnings
+
         rng = np.random.default_rng(42)
         pos = _random_seqs_str(15, 20, rng)
         neg = _random_seqs_str(15, 20, rng)
@@ -225,8 +256,15 @@ class TestTrainGkmsvm:
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             train_gkmsvm(
-                pos, neg, kernel_type="direct", l=7, k=5, C=1.0,
-                solver="auto", device="cpu", max_gram_gb=0.0,
+                pos,
+                neg,
+                kernel_type="direct",
+                l=7,
+                k=5,
+                C=1.0,
+                solver="auto",
+                device="cpu",
+                max_gram_gb=0.0,
             )
         smo_warnings = [x for x in w if "SMO" in str(x.message)]
         assert len(smo_warnings) == 1
@@ -239,7 +277,30 @@ class TestTrainGkmsvm:
         neg = _random_seqs_str(15, 20, rng)
 
         model = train_gkmsvm(
-            pos, neg, kernel_type="direct", l=7, k=5, C=1.0,
+            pos,
+            neg,
+            kernel_type="direct",
+            l=7,
+            k=5,
+            C=1.0,
             device="auto",
         )
         assert model.num_support_vectors > 0
+
+
+def test_train_strings_with_n_equal_onehot():
+    """DNA strings with N train the same model as their one-hot arrays (N all-zero)."""
+    import random
+
+    from gkmsvm.codec import one_hot_encode
+
+    rng = random.Random(4)
+    pos = ["".join(rng.choice("ACGT") for _ in range(40)) for _ in range(30)]
+    neg = ["".join(rng.choice("ACGT") for _ in range(40)) for _ in range(30)]
+    pos[::3] = [s[:12] + "NNNNN" + s[17:] for s in pos[::3]]
+    kw = dict(kernel_type="estimated", l=6, k=4, d=2, device="cpu")
+    a = train_gkmsvm(pos, neg, **kw)
+    enc = lambda seqs: np.stack([one_hot_encode(s, allow_n=True) for s in seqs])  # noqa: E731
+    b = train_gkmsvm(enc(pos), enc(neg), **kw)
+    np.testing.assert_allclose(a.coefficients, b.coefficients, rtol=1e-10, atol=1e-12)
+    assert a.bias == pytest.approx(b.bias)

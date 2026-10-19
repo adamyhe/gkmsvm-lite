@@ -38,8 +38,9 @@ DART_SEQ_LEN = 2114
 MODEL_DIR = Path(__file__).parents[1] / "models"
 
 
-def _model_path(cell_line: str, l: int, k: int, d: int,
-                C: float, epsilon: float) -> Path:
+def _model_path(
+    cell_line: str, l: int, k: int, d: int, C: float, epsilon: float
+) -> Path:
     return MODEL_DIR / f"{cell_line}_svr_l{l}k{k}d{d}_C{C}_eps{epsilon}.npz"
 
 
@@ -52,16 +53,18 @@ def _center_crop(seqs: np.ndarray, target_len: int) -> np.ndarray:
     if L <= target_len:
         return seqs
     start = (L - target_len) // 2
-    return seqs[:, :, start:start + target_len]
+    return seqs[:, :, start : start + target_len]
 
 
-def _score_batched(model, seqs: np.ndarray, batch_size: int,
-                   verbose: bool = True) -> np.ndarray:
+def _score_batched(
+    model, seqs: np.ndarray, batch_size: int, verbose: bool = True
+) -> np.ndarray:
     return model(seqs, batch_size=batch_size, verbose=verbose).flatten()
 
 
-def load_train_data(h5_path: str, cell_line: str, target_len: int,
-                    max_seqs: int | None):
+def load_train_data(
+    h5_path: str, cell_line: str, target_len: int, max_seqs: int | None
+):
     import h5py
 
     with h5py.File(h5_path, "r") as f:
@@ -71,8 +74,7 @@ def load_train_data(h5_path: str, cell_line: str, target_len: int,
         train = f[cell_line]["train"]
 
         if "peaks" not in train or "counts" not in train["peaks"]:
-            print(f"  SKIP {cell_line}: no peak counts in train split",
-                  file=sys.stderr)
+            print(f"  SKIP {cell_line}: no peak counts in train split", file=sys.stderr)
             return None, None, None
 
         n_peaks = train["peaks"]["seqs"].shape[0]
@@ -91,8 +93,7 @@ def load_train_data(h5_path: str, cell_line: str, target_len: int,
     seqs = _center_crop(seqs, target_len)
     targets = np.log1p(counts).astype(np.float64)
     print(f"  Training: {len(seqs)} peaks, {target_len} bp")
-    print(f"  Target range: [{targets.min():.2f}, {targets.max():.2f}] "
-          f"(log1p counts)")
+    print(f"  Target range: [{targets.min():.2f}, {targets.max():.2f}] (log1p counts)")
     return seqs, targets, counts
 
 
@@ -106,26 +107,33 @@ def load_test_data(h5_path: str, cell_line: str, target_len: int):
         result = {}
         for key in ("peaks", "idr_peaks", "nonpeaks"):
             if key in test:
-                entry = {"seqs": _center_crop(
-                    _h5_to_channels_first(test[key]["seqs"][:]),
-                    target_len)}
+                entry = {
+                    "seqs": _center_crop(
+                        _h5_to_channels_first(test[key]["seqs"][:]), target_len
+                    )
+                }
                 if "counts" in test[key]:
                     entry["counts"] = test[key]["counts"][:]
                 result[key] = entry
     return result
 
 
-def train_svr(seqs, targets, l, k, d, C, epsilon, device, solver,
-              verbose):
+def train_svr(seqs, targets, l, k, d, C, epsilon, device, solver, verbose):
     from gkmsvm.train import train_gkmsvr
 
-    print(f"\n  Training gkm-SVR (l={l}, k={k}, d={d}, C={C}, "
-          f"epsilon={epsilon}, solver={solver})...")
+    print(
+        f"\n  Training gkm-SVR (l={l}, k={k}, d={d}, C={C}, "
+        f"epsilon={epsilon}, solver={solver})..."
+    )
     t0 = time.perf_counter()
     model = train_gkmsvr(
-        seqs, targets,
-        l=l, k=k, d=d,
-        C=C, epsilon=epsilon,
+        seqs,
+        targets,
+        l=l,
+        k=k,
+        d=d,
+        C=C,
+        epsilon=epsilon,
         kernel_type="estimated",
         solver=solver,
         device=device,
@@ -136,8 +144,9 @@ def train_svr(seqs, targets, l, k, d, C, epsilon, device, solver,
     return model
 
 
-def get_or_train_model(cell_line, seqs, targets, l, k, d, C, epsilon,
-                       device, solver, force_train, verbose):
+def get_or_train_model(
+    cell_line, seqs, targets, l, k, d, C, epsilon, device, solver, force_train, verbose
+):
     from gkmsvm.serialization import save_npz, load_model
 
     path = _model_path(cell_line, l, k, d, C, epsilon)
@@ -149,8 +158,7 @@ def get_or_train_model(cell_line, seqs, targets, l, k, d, C, epsilon,
             model.cuda()
         return model
 
-    model = train_svr(seqs, targets, l, k, d, C, epsilon, device, solver,
-                      verbose)
+    model = train_svr(seqs, targets, l, k, d, C, epsilon, device, solver, verbose)
 
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     model.cpu()
@@ -184,21 +192,19 @@ def evaluate_cell_line(model, test_data, batch_size, device, verbose):
             "mse": mse,
             "n": len(preds),
         }
-        print(f"  Regression: Pearson={r_p:.4f}, Spearman={r_s:.4f}, "
-              f"MSE={mse:.4f}")
+        print(f"  Regression: Pearson={r_p:.4f}, Spearman={r_s:.4f}, MSE={mse:.4f}")
 
     if "idr_peaks" in test_data and "nonpeaks" in test_data:
         idr_seqs = test_data["idr_peaks"]["seqs"]
         nonpeak_seqs = test_data["nonpeaks"]["seqs"]
 
-        print(f"  Scoring {len(idr_seqs)} IDR peaks + "
-              f"{len(nonpeak_seqs)} nonpeaks...")
+        print(f"  Scoring {len(idr_seqs)} IDR peaks + {len(nonpeak_seqs)} nonpeaks...")
         idr_scores = _score_batched(model, idr_seqs, batch_size, verbose)
-        nonpeak_scores = _score_batched(model, nonpeak_seqs, batch_size,
-                                        verbose)
+        nonpeak_scores = _score_batched(model, nonpeak_seqs, batch_size, verbose)
 
-        labels = np.concatenate([np.ones(len(idr_scores)),
-                                 np.zeros(len(nonpeak_scores))])
+        labels = np.concatenate(
+            [np.ones(len(idr_scores)), np.zeros(len(nonpeak_scores))]
+        )
         all_scores = np.concatenate([idr_scores, nonpeak_scores])
         auroc = roc_auc_score(labels, all_scores)
         auprc = average_precision_score(labels, all_scores)
@@ -221,44 +227,68 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
-    parser.add_argument("--cell-lines", nargs="+", default=CELL_LINES,
-                        choices=CELL_LINES)
+    parser.add_argument(
+        "--cell-lines", nargs="+", default=CELL_LINES, choices=CELL_LINES
+    )
     parser.add_argument("--l", type=int, default=11, dest="l_param")
     parser.add_argument("--k", type=int, default=7)
     parser.add_argument("--d", type=int, default=3, dest="d_param")
     parser.add_argument("--C", type=float, default=1.0, dest="C_param")
     parser.add_argument("--epsilon", type=float, default=0.1)
-    parser.add_argument("--target-len", type=int, default=300,
-                        help="Crop sequences to this length (default: 300).")
-    parser.add_argument("--max-train-seqs", type=int, default=30000,
-                        help="Subsample training peaks (default: 30000). "
-                             "Set 0 for all.")
-    parser.add_argument("--solver", default="auto",
-                        choices=["auto", "nystrom", "libsvm"],
-                        help="Training solver (default: auto).")
+    parser.add_argument(
+        "--target-len",
+        type=int,
+        default=300,
+        help="Crop sequences to this length (default: 300).",
+    )
+    parser.add_argument(
+        "--max-train-seqs",
+        type=int,
+        default=30000,
+        help="Subsample training peaks (default: 30000). Set 0 for all.",
+    )
+    parser.add_argument(
+        "--solver",
+        default="auto",
+        choices=["auto", "nystrom", "libsvm"],
+        help="Training solver (default: auto).",
+    )
     parser.add_argument("--batch-size", type=int, default=256)
-    parser.add_argument("--work-dir", default=None,
-                        help="DART-Eval data directory (overrides DART_WORK_DIR).")
-    parser.add_argument("--force-train", action="store_true",
-                        help="Retrain even if cached model exists.")
-    parser.add_argument("--output", default=None,
-                        help="Save results summary to TSV file.")
+    parser.add_argument(
+        "--work-dir",
+        default=None,
+        help="DART-Eval data directory (overrides DART_WORK_DIR).",
+    )
+    parser.add_argument(
+        "--force-train",
+        action="store_true",
+        help="Retrain even if cached model exists.",
+    )
+    parser.add_argument(
+        "--output", default=None, help="Save results summary to TSV file."
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
-    work_dir = (args.work_dir or os.environ.get("DART_WORK_DIR", "")
-                or str(Path(__file__).parents[1] / "data" / "dart-eval"))
+    work_dir = (
+        args.work_dir
+        or os.environ.get("DART_WORK_DIR", "")
+        or str(Path(__file__).parents[1] / "data" / "dart-eval")
+    )
 
     h5_path = os.path.join(work_dir, "task_4_chromatin_activity/data.h5")
     if not os.path.exists(h5_path):
         from dart_download import download_dart_data
+
         download_dart_data(work_dir, tasks=("task_4",))
 
     print("DART-Eval Task 4: Cell Type Activity SVR")
     print(f"  Data: {h5_path}")
     print(f"  Device: {args.device}")
-    print(f"  Params: l={args.l_param}, k={args.k}, d={args.d_param}, "
-          f"C={args.C_param}, epsilon={args.epsilon}")
+    print(
+        f"  Params: l={args.l_param}, k={args.k}, d={args.d_param}, "
+        f"C={args.C_param}, epsilon={args.epsilon}"
+    )
 
     all_results = []
 
@@ -269,18 +299,30 @@ def main():
 
         max_seqs = args.max_train_seqs or None
         seqs, targets, _ = load_train_data(
-            h5_path, cell_line, args.target_len, max_seqs)
+            h5_path, cell_line, args.target_len, max_seqs
+        )
         if seqs is None:
             continue
 
         model = get_or_train_model(
-            cell_line, seqs, targets,
-            args.l_param, args.k, args.d_param,
-            args.C_param, args.epsilon,
-            args.device, args.solver, args.force_train, args.verbose)
+            cell_line,
+            seqs,
+            targets,
+            args.l_param,
+            args.k,
+            args.d_param,
+            args.C_param,
+            args.epsilon,
+            args.device,
+            args.solver,
+            args.force_train,
+            args.verbose,
+        )
 
         del seqs, targets
-        import gc; gc.collect()
+        import gc
+
+        gc.collect()
 
         print(f"\n  --- Test evaluation ---")
         test_data = load_test_data(h5_path, cell_line, args.target_len)
@@ -289,12 +331,15 @@ def main():
             continue
 
         results = evaluate_cell_line(
-            model, test_data, args.batch_size, args.device, args.verbose)
+            model, test_data, args.batch_size, args.device, args.verbose
+        )
         results["cell_line"] = cell_line
         all_results.append(results)
 
         del model, test_data
-        import gc; gc.collect()
+        import gc
+
+        gc.collect()
 
     # Summary
     print(f"\n{'=' * 70}")
@@ -306,41 +351,44 @@ def main():
 
     if has_reg:
         print(f"\n  Regression (predicted vs actual log1p counts)")
-        print(f"  {'Cell line':<12} {'Pearson':>8} {'Spearman':>8} "
-              f"{'MSE':>8} {'N':>8}")
-        print(f"  {'-'*12} {'-'*8} {'-'*8} {'-'*8} {'-'*8}")
+        print(f"  {'Cell line':<12} {'Pearson':>8} {'Spearman':>8} {'MSE':>8} {'N':>8}")
+        print(f"  {'-' * 12} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8}")
         for r in all_results:
             if "regression" not in r:
                 continue
             reg = r["regression"]
-            print(f"  {r['cell_line']:<12} {reg['pearson']:>8.4f} "
-                  f"{reg['spearman']:>8.4f} {reg['mse']:>8.4f} "
-                  f"{reg['n']:>8}")
+            print(
+                f"  {r['cell_line']:<12} {reg['pearson']:>8.4f} "
+                f"{reg['spearman']:>8.4f} {reg['mse']:>8.4f} "
+                f"{reg['n']:>8}"
+            )
 
     if has_cls:
         print(f"\n  Classification (IDR peak vs nonpeak)")
-        print(f"  {'Cell line':<12} {'AUROC':>8} {'AUPRC':>8} "
-              f"{'IDR':>8} {'Nonpeak':>8}")
-        print(f"  {'-'*12} {'-'*8} {'-'*8} {'-'*8} {'-'*8}")
+        print(
+            f"  {'Cell line':<12} {'AUROC':>8} {'AUPRC':>8} {'IDR':>8} {'Nonpeak':>8}"
+        )
+        print(f"  {'-' * 12} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8}")
         for r in all_results:
             if "classification" not in r:
                 continue
             cls = r["classification"]
-            print(f"  {r['cell_line']:<12} {cls['auroc']:>8.4f} "
-                  f"{cls['auprc']:>8.4f} {cls['n_idr']:>8} "
-                  f"{cls['n_nonpeaks']:>8}")
+            print(
+                f"  {r['cell_line']:<12} {cls['auroc']:>8.4f} "
+                f"{cls['auprc']:>8.4f} {cls['n_idr']:>8} "
+                f"{cls['n_nonpeaks']:>8}"
+            )
 
     if args.output and all_results:
         import pandas as pd
+
         rows = []
         for r in all_results:
             row = {"cell_line": r["cell_line"]}
             if "regression" in r:
-                row.update({f"reg_{k}": v
-                            for k, v in r["regression"].items()})
+                row.update({f"reg_{k}": v for k, v in r["regression"].items()})
             if "classification" in r:
-                row.update({f"cls_{k}": v
-                            for k, v in r["classification"].items()})
+                row.update({f"cls_{k}": v for k, v in r["classification"].items()})
             rows.append(row)
         pd.DataFrame(rows).to_csv(args.output, sep="\t", index=False)
         print(f"\nSaved results to {args.output}")

@@ -52,5 +52,6 @@ class RbfGkmKernel(RbfKernel):
         include_rc: bool = True,
     ):
         super().__init__(
-            EstTruncGkmKernel(l, k, d=d, normalize=True, include_rc=include_rc), gamma)
+            EstTruncGkmKernel(l, k, d=d, normalize=True, include_rc=include_rc), gamma
+        )
         self.d = d

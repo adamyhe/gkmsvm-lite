@@ -53,7 +53,9 @@ def mask_plan(table_key: tuple[float, ...], l: int, min_matches: int):
     js = list(range(l - dmax, l + 1))
     if sum(comb(l, j) for j in js) > _MAX_MASKS:
         return None
-    A = np.array([[comb(l - m, j) for j in js] for m in range(dmax + 1)], dtype=np.float64)
+    A = np.array(
+        [[comb(l - m, j) for j in js] for m in range(dmax + 1)], dtype=np.float64
+    )
     a = np.linalg.solve(A, table[: dmax + 1])
     tol = 1e-12 * np.abs(a).max()
     plan = []
@@ -228,13 +230,23 @@ def _masked_pairwise_upper(bx, by_blocks, plan, diag_offset, wx, wy):
         for start in range(0, len(positions), step):
             runs = mask_runs(positions[start : start + step])
             offsets, colseq, colwt = _build_column_index(by, seq_of_row, runs, j, wby)
-            _join_rows_upper(bx, runs, offsets, colseq, coef, result, row_min,
-                             _row_weights(wx), colwt)
+            _join_rows_upper(
+                bx,
+                runs,
+                offsets,
+                colseq,
+                coef,
+                result,
+                row_min,
+                _row_weights(wx),
+                colwt,
+            )
     return result
 
 
-def masked_pairwise(bx_packed, by_packed, plan, by_rc_packed=None, diag_offset=None,
-                    wx=None, wy=None):
+def masked_pairwise(
+    bx_packed, by_packed, plan, by_rc_packed=None, diag_offset=None, wx=None, wy=None
+):
     """Raw kernel [B, S] from packed windows via masked joins.
 
     bx_packed: [B, Wx] uint32 query windows.
@@ -256,8 +268,14 @@ def masked_pairwise(bx_packed, by_packed, plan, by_rc_packed=None, diag_offset=N
     if by_rc_packed is not None:
         by = np.ascontiguousarray(np.concatenate([by_packed, by_rc_packed]))
         seq_of_row = np.concatenate([np.arange(S), np.arange(S)]).astype(np.int32)
-        wby = (np.zeros((0, 0), np.uint8) if wy is None else np.ascontiguousarray(
-            np.concatenate([np.tile(wy, (S, 1)), np.tile(wy[::-1], (S, 1))]), dtype=np.uint8))
+        wby = (
+            np.zeros((0, 0), np.uint8)
+            if wy is None
+            else np.ascontiguousarray(
+                np.concatenate([np.tile(wy, (S, 1)), np.tile(wy[::-1], (S, 1))]),
+                dtype=np.uint8,
+            )
+        )
     else:
         by = np.ascontiguousarray(by_packed)
         seq_of_row = np.arange(S, dtype=np.int32)
@@ -430,12 +448,19 @@ def _cuda_kernels():
 
     if _cuda_module is None:
         _cuda_module = cp.RawModule(code=_MASKED_CUDA)
-    names = ("masked_hist", "masked_scatter", "masked_join", "masked_scatter_w",
-             "masked_join_w")
+    names = (
+        "masked_hist",
+        "masked_scatter",
+        "masked_join",
+        "masked_scatter_w",
+        "masked_join_w",
+    )
     return tuple(_cuda_module.get_function(n) for n in names)
 
 
-def masked_pairwise_gpu(bx_packed, by_packed, plan, by_rc_packed=None, wx=None, wy=None):
+def masked_pairwise_gpu(
+    bx_packed, by_packed, plan, by_rc_packed=None, wx=None, wy=None
+):
     """CUDA version of masked_pairwise(); inputs and result are CuPy arrays.
 
     bx_packed: [B, Wx] uint32; by_packed, by_rc_packed: [S, Wy] uint32.
@@ -460,13 +485,18 @@ def masked_pairwise_gpu(bx_packed, by_packed, plan, by_rc_packed=None, wx=None, 
     for c0 in range(0, S_total, tile):
         c1 = min(c0 + tile, S_total)
         S = c1 - c0
-        rows = [by_packed[c0:c1]] + ([by_rc_packed[c0:c1]] if by_rc_packed is not None else [])
+        rows = [by_packed[c0:c1]] + (
+            [by_rc_packed[c0:c1]] if by_rc_packed is not None else []
+        )
         by = cp.ascontiguousarray(cp.concatenate(rows), dtype=cp.uint32)
         seq_of_row = cp.tile(cp.arange(S, dtype=cp.int32), len(rows))
         n_win = by.shape[0] * Wy
         if weighted:  # an RC window carries its forward weight
-            wby = cp.asarray(np.concatenate([np.tile(w, S) for w in (wy_np, wy_np[::-1])
-                                             ][:len(rows)]))
+            wby = cp.asarray(
+                np.concatenate(
+                    [np.tile(w, S) for w in (wy_np, wy_np[::-1])][: len(rows)]
+                )
+            )
         res_tile = cp.zeros((B, S), dtype=cp.float64)
         for j, coef, positions in plan:
             K = 1 << (2 * j)
@@ -476,8 +506,19 @@ def masked_pairwise_gpu(bx_packed, by_packed, plan, by_rc_packed=None, wx=None, 
                 runs = cp.asarray(runs_np.ravel())
                 counts = cp.zeros((M, K + 1), dtype=cp.int32)
                 grid = (M * n_win + block - 1) // block
-                hist((grid,), (block,),
-                     (by, np.int64(n_win), runs, np.int32(R), np.int32(M), np.int64(K), counts))
+                hist(
+                    (grid,),
+                    (block,),
+                    (
+                        by,
+                        np.int64(n_win),
+                        runs,
+                        np.int32(R),
+                        np.int32(M),
+                        np.int64(K),
+                        counts,
+                    ),
+                )
                 offsets = cp.cumsum(counts, axis=1, dtype=cp.int32)
                 # A copy: with one mask the slice is already contiguous, and the
                 # scatter's atomics would otherwise overwrite offsets
@@ -485,23 +526,83 @@ def masked_pairwise_gpu(bx_packed, by_packed, plan, by_rc_packed=None, wx=None, 
                 colseq = cp.empty((M, n_win), dtype=cp.uint16)
                 if weighted:
                     colwt = cp.empty((M, n_win), dtype=cp.uint8)
-                    scatter_w((grid,), (block,),
-                              (by, np.int64(n_win), np.int32(Wy), seq_of_row, wby, runs,
-                               np.int32(R), np.int32(M), np.int64(K), fill, colseq, colwt))
-                    join_w((B,), (block,),
-                           (bx, np.int32(Wx), wx_d, runs, np.int32(R), np.int32(M),
-                            np.int64(K), offsets, colseq, colwt, np.int64(n_win), np.int32(S),
-                            np.float64(coef), res_tile, np.int32(_GPU_JOIN_LANES)),
-                           shared_mem=S * 8 + M * R * 3 * 4)
+                    scatter_w(
+                        (grid,),
+                        (block,),
+                        (
+                            by,
+                            np.int64(n_win),
+                            np.int32(Wy),
+                            seq_of_row,
+                            wby,
+                            runs,
+                            np.int32(R),
+                            np.int32(M),
+                            np.int64(K),
+                            fill,
+                            colseq,
+                            colwt,
+                        ),
+                    )
+                    join_w(
+                        (B,),
+                        (block,),
+                        (
+                            bx,
+                            np.int32(Wx),
+                            wx_d,
+                            runs,
+                            np.int32(R),
+                            np.int32(M),
+                            np.int64(K),
+                            offsets,
+                            colseq,
+                            colwt,
+                            np.int64(n_win),
+                            np.int32(S),
+                            np.float64(coef),
+                            res_tile,
+                            np.int32(_GPU_JOIN_LANES),
+                        ),
+                        shared_mem=S * 8 + M * R * 3 * 4,
+                    )
                     continue
-                scatter((grid,), (block,),
-                        (by, np.int64(n_win), np.int32(Wy), seq_of_row, runs, np.int32(R),
-                         np.int32(M), np.int64(K), fill, colseq))
-                join((B,), (block,),
-                     (bx, np.int32(Wx), runs, np.int32(R), np.int32(M), np.int64(K),
-                      offsets, colseq, np.int64(n_win), np.int32(S), np.float64(coef),
-                      res_tile, np.int32(_GPU_JOIN_LANES)),
-                     shared_mem=(S + M * R * 3) * 4)
+                scatter(
+                    (grid,),
+                    (block,),
+                    (
+                        by,
+                        np.int64(n_win),
+                        np.int32(Wy),
+                        seq_of_row,
+                        runs,
+                        np.int32(R),
+                        np.int32(M),
+                        np.int64(K),
+                        fill,
+                        colseq,
+                    ),
+                )
+                join(
+                    (B,),
+                    (block,),
+                    (
+                        bx,
+                        np.int32(Wx),
+                        runs,
+                        np.int32(R),
+                        np.int32(M),
+                        np.int64(K),
+                        offsets,
+                        colseq,
+                        np.int64(n_win),
+                        np.int32(S),
+                        np.float64(coef),
+                        res_tile,
+                        np.int32(_GPU_JOIN_LANES),
+                    ),
+                    shared_mem=(S + M * R * 3) * 4,
+                )
         result[:, c0:c1] = res_tile
     return result
 
@@ -593,12 +694,19 @@ def _metal_index(by_mx, seq_of_row_mx, chunk, j, Wy):
     global _metal_hist, _metal_scatter
     if _metal_hist is None:
         _metal_hist = mx.fast.metal_kernel(
-            name="gkm_masked_hist", input_names=["by", "runs", "params"],
-            output_names=["counts"], source=_METAL_HIST, atomic_outputs=True)
+            name="gkm_masked_hist",
+            input_names=["by", "runs", "params"],
+            output_names=["counts"],
+            source=_METAL_HIST,
+            atomic_outputs=True,
+        )
         _metal_scatter = mx.fast.metal_kernel(
             name="gkm_masked_scatter",
             input_names=["by", "seq_of_row", "runs", "offsets", "params"],
-            output_names=["fill", "colseq"], source=_METAL_SCATTER, atomic_outputs=True)
+            output_names=["fill", "colseq"],
+            source=_METAL_SCATTER,
+            atomic_outputs=True,
+        )
     runs_np = mask_runs(chunk)
     M, R = runs_np.shape[0], runs_np.shape[1]
     K = 1 << (2 * j)
@@ -608,15 +716,24 @@ def _metal_index(by_mx, seq_of_row_mx, chunk, j, Wy):
     threads = 256
     grid = ((M * n_win + threads - 1) // threads) * threads
     counts = _metal_hist(
-        inputs=[by_mx, pos, params], template=[], grid=(grid, 1, 1),
-        threadgroup=(threads, 1, 1), output_shapes=[(M * (K + 1),)],
-        output_dtypes=[mx.int32], init_value=0)[0]
+        inputs=[by_mx, pos, params],
+        template=[],
+        grid=(grid, 1, 1),
+        threadgroup=(threads, 1, 1),
+        output_shapes=[(M * (K + 1),)],
+        output_dtypes=[mx.int32],
+        init_value=0,
+    )[0]
     offsets = mx.cumsum(counts.reshape(M, K + 1), axis=1).reshape(-1)
     _, colseq = _metal_scatter(
-        inputs=[by_mx, seq_of_row_mx, pos, offsets, params], template=[],
-        grid=(grid, 1, 1), threadgroup=(threads, 1, 1),
-        output_shapes=[(M * K,), (M * n_win,)], output_dtypes=[mx.int32, mx.int32],
-        init_value=0)
+        inputs=[by_mx, seq_of_row_mx, pos, offsets, params],
+        template=[],
+        grid=(grid, 1, 1),
+        threadgroup=(threads, 1, 1),
+        output_shapes=[(M * K,), (M * n_win,)],
+        output_dtypes=[mx.int32, mx.int32],
+        init_value=0,
+    )
     return offsets, colseq
 
 
@@ -652,7 +769,9 @@ def masked_pairwise_mlx(bx_packed, by_packed, plan, by_rc_packed=None) -> np.nda
     join = _get_metal_join()
     bx = np.ascontiguousarray(np.asarray(bx_packed), dtype=np.uint32)
     by_all = np.asarray(by_packed, dtype=np.uint32)
-    by_rc_all = None if by_rc_packed is None else np.asarray(by_rc_packed, dtype=np.uint32)
+    by_rc_all = (
+        None if by_rc_packed is None else np.asarray(by_rc_packed, dtype=np.uint32)
+    )
     B, Wx = bx.shape
     S_total, Wy = by_all.shape
     bx_mx = mx.array(bx.ravel())
@@ -673,8 +792,18 @@ def masked_pairwise_mlx(bx_packed, by_packed, plan, by_rc_packed=None) -> np.nda
                 chunk = positions[m0 : m0 + _MASK_CHUNK]
                 offsets, colseq = _metal_index(by_mx, seq_mx, chunk, j, Wy)
                 runs_np = mask_runs(chunk)
-                params = mx.array([Wx, runs_np.shape[0], runs_np.shape[1], S, _METAL_LANES,
-                                   K1, n_win], dtype=mx.int32)
+                params = mx.array(
+                    [
+                        Wx,
+                        runs_np.shape[0],
+                        runs_np.shape[1],
+                        S,
+                        _METAL_LANES,
+                        K1,
+                        n_win,
+                    ],
+                    dtype=mx.int32,
+                )
                 counts = join(
                     inputs=[bx_mx, mx.array(runs_np.ravel()), offsets, colseq, params],
                     template=[("TILE", _METAL_COL_TILE)],

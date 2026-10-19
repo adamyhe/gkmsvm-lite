@@ -99,10 +99,10 @@ deltas = dsvm.score_variants(ref_seqs, alt_seqs)
 ## GPU acceleration
 
 ```python
-model.cuda()     # NVIDIA (CuPy)
-model.mlx()      # Apple Silicon (MLX)
+model.cuda()  # NVIDIA (CuPy)
+model.mlx()  # Apple Silicon (MLX)
 scores = model(x)  # inputs are moved to the model's device; outputs stay there
-model.cpu()      # back to CPU
+model.cpu()  # back to CPU
 ```
 
 Moving a model drops its device caches (packed SVs, l-mer index), which are rebuilt on the first call. MLX runs custom Metal kernels and returns float32 scores (Metal has no float64); GkmExplain attribution on MLX falls back to CPU. Apple Silicon's memory is shared between CPU and GPU, so other processes compete for it. Timings are in [performance](performance.md).
@@ -130,6 +130,7 @@ one_hot_decode(rc)  # "ACGT" (palindrome in this case)
 
 # Batch encode with padding
 from gkmsvm import encode_batch
+
 x = encode_batch(["ACGT", "ACGTACGT"])  # [2, 4, 8], shorter seqs zero-padded
 ```
 

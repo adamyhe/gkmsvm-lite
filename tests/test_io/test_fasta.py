@@ -79,11 +79,13 @@ class TestExtractLoci:
         pd = pytest.importorskip("pandas")
         from gkmsvm.fasta import extract_loci
 
-        loci = pd.DataFrame({
-            "chrom": ["chr1", "chr1", "chr1", "chr3", "chr2"],
-            "start": [4, 0, 18, 4, 4],
-            "end": [6, 2, 20, 6, 6],
-        })
+        loci = pd.DataFrame(
+            {
+                "chrom": ["chr1", "chr1", "chr1", "chr3", "chr2"],
+                "start": [4, 0, 18, 4, 4],
+                "end": [6, 2, 20, 6, 6],
+            }
+        )
         X, mask = extract_loci(loci, genome, in_window=4, return_mask=True)
         # Second and third run off chr1, fourth is not in the genome.
         assert mask.tolist() == [True, False, False, False, True]
@@ -95,9 +97,13 @@ class TestExtractLoci:
         pd = pytest.importorskip("pandas")
         from gkmsvm.fasta import extract_loci
 
-        loci = pd.DataFrame({
-            "chrom": ["chr2", "chr1"], "start": [4, 4], "end": [6, 6],
-        })
+        loci = pd.DataFrame(
+            {
+                "chrom": ["chr2", "chr1"],
+                "start": [4, 4],
+                "end": [6, 6],
+            }
+        )
         X, mask = extract_loci(
             loci, genome, in_window=4, chroms=["chr1"], return_mask=True
         )

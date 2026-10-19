@@ -87,9 +87,7 @@ class TestEstTruncKernelBasic:
 
 class TestEstTruncKernelNormalized:
     def setup_method(self):
-        self.kernel = EstTruncGkmKernel(
-            l=3, k=2, d=1, normalize=True, include_rc=False
-        )
+        self.kernel = EstTruncGkmKernel(l=3, k=2, d=1, normalize=True, include_rc=False)
 
     def test_self_kernel_is_one(self):
         for seq in ["ACGT", "AAAA", "GGGGGG"]:
@@ -111,9 +109,7 @@ class TestEstTruncKernelNormalized:
 
 class TestEstTruncKernelRC:
     def setup_method(self):
-        self.kernel = EstTruncGkmKernel(
-            l=3, k=2, d=1, normalize=True, include_rc=True
-        )
+        self.kernel = EstTruncGkmKernel(l=3, k=2, d=1, normalize=True, include_rc=True)
 
     def test_rc_invariance(self):
         x = one_hot_encode("ACGTAC")[np.newaxis]
@@ -128,9 +124,7 @@ class TestEstTruncKernelDefaultParams:
     """Test with L=11, k=7, d=3 — the LS-GKM / ENCODE default."""
 
     def setup_method(self):
-        self.kernel = EstTruncGkmKernel(
-            l=11, k=7, d=3, normalize=True, include_rc=True
-        )
+        self.kernel = EstTruncGkmKernel(l=11, k=7, d=3, normalize=True, include_rc=True)
 
     def test_runs_with_encode_length_sequences(self):
         seq = "A" * 50
@@ -139,13 +133,17 @@ class TestEstTruncKernelDefaultParams:
         assert float(k[0, 0]) == pytest.approx(1.0)
 
     def test_batch_pairwise(self):
-        x = np.stack([
-            one_hot_encode("ACGTACGTACGTACGT"),
-            one_hot_encode("TGCATGCATGCATGCA"),
-        ])
-        y = np.stack([
-            one_hot_encode("ACGTACGTACGTACGT"),
-        ])
+        x = np.stack(
+            [
+                one_hot_encode("ACGTACGTACGTACGT"),
+                one_hot_encode("TGCATGCATGCATGCA"),
+            ]
+        )
+        y = np.stack(
+            [
+                one_hot_encode("ACGTACGTACGTACGT"),
+            ]
+        )
         k = self.kernel.pairwise(x, y)
         assert k.shape == (2, 1)
         assert np.isfinite(k).all()

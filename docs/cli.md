@@ -8,6 +8,8 @@ gkmsvm <command> [options]
 
 Global options: `-v` / `--verbose` enables progress bars.
 
+Sequences (FASTA for `predict`, `train`, `trainsvr`, `ism`, `explain`, `deltasvm`, `score-variants`) may contain N, which is scored as A on the forward strand, as LS-GKM does. Other letters (IUPAC codes, ...) stop the command with an error unless `--allow-other-bases` is given, which reads them as N, matching LS-GKM (which reads every non-ACGT letter as A, with a warning). Model files whose support vectors contain such letters load with a warning.
+
 ## predict
 
 Score sequences with a trained model.
@@ -74,7 +76,7 @@ Accepts the same kernel and device options as `train`. SVR uses the precomputed 
 
 ## explain
 
-Compute GkmExplain hypothetical attribution scores (`-t 0/1/2` models). Outputs two `.npz` files directly usable with [TF-MoDISco](https://github.com/jmschrei/tfmodisco-lite).
+Compute GkmExplain hypothetical attribution scores (any kernel type). Outputs two `.npz` files directly usable with [TF-MoDISco](https://github.com/kundajelab/tfmodisco) (`pip install modisco`; tfmodisco-lite was merged into it).
 
 ```bash
 gkmsvm explain -m model.npz -i sequences.fa -o attr.npz -s seqs.npz --device cuda

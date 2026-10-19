@@ -1,4 +1,5 @@
 """Tests for DeltaSVM linear k-mer scoring model."""
+
 import random
 import tempfile
 from itertools import combinations
@@ -111,7 +112,9 @@ class TestDeltaSVMScoring:
             assert abs(got - expected) < 1e-4, f"seq={seq}: {got} vs {expected}"
 
     def test_output_shape(self):
-        model = DeltaSVM(np.random.RandomState(0).randn(64).astype(np.float32), l=5, k=3)
+        model = DeltaSVM(
+            np.random.RandomState(0).randn(64).astype(np.float32), l=5, k=3
+        )
         x = np.stack([one_hot_encode(s) for s in _make_seqs(3, 20)])
         assert model(x).shape == (3, 1)
 
@@ -124,7 +127,9 @@ class TestDeltaSVMScoring:
         assert abs(diff - 1.5) < 1e-6
 
     def test_batch_consistent(self):
-        model = DeltaSVM(np.random.RandomState(0).randn(64).astype(np.float32), l=5, k=3)
+        model = DeltaSVM(
+            np.random.RandomState(0).randn(64).astype(np.float32), l=5, k=3
+        )
         seqs = _make_seqs(4, 15, seed=5)
         x_batch = np.stack([one_hot_encode(s) for s in seqs])
         batch_result = model(x_batch)
@@ -133,7 +138,9 @@ class TestDeltaSVMScoring:
             np.testing.assert_allclose(batch_result[i : i + 1], single, atol=1e-5)
 
     def test_score_variants(self):
-        model = DeltaSVM(np.random.RandomState(0).randn(64).astype(np.float32), l=5, k=3)
+        model = DeltaSVM(
+            np.random.RandomState(0).randn(64).astype(np.float32), l=5, k=3
+        )
         ref = one_hot_encode(_make_seqs(1, 15, seed=6)[0])[np.newaxis]
         alt = one_hot_encode(_make_seqs(1, 15, seed=7)[0])[np.newaxis]
         delta = model.score_variants(ref, alt)
@@ -141,7 +148,9 @@ class TestDeltaSVMScoring:
         np.testing.assert_allclose(delta, expected, atol=1e-6)
 
     def test_short_sequence(self):
-        model = DeltaSVM(np.random.RandomState(0).randn(64).astype(np.float32), l=5, k=3)
+        model = DeltaSVM(
+            np.random.RandomState(0).randn(64).astype(np.float32), l=5, k=3
+        )
         x = one_hot_encode("ACGT")[np.newaxis]
         result = model(x)
         assert result.shape == (1, 1)

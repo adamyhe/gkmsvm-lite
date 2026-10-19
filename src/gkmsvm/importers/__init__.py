@@ -39,7 +39,9 @@ def parse_header_value(header: dict, key: str, value: str) -> None:
     if key == "svm_type":
         header[key] = value
     elif key == "kernel_type":
-        header[key] = KERNEL_ALIASES.get(int(value), value) if value.isdigit() else value
+        header[key] = (
+            KERNEL_ALIASES.get(int(value), value) if value.isdigit() else value
+        )
     elif key in _INT_KEYS:
         header[key] = int(value)
     elif key in _FLOAT_KEYS:
@@ -73,7 +75,21 @@ def build_model(
             f"Number of coefficients ({len(coefficients)}) does not match "
             f"number of sequences ({len(sequences)})"
         )
-    encoded = [one_hot_encode(seq, dtype=dtype, allow_n=True) for seq in sequences]
+    # The model was fit with every non-ACGT letter read as A (as N packs), so
+    # SVs holding other letters load as N, with a warning
+    other = sum(bool(set(seq.upper()) - set("ACGTN")) for seq in sequences)
+    if other:
+        import warnings
+
+        warnings.warn(
+            f"{other} support vectors contain letters other than ACGTN; "
+            "reading them as N (scored as A, as LS-GKM does)",
+            stacklevel=3,
+        )
+    encoded = [
+        one_hot_encode(seq, dtype=dtype, allow_n=True, allow_other=True)
+        for seq in sequences
+    ]
     lengths = {t.shape[1] for t in encoded}
     if len(lengths) > 1:
         raise ValueError(
@@ -83,8 +99,11 @@ def build_model(
     kernel_type = header.get("kernel_type", default_kernel)
     if kernel_type is None:
         raise ValueError("Model file missing kernel_type field")
-    kernel_params = {"L": header["L"], "k": header["k"],
-                     "include_rc": header.get("norc", 0) == 0}
+    kernel_params = {
+        "L": header["L"],
+        "k": header["k"],
+        "include_rc": header.get("norc", 0) == 0,
+    }
     for key in ("d", "gamma", "M", "H"):
         if key in header:
             kernel_params[key] = header[key]

@@ -64,10 +64,33 @@
 - [x] Masked-join kernel for Gram tiles and SMO columns, all six kernel types, CPU/CUDA/Metal ([design](design/mask-join-kernel.md))
 - [x] Exact l-mer weight table for `-t 0/1/2/4` prediction and `to_deltasvm`
 - [x] Packed kernel interface (`kernel.base`, `kernel.finish`, `raw_packed`) shared by Gram, SMO, scoring, ISM and mutation impact
-- [x] Cached l-mer index for scoring, ISM and mutation impact against SVs, and for SMO columns over the training set (`-t 1/2/3`)
+- [x] Cached l-mer index for scoring, ISM and mutation impact against SVs, and for SMO columns over the training set (`-t 1`-`-t 5`)
 - [x] ISM and mutation impact for every kernel type
+- [x] `-t 4`/`-t 5` as LS-GKM's window-weighted kernel (integer weights by distance from the sequence center), every path on CPU/CUDA/MLX; gkmpredict oracle
+- [x] Window-delta ISM for `-t 4`/`-t 5` (slot weights for the windows covering each position)
+- [x] GkmExplain for every kernel type (`-t 4`/`-t 5` included): explain table, l-mer path (CPU and CUDA), per-SV kernels
+- [x] lsgkm oracles for every kernel type (`-t 0` to `-t 5`): gkmpredict scores; gkmexplain modes 0/1/4 on every CPU explain path and mode 5 (mutation impact) on every scoring path, with N and odd/even window counts (kundajelab fork, `benchmarks/dev/lsgkm_wgkm_fixtures.py`)
+- [x] N as in LS-GKM (A on the forward strand, T on the reverse); N accepted in every string input; `--allow-other-bases` / `allow_other` reads other letters as N (as gkmpredict does)
+- [x] `-t 0` truncated at `d` mismatches, as LS-GKM
 
 ## Next
+
+Gaps found by checking against LS-GKM (2026-10-19), most important first:
+
+- [ ] **Variable-length sequences** — LS-GKM trains on and scores sequences of different lengths; here importing a model whose SVs differ in length raises, `train_gkmsvm` and the CLI require one length, and `model()` takes one length per call. Packed arrays assume one window count per batch: bucket queries by length, pad SVs with `PAD_WINDOW` (pad windows must never match each other), and keep per-sequence self-kernels and `-t 4/5` window weights right.
+- [ ] **Re-run the CUDA and dsQTL checks** — `tests/test_gpu.py` on a CUDA host after the `-t 0` `d` and N-importance fixes, and `benchmarks/agreement_lsgkm.py` (last run 2026-10-16, before the N packing change: mutation impact matched the paper's `gkmexplain -m 5` outputs to ~5e-6). CUDA explain paths are checked against CPU only, not against lsgkm directly.
+- [ ] **Training oracle as a test** — `train_gkmsvm` gives gkmtrain's models (`-t 0/2/3/4`, with and without N: same SV counts, held-out scores within ~2e-4), checked by hand only; commit gkmtrain fixtures.
+- [ ] **`-w` positive-class weight** — LS-GKM's `-w` sets C to w*C for positives; not exposed.
+- [ ] **Importer and SVR oracles** — the classic gkmSVM and R gkmSVM importers, and `train_gkmsvr` (vs kundajelab/lsgkm-svr), have no reference-tool fixtures.
+- [ ] **`-t 6` gkm_cnt_rbf** — in the kundajelab fork only; not supported.
+
+Performance gaps:
+
+- [ ] `-t 4`/`-t 5` self-kernels and brute force (< 16 rows) run on CPU even on CUDA; MLX joins and queries weighted windows on CPU.
+- [ ] GkmExplain on MLX falls back to CPU (Metal has no float64; a float-float accumulator could fix it).
+- [ ] No explain table for RBF (`-t 3`/`-t 5`): their SV weights depend on the query, so they take the index path.
+
+Features:
 
 - [ ] **SMO SVR** — column-cached SMO solver for epsilon-SVR (2N dual variables, epsilon-tube working set selection). Currently SVR uses precomputed Gram only; SMO SVR needed for large-scale regression where the Gram matrix exceeds available memory. Reference implementation: kundajelab/lsgkm-svr
 - [ ] **Binary Platt scaling** — calibrated probability output for binary SVC models. Fit sigmoid (A, B) on held-out decision values; store parameters in GkmSVM and serialize to npz; add `predict_proba()` method. Post-hoc calibration avoids the 5-fold CV overhead of sklearn's `probability=True`. See mLS-GKM (Howard & Harmston, 2026) for reference.

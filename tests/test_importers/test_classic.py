@@ -1,4 +1,5 @@
 """Tests for the classic gkmSVM model importer."""
+
 import random
 
 import numpy as np
@@ -30,7 +31,9 @@ def _write_classic_model_embedded(path, svs, coefs, rho, l, k, kernel_type=0):
             f.write(f"{c} {s}\n")
 
 
-def _write_classic_model_twofile(model_path, svseq_path, svs, coefs, rho, l, k, kernel_type=0):
+def _write_classic_model_twofile(
+    model_path, svseq_path, svs, coefs, rho, l, k, kernel_type=0
+):
     """Write a classic model as two separate files."""
     with open(model_path, "w") as f:
         f.write(f"svm_type c_svc\n")
@@ -148,9 +151,7 @@ class TestClassicImporterTwoFile:
 
         model_path = tmp_path / "model.txt"
         svseq_path = tmp_path / "model.svseq.fa"
-        _write_classic_model_twofile(
-            model_path, svseq_path, svs, coefs, rho, l=5, k=3
-        )
+        _write_classic_model_twofile(model_path, svseq_path, svs, coefs, rho, l=5, k=3)
 
         model = load_classic_model(model_path, svseq_path=svseq_path)
         assert model.num_support_vectors == 3
@@ -166,9 +167,7 @@ class TestClassicImporterTwoFile:
 
         model_path = tmp_path / "twofile.txt"
         svseq_path = tmp_path / "twofile.svseq.fa"
-        _write_classic_model_twofile(
-            model_path, svseq_path, svs, coefs, rho, l=5, k=3
-        )
+        _write_classic_model_twofile(model_path, svseq_path, svs, coefs, rho, l=5, k=3)
 
         embedded = load_classic_model(embedded_path)
         twofile = load_classic_model(model_path, svseq_path=svseq_path)

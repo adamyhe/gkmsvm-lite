@@ -47,16 +47,13 @@ def _download_selective(syn, folder_id: str, dest: str):
             for subchild in syn.getChildren(child_id):
                 sub_target = os.path.join(subdir, subchild["name"])
                 if not os.path.exists(sub_target):
-                    entity = syn.get(subchild["id"],
-                                     downloadLocation=subdir)
+                    entity = syn.get(subchild["id"], downloadLocation=subdir)
                     dl_path = entity.path
-                    if os.path.abspath(dl_path) != os.path.abspath(
-                            sub_target):
+                    if os.path.abspath(dl_path) != os.path.abspath(sub_target):
                         os.rename(dl_path, sub_target)
 
 
-def download_dart_data(work_dir: str,
-                       tasks: tuple[str, ...] = ("task_4",)):
+def download_dart_data(work_dir: str, tasks: tuple[str, ...] = ("task_4",)):
     """Download DART-Eval data from Synapse if H5 files are missing."""
     needed = []
     for task in tasks:
@@ -85,8 +82,7 @@ def download_dart_data(work_dir: str,
         syn.login(silent=True)
     except Exception:
         print(
-            "Error: Synapse authentication failed.\n"
-            "  Run: synapse login",
+            "Error: Synapse authentication failed.\n  Run: synapse login",
             file=sys.stderr,
         )
         sys.exit(1)

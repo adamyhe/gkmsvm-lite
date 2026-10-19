@@ -95,7 +95,12 @@ def load_lsgkm_model(
             sequences.append(parts[1])
 
     return build_model(
-        header, coefficients, sequences, bias=-header["rho"][0],
-        n_expected=header["total_sv"], dtype=dtype, sv_chunk_size=sv_chunk_size,
+        header,
+        coefficients,
+        sequences,
+        bias=-header["rho"][0],
+        n_expected=header["total_sv"],
+        dtype=dtype,
+        sv_chunk_size=sv_chunk_size,
         device=device,
     )

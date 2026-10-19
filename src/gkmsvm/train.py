@@ -43,6 +43,7 @@ def train_gkmsvm(
     sv_chunk_size: int | None = None,
     gram_chunk_size: int = 1000,
     device: str = "auto",
+    allow_other_bases: bool = False,
     verbose: bool = False,
 ) -> GkmSVM:
     """Train a gapped k-mer SVM classifier on positive and negative sequences.
@@ -79,17 +80,21 @@ def train_gkmsvm(
         device: Where to train: ``"auto"`` (CUDA, else MLX, if available),
             ``"cuda"``, ``"mlx"``, or ``"cpu"``. The returned model is on
             CPU; move it with ``model.cuda()`` or ``model.mlx()``.
+        allow_other_bases: Read letters other than ACGTN in DNA strings as N
+            (scored as A, as LS-GKM reads them) instead of raising.
         verbose: Show progress.
 
     Returns:
         A trained GkmSVM model.
     """
-    X_pos = _to_onehot(pos_seqs)
-    X_neg = _to_onehot(neg_seqs)
+    X_pos = _to_onehot(pos_seqs, allow_other_bases)
+    X_neg = _to_onehot(neg_seqs, allow_other_bases)
     X = _move_to_device(np.concatenate([X_pos, X_neg], axis=0), device, verbose)
     y = np.array([1] * X_pos.shape[0] + [-1] * X_neg.shape[0])
     if solver not in ("auto", "libsvm", "nystrom", "smo"):
-        raise ValueError(f"Unknown solver {solver!r}. Use 'auto', 'libsvm', 'nystrom', or 'smo'.")
+        raise ValueError(
+            f"Unknown solver {solver!r}. Use 'auto', 'libsvm', 'nystrom', or 'smo'."
+        )
     if solver == "auto":
         N = X.shape[0]
         gram_gb = N * N * 8 / 1024**3
@@ -105,9 +110,22 @@ def train_gkmsvm(
                 stacklevel=2,
             )
     return _fit(
-        X, y, solver, C=C, kernel_type=kernel_type, l=l, k=k, d=d, gamma=gamma, M=M,
-        H=H, include_rc=include_rc, n_components=n_components,
-        gram_chunk_size=gram_chunk_size, sv_chunk_size=sv_chunk_size, verbose=verbose,
+        X,
+        y,
+        solver,
+        C=C,
+        kernel_type=kernel_type,
+        l=l,
+        k=k,
+        d=d,
+        gamma=gamma,
+        M=M,
+        H=H,
+        include_rc=include_rc,
+        n_components=n_components,
+        gram_chunk_size=gram_chunk_size,
+        sv_chunk_size=sv_chunk_size,
+        verbose=verbose,
         smo_args={"cache_size": cache_size, "tol": tol, "max_iter": max_iter},
     )
 
@@ -131,6 +149,7 @@ def train_gkmsvr(
     sv_chunk_size: int | None = None,
     gram_chunk_size: int = 1000,
     device: str = "auto",
+    allow_other_bases: bool = False,
     verbose: bool = False,
 ) -> GkmSVM:
     """Train a gapped k-mer SVR (epsilon-SVR) for regression.
@@ -160,6 +179,8 @@ def train_gkmsvr(
         device: Where to train: ``"auto"`` (CUDA, else MLX, if available),
             ``"cuda"``, ``"mlx"``, or ``"cpu"``. The returned model is on
             CPU; move it with ``model.cuda()`` or ``model.mlx()``.
+        allow_other_bases: Read letters other than ACGTN in DNA strings as N
+            (scored as A, as LS-GKM reads them) instead of raising.
         verbose: Show progress.
 
     Returns:
@@ -169,7 +190,7 @@ def train_gkmsvr(
         raise ValueError(
             f"solver must be 'auto', 'libsvm' or 'nystrom' for SVR, got {solver!r}"
         )
-    X = _move_to_device(_to_onehot(sequences), device, verbose)
+    X = _move_to_device(_to_onehot(sequences, allow_other_bases), device, verbose)
     y = np.asarray(labels, dtype=np.float64)
     if y.shape[0] != X.shape[0]:
         raise ValueError(
@@ -177,10 +198,23 @@ def train_gkmsvr(
             f"number of sequences ({X.shape[0]})"
         )
     return _fit(
-        X, y, "nystrom" if solver == "nystrom" else "libsvm", C=C, epsilon=epsilon,
-        kernel_type=kernel_type, l=l, k=k, d=d, gamma=gamma, M=M, H=H,
-        include_rc=include_rc, n_components=n_components,
-        gram_chunk_size=gram_chunk_size, sv_chunk_size=sv_chunk_size, verbose=verbose,
+        X,
+        y,
+        "nystrom" if solver == "nystrom" else "libsvm",
+        C=C,
+        epsilon=epsilon,
+        kernel_type=kernel_type,
+        l=l,
+        k=k,
+        d=d,
+        gamma=gamma,
+        M=M,
+        H=H,
+        include_rc=include_rc,
+        n_components=n_components,
+        gram_chunk_size=gram_chunk_size,
+        sv_chunk_size=sv_chunk_size,
+        verbose=verbose,
     )
 
 
@@ -233,17 +267,13 @@ def _move_to_device(X: np.ndarray, device: str, verbose: bool) -> np.ndarray:
         if verbose:
             print("Moving training data to MLX")
         return to_mlx(X)
-    raise ValueError(
-        f"Unknown device {device!r}. Use 'auto', 'cpu', 'cuda', or 'mlx'."
-    )
+    raise ValueError(f"Unknown device {device!r}. Use 'auto', 'cpu', 'cuda', or 'mlx'.")
 
 
 def _build_kernel(kernel_type, l, k, d, gamma, M, H, include_rc):
     """Resolve kernel type, build params dict, instantiate kernel."""
     kernel_type = resolve_kernel_type(kernel_type)
-    kernel_params = {"L": l, "k": k, "include_rc": include_rc}
-    if kernel_type != "gkm_cnt":
-        kernel_params["d"] = d
+    kernel_params = {"L": l, "k": k, "d": d, "include_rc": include_rc}
     if kernel_type in ("gkmrbf", "wgkmrbf"):
         kernel_params["gamma"] = gamma
     if kernel_type in ("wgkm", "wgkmrbf"):
@@ -253,19 +283,46 @@ def _build_kernel(kernel_type, l, k, d, gamma, M, H, include_rc):
     return kernel, kernel_type, kernel_params
 
 
-def _fit(X, y, solver, *, C, kernel_type, l, k, d, gamma, M, H, include_rc,
-         n_components, gram_chunk_size, sv_chunk_size, verbose, epsilon=None,
-         smo_args=None) -> GkmSVM:
+def _fit(
+    X,
+    y,
+    solver,
+    *,
+    C,
+    kernel_type,
+    l,
+    k,
+    d,
+    gamma,
+    M,
+    H,
+    include_rc,
+    n_components,
+    gram_chunk_size,
+    sv_chunk_size,
+    verbose,
+    epsilon=None,
+    smo_args=None,
+) -> GkmSVM:
     """Train with `solver` ("libsvm", "nystrom" or "smo") and build the model."""
     kernel, kernel_type, kernel_params = _build_kernel(
-        kernel_type, l, k, d, gamma, M, H, include_rc,
+        kernel_type,
+        l,
+        k,
+        d,
+        gamma,
+        M,
+        H,
+        include_rc,
     )
     if solver == "smo":
         from gkmsvm.solver import smo_solve
 
         if verbose:
-            print(f"Training with SMO solver (N={X.shape[0]}, "
-                  f"cache={smo_args['cache_size']})...")
+            print(
+                f"Training with SMO solver (N={X.shape[0]}, "
+                f"cache={smo_args['cache_size']})..."
+            )
         coefs, bias = smo_solve(kernel, X, y, C=C, verbose=verbose, **smo_args)
         sv_idx = np.flatnonzero(np.abs(coefs) > 1e-10)
         coefs = coefs[sv_idx]
@@ -278,8 +335,12 @@ def _fit(X, y, solver, *, C, kernel_type, l, k, d, gamma, M, H, include_rc,
             N = X.shape[0]
             gram = np.empty((N, N), dtype=np.float64)  # host RAM; tiles on X's device
             if verbose:
-                print(f"Computing {N}x{N} Gram matrix ({N * N:,} kernel evaluations)...")
-            compute_gram(kernel, X, chunk_size=gram_chunk_size, verbose=verbose, out=gram)
+                print(
+                    f"Computing {N}x{N} Gram matrix ({N * N:,} kernel evaluations)..."
+                )
+            compute_gram(
+                kernel, X, chunk_size=gram_chunk_size, verbose=verbose, out=gram
+            )
         clf = _fit_sklearn(gram, y, C, epsilon=epsilon, verbose=verbose)
         del gram
         sv_idx, coefs, bias = clf.support_, clf.dual_coef_[0], float(clf.intercept_[0])
@@ -287,11 +348,16 @@ def _fit(X, y, solver, *, C, kernel_type, l, k, d, gamma, M, H, include_rc,
     sv_seqs = to_cpu(X)[sv_idx]
     coefs = np.asarray(coefs, dtype=np.float64)
     if verbose:
-        print(f"Training complete: {len(sv_idx)} support vectors "
-              f"({int((coefs > 0).sum())} positive coefficients)")
+        print(
+            f"Training complete: {len(sv_idx)} support vectors "
+            f"({int((coefs > 0).sum())} positive coefficients)"
+        )
     return GkmSVM(
-        support_sequences=sv_seqs, coefficients=coefs, bias=bias,
-        kernel_type=kernel_type, kernel_params=kernel_params,
+        support_sequences=sv_seqs,
+        coefficients=coefs,
+        bias=bias,
+        kernel_type=kernel_type,
+        kernel_params=kernel_params,
         sv_chunk_size=sv_chunk_size,
     )
 
@@ -339,7 +405,9 @@ def _nystrom_gram(kernel, X, n_components, chunk_size, verbose) -> np.ndarray:
     K_mm = np.empty((m, m), dtype=np.float64)
     compute_gram(kernel, X_landmarks, chunk_size=chunk_size, verbose=verbose, out=K_mm)
     K_nm = np.empty((N, m), dtype=np.float64)
-    compute_gram(kernel, X, X_landmarks, chunk_size=chunk_size, verbose=verbose, out=K_nm)
+    compute_gram(
+        kernel, X, X_landmarks, chunk_size=chunk_size, verbose=verbose, out=K_nm
+    )
 
     # Features phi = K_nm U L^-1/2 over the well-conditioned eigenpairs of K_mm
     eigenvalues, U = np.linalg.eigh(K_mm)
@@ -351,7 +419,7 @@ def _nystrom_gram(kernel, X, n_components, chunk_size, verbose) -> np.ndarray:
 
     gram = np.empty((N, N), dtype=np.float64)
     for i in range(0, N, chunk_size):
-        gram[i:i + chunk_size] = features[i:i + chunk_size] @ features.T
+        gram[i : i + chunk_size] = features[i : i + chunk_size] @ features.T
     return gram
 
 
@@ -360,6 +428,7 @@ def _available_memory(xp) -> int:
     if xp is not np:
         try:
             import cupy as cp
+
             free, _ = cp.cuda.Device().mem_info
             return free
         except Exception:
@@ -373,6 +442,7 @@ def _available_memory(xp) -> int:
         pass
     try:
         import os
+
         pages = os.sysconf("SC_AVPHYS_PAGES")
         page_size = os.sysconf("SC_PAGE_SIZE")
         if pages > 0 and page_size > 0:
@@ -390,15 +460,19 @@ def _gram_fits_on_cpu(N: int) -> bool:
     return gram_bytes < available * 0.75
 
 
-def _to_onehot(seqs) -> np.ndarray:
-    """Convert sequences to [N, 4, L] one-hot array."""
+def _to_onehot(seqs, allow_other: bool = False) -> np.ndarray:
+    """Convert sequences to [N, 4, L] one-hot array (DNA strings may hold N,
+    and with allow_other any letter, read as N)."""
     if isinstance(seqs, np.ndarray) and seqs.ndim == 3:
         return seqs
     if isinstance(seqs, (list, tuple)):
         if len(seqs) == 0:
             raise ValueError("Sequence list must be non-empty")
         if isinstance(seqs[0], str):
-            return np.stack([one_hot_encode(s) for s in seqs])
+            # N encodes as all-zero (scored as A, as in LS-GKM)
+            return np.stack(
+                [one_hot_encode(s, allow_n=True, allow_other=allow_other) for s in seqs]
+            )
         if isinstance(seqs[0], np.ndarray):
             return np.stack(seqs)
     raise TypeError(

@@ -105,11 +105,15 @@ class TestSymmetricDiagonalTiles:
         rng = np.random.default_rng(0)
         X = _random_seqs(23, 40, rng)  # odd N exercises the folded middle row
         kernel = {
-            "t0": lambda: DirectGkmKernel(6, 4, normalize=normalize, include_rc=include_rc),
+            "t0": lambda: DirectGkmKernel(
+                6, 4, normalize=normalize, include_rc=include_rc
+            ),
             "t2": lambda: EstTruncGkmKernel(
-                7, 5, d=3, normalize=normalize, include_rc=include_rc),
+                7, 5, d=3, normalize=normalize, include_rc=include_rc
+            ),
             "t3": lambda: RbfGkmKernel(
-                7, 5, d=3, gamma=2.0, normalize=normalize, include_rc=include_rc),
+                7, 5, d=3, gamma=2.0, normalize=normalize, include_rc=include_rc
+            ),
         }[kind]()
 
         gram = compute_gram(kernel, X, chunk_size=chunk_size)

@@ -20,7 +20,9 @@ from tests.test_reference.reference_kernels import (
     score,
 )
 
-FIXTURE = Path(__file__).parent.parent / "fixtures" / "encode_ENCFF579AOX_10sv.model.txt.gz"
+FIXTURE = (
+    Path(__file__).parent.parent / "fixtures" / "encode_ENCFF579AOX_10sv.model.txt.gz"
+)
 
 
 def _random_seq(length, rng):
@@ -43,7 +45,9 @@ class TestWeightTables:
             np.testing.assert_allclose(np_table, main_table)
 
     def test_estfull_matches(self):
-        kernel = EstTruncGkmKernel(11, 7, d=3, normalize=False, include_rc=False, truncate=False)
+        kernel = EstTruncGkmKernel(
+            11, 7, d=3, normalize=False, include_rc=False, truncate=False
+        )
         main_table = kernel._mismatch_table
         np_table = build_esttrunc_table(11, 7, d=3, truncate=False)
         np.testing.assert_allclose(np_table, main_table)
@@ -154,7 +158,9 @@ class TestSVMScoring:
 
         sv_arr = SV_np.astype(np.float32)
         coefs_arr = coefs.astype(np.float32)
-        model = GkmSVM(sv_arr, coefs_arr, bias, "gkm_cnt", {"L": l, "k": k, "include_rc": True})
+        model = GkmSVM(
+            sv_arr, coefs_arr, bias, "gkm_cnt", {"L": l, "k": k, "include_rc": True}
+        )
         X_arr = X_np.astype(np.float32)
         scores_main = model(X_arr).squeeze(1)
 
@@ -178,7 +184,10 @@ class TestSVMScoring:
         sv_arr = SV_np.astype(np.float32)
         coefs_arr = coefs.astype(np.float32)
         model = GkmSVM(
-            sv_arr, coefs_arr, bias, "gkm_esttrunc",
+            sv_arr,
+            coefs_arr,
+            bias,
+            "gkm_esttrunc",
             {"L": l, "k": k, "d": d, "include_rc": True},
         )
         X_arr = X_np.astype(np.float32)

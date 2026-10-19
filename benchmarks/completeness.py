@@ -28,9 +28,15 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
-    parser.add_argument("--n-random", type=int, default=200,
-                        help="Random 200bp sequences added to the test set")
-    parser.add_argument("--output", default=None, help="Save per-sequence values to TSV")
+    parser.add_argument(
+        "--n-random",
+        type=int,
+        default=200,
+        help="Random 200bp sequences added to the test set",
+    )
+    parser.add_argument(
+        "--output", default=None, help="Save per-sequence values to TSV"
+    )
     args = parser.parse_args()
 
     import pandas as pd
@@ -61,13 +67,20 @@ def main():
     print(f"max relative error            = {(err / np.abs(expected).max()).max():.3e}")
 
     if args.output:
-        df = pd.DataFrame({
-            "group": groups,
-            "score_minus_bias": expected,
-            "attribution_sum": attr_sum,
-        })
-        write_tsv(args.output, df, "GkmExplain completeness, Nanog reference model",
-                  args.device, model="nanog_reference.model.txt.gz")
+        df = pd.DataFrame(
+            {
+                "group": groups,
+                "score_minus_bias": expected,
+                "attribution_sum": attr_sum,
+            }
+        )
+        write_tsv(
+            args.output,
+            df,
+            "GkmExplain completeness, Nanog reference model",
+            args.device,
+            model="nanog_reference.model.txt.gz",
+        )
 
 
 if __name__ == "__main__":

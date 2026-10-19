@@ -66,6 +66,7 @@ def compute_gram(
         tiles = [(r, c) for r in row_ranges for c in col_ranges]
     if verbose:
         from tqdm import tqdm
+
         tiles = tqdm(tiles, desc="Gram matrix")
 
     if packed:
@@ -75,24 +76,36 @@ def compute_gram(
         txp = np if xp is not np and is_mlx(X) else xp
 
         def tile_float(a):
-            return to_cpu(a).astype(np.float64) if txp is np else a.astype(float_dtype(a))
+            return (
+                to_cpu(a).astype(np.float64) if txp is np else a.astype(float_dtype(a))
+            )
 
         if base.normalize:
             diag_x = tile_float(base.raw_diag_packed(bx, bx_rc))
-            diag_y = diag_x if symmetric else tile_float(base.raw_diag_packed(by, by_rc))
+            diag_y = (
+                diag_x if symmetric else tile_float(base.raw_diag_packed(by, by_rc))
+            )
 
     for r_start, c_start in tiles:
         c_end = min(c_start + chunk_size, M)
         r_end = (c_end if symmetric else N) if panels else min(r_start + chunk_size, N)
 
         if packed:
-            diag_offset = c_start if symmetric and panels and get_array_module(bx) is np else None
-            tile = tile_float(base.raw_packed(
-                bx[r_start:r_end], by[c_start:c_end],
-                None if by_rc is None else by_rc[c_start:c_end], diag_offset=diag_offset,
-            ))
+            diag_offset = (
+                c_start if symmetric and panels and get_array_module(bx) is np else None
+            )
+            tile = tile_float(
+                base.raw_packed(
+                    bx[r_start:r_end],
+                    by[c_start:c_end],
+                    None if by_rc is None else by_rc[c_start:c_end],
+                    diag_offset=diag_offset,
+                )
+            )
             if base.normalize:
-                norm = txp.sqrt(diag_x[r_start:r_end, None] * diag_y[c_start:c_end][None, :])
+                norm = txp.sqrt(
+                    diag_x[r_start:r_end, None] * diag_y[c_start:c_end][None, :]
+                )
                 tile = tile / txp.clip(norm, 1e-10, None)
             tile = kernel.finish(tile)
         else:

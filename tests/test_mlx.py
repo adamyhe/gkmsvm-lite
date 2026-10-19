@@ -3,6 +3,7 @@
 Each test computes the result on both CPU and MLX, then asserts they match.
 This validates the packed uint32 MLX kernel, device transfers, and MLX code paths.
 """
+
 import random
 
 import numpy as np
@@ -39,16 +40,22 @@ def direct_model():
 @pytest.fixture
 def esttrunc_model():
     return _make_model(
-        10, 30, "gkm_esttrunc",
-        {"L": 11, "k": 7, "d": 3, "include_rc": True}, seed=2,
+        10,
+        30,
+        "gkm_esttrunc",
+        {"L": 11, "k": 7, "d": 3, "include_rc": True},
+        seed=2,
     )
 
 
 @pytest.fixture
 def esttrunc_model_no_rc_no_norm():
     model = _make_model(
-        5, 20, "gkm_esttrunc",
-        {"L": 11, "k": 7, "d": 3, "include_rc": False}, seed=3,
+        5,
+        20,
+        "gkm_esttrunc",
+        {"L": 11, "k": 7, "d": 3, "include_rc": False},
+        seed=3,
     )
     model.kernel.normalize = False
     return model
@@ -90,7 +97,9 @@ class TestMLXScoring:
         mlx_scores = direct_model(to_mlx(x))
 
         np.testing.assert_allclose(
-            to_cpu(mlx_scores), cpu_scores, atol=1e-5,
+            to_cpu(mlx_scores),
+            cpu_scores,
+            atol=1e-5,
         )
 
     def test_esttrunc_scores_match(self, esttrunc_model):
@@ -101,7 +110,9 @@ class TestMLXScoring:
         mlx_scores = esttrunc_model(to_mlx(x))
 
         np.testing.assert_allclose(
-            to_cpu(mlx_scores), cpu_scores, atol=1e-5,
+            to_cpu(mlx_scores),
+            cpu_scores,
+            atol=1e-5,
         )
 
     def test_esttrunc_no_rc_no_norm(self, esttrunc_model_no_rc_no_norm):
@@ -113,7 +124,9 @@ class TestMLXScoring:
         mlx_scores = model(to_mlx(x))
 
         np.testing.assert_allclose(
-            to_cpu(mlx_scores), cpu_scores, atol=1e-5,
+            to_cpu(mlx_scores),
+            cpu_scores,
+            atol=1e-5,
         )
 
     def test_chunked_scoring(self, esttrunc_model):
@@ -125,7 +138,9 @@ class TestMLXScoring:
         mlx_scores = esttrunc_model(to_mlx(x))
 
         np.testing.assert_allclose(
-            to_cpu(mlx_scores), cpu_scores, atol=1e-5,
+            to_cpu(mlx_scores),
+            cpu_scores,
+            atol=1e-5,
         )
 
     def test_single_sequence(self, direct_model):
@@ -136,7 +151,9 @@ class TestMLXScoring:
         mlx_scores = direct_model(to_mlx(x))
 
         np.testing.assert_allclose(
-            to_cpu(mlx_scores), cpu_scores, atol=1e-5,
+            to_cpu(mlx_scores),
+            cpu_scores,
+            atol=1e-5,
         )
 
     def test_rc_invariance(self, esttrunc_model):
@@ -151,7 +168,9 @@ class TestMLXScoring:
         score_rc = esttrunc_model(to_mlx(x_rc))
 
         np.testing.assert_allclose(
-            to_cpu(score), to_cpu(score_rc), atol=1e-5,
+            to_cpu(score),
+            to_cpu(score_rc),
+            atol=1e-5,
         )
 
 
@@ -171,7 +190,9 @@ class TestMLXIsm:
         mlx_result = ism(direct_model, to_mlx(x))
 
         np.testing.assert_allclose(
-            to_cpu(mlx_result), cpu_result, atol=1e-4,
+            to_cpu(mlx_result),
+            cpu_result,
+            atol=1e-4,
         )
 
     def test_ism_esttrunc_matches_cpu(self, esttrunc_model):
@@ -184,7 +205,9 @@ class TestMLXIsm:
         mlx_result = ism(esttrunc_model, to_mlx(x))
 
         np.testing.assert_allclose(
-            to_cpu(mlx_result), cpu_result, atol=1e-4,
+            to_cpu(mlx_result),
+            cpu_result,
+            atol=1e-4,
         )
 
     def test_ism_ref_base_zero(self, esttrunc_model):
@@ -214,7 +237,9 @@ class TestMLXGkmExplain:
         mlx_result = gkmexplain(esttrunc_model, to_mlx(x), mode=0)
 
         np.testing.assert_allclose(
-            to_cpu(mlx_result), cpu_result, atol=1e-6,
+            to_cpu(mlx_result),
+            cpu_result,
+            atol=1e-6,
         )
 
     def test_decomposition_from_mlx(self, esttrunc_model):
@@ -229,7 +254,9 @@ class TestMLXGkmExplain:
         expected = cpu_score - esttrunc_model.bias
 
         np.testing.assert_allclose(
-            exp_sum, expected.astype(np.float64), atol=1e-5,
+            exp_sum,
+            expected.astype(np.float64),
+            atol=1e-5,
         )
 
 
@@ -250,14 +277,20 @@ class TestMLXKernelPairwise:
         mlx_result = kernel.pairwise(to_mlx(seqs_a), to_mlx(seqs_b))
 
         np.testing.assert_allclose(
-            to_cpu(mlx_result), cpu_result, atol=1e-5,
+            to_cpu(mlx_result),
+            cpu_result,
+            atol=1e-5,
         )
 
     def test_pairwise_esttrunc(self):
         from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
 
         kernel = EstTruncGkmKernel(
-            l=11, k=7, d=3, include_rc=True, normalize=True,
+            l=11,
+            k=7,
+            d=3,
+            include_rc=True,
+            normalize=True,
         )
         seqs_a = np.stack([one_hot_encode(s) for s in _make_seqs(2, 30, seed=42)])
         seqs_b = np.stack([one_hot_encode(s) for s in _make_seqs(3, 30, seed=43)])
@@ -266,7 +299,9 @@ class TestMLXKernelPairwise:
         mlx_result = kernel.pairwise(to_mlx(seqs_a), to_mlx(seqs_b))
 
         np.testing.assert_allclose(
-            to_cpu(mlx_result), cpu_result, atol=1e-5,
+            to_cpu(mlx_result),
+            cpu_result,
+            atol=1e-5,
         )
 
     def test_raw_packed(self):
@@ -277,10 +312,14 @@ class TestMLXKernelPairwise:
         seqs_b = np.stack([one_hot_encode(s) for s in _make_seqs(5, 15, seed=46)])
 
         cpu_result = kernel.raw_packed(kernel.pack(seqs_a), kernel.pack(seqs_b))
-        mlx_result = kernel.raw_packed(kernel.pack(to_mlx(seqs_a)), kernel.pack(to_mlx(seqs_b)))
+        mlx_result = kernel.raw_packed(
+            kernel.pack(to_mlx(seqs_a)), kernel.pack(to_mlx(seqs_b))
+        )
 
         np.testing.assert_allclose(
-            to_cpu(mlx_result), cpu_result, atol=1e-5,
+            to_cpu(mlx_result),
+            cpu_result,
+            atol=1e-5,
         )
 
     def test_diagonal_packed(self):
@@ -293,14 +332,20 @@ class TestMLXKernelPairwise:
         mlx_diag = kernel._raw_diagonal(to_mlx(seqs))
 
         np.testing.assert_allclose(
-            to_cpu(mlx_diag), cpu_diag, atol=1e-5,
+            to_cpu(mlx_diag),
+            cpu_diag,
+            atol=1e-5,
         )
 
     def test_diagonal_esttrunc_packed(self):
         from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
 
         kernel = EstTruncGkmKernel(
-            l=11, k=7, d=3, include_rc=True, normalize=False,
+            l=11,
+            k=7,
+            d=3,
+            include_rc=True,
+            normalize=False,
         )
         seqs = np.stack([one_hot_encode(s) for s in _make_seqs(4, 30, seed=48)])
 
@@ -308,14 +353,20 @@ class TestMLXKernelPairwise:
         mlx_diag = kernel._raw_diagonal(to_mlx(seqs))
 
         np.testing.assert_allclose(
-            to_cpu(mlx_diag), cpu_diag, atol=1e-4,
+            to_cpu(mlx_diag),
+            cpu_diag,
+            atol=1e-4,
         )
 
     def test_self_pairwise_symmetric(self):
         from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
 
         kernel = EstTruncGkmKernel(
-            l=11, k=7, d=3, include_rc=True, normalize=True,
+            l=11,
+            k=7,
+            d=3,
+            include_rc=True,
+            normalize=True,
         )
         seqs = np.stack([one_hot_encode(s) for s in _make_seqs(4, 30, seed=44)])
 
@@ -338,7 +389,9 @@ class TestMLXVariantScoring:
         mlx_delta = esttrunc_model.score_variants(to_mlx(ref), to_mlx(alt))
 
         np.testing.assert_allclose(
-            to_cpu(mlx_delta), cpu_delta, atol=1e-5,
+            to_cpu(mlx_delta),
+            cpu_delta,
+            atol=1e-5,
         )
 
     def test_same_variant_zero(self, esttrunc_model):
@@ -360,7 +413,11 @@ class TestMLXGram:
         from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
 
         kernel = EstTruncGkmKernel(
-            l=11, k=7, d=3, include_rc=True, normalize=True,
+            l=11,
+            k=7,
+            d=3,
+            include_rc=True,
+            normalize=True,
         )
         seqs = np.stack([one_hot_encode(s) for s in _make_seqs(6, 25, seed=60)])
         cpu_gram = compute_gram(kernel, seqs)
@@ -374,7 +431,11 @@ class TestMLXGram:
         from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
 
         kernel = EstTruncGkmKernel(
-            l=11, k=7, d=3, include_rc=True, normalize=True,
+            l=11,
+            k=7,
+            d=3,
+            include_rc=True,
+            normalize=True,
         )
         seqs = np.stack([one_hot_encode(s) for s in _make_seqs(5, 25, seed=61)])
 
@@ -400,11 +461,21 @@ class TestMLXTraining:
         neg = _random_seqs_str(20, 20, rng)
 
         cpu_model = train_gkmsvm(
-            pos, neg, kernel_type="direct", l=7, k=5, C=1.0,
+            pos,
+            neg,
+            kernel_type="direct",
+            l=7,
+            k=5,
+            C=1.0,
             device="cpu",
         )
         mlx_model = train_gkmsvm(
-            pos, neg, kernel_type="direct", l=7, k=5, C=1.0,
+            pos,
+            neg,
+            kernel_type="direct",
+            l=7,
+            k=5,
+            C=1.0,
             device="mlx",
         )
 
@@ -422,12 +493,24 @@ class TestMLXTraining:
         neg = _random_seqs_str(20, 20, rng)
 
         cpu_model = train_gkmsvm(
-            pos, neg, kernel_type="direct", l=7, k=5, C=1.0,
-            solver="smo", device="cpu",
+            pos,
+            neg,
+            kernel_type="direct",
+            l=7,
+            k=5,
+            C=1.0,
+            solver="smo",
+            device="cpu",
         )
         mlx_model = train_gkmsvm(
-            pos, neg, kernel_type="direct", l=7, k=5, C=1.0,
-            solver="smo", device="mlx",
+            pos,
+            neg,
+            kernel_type="direct",
+            l=7,
+            k=5,
+            C=1.0,
+            solver="smo",
+            device="mlx",
         )
 
         x = np.stack([one_hot_encode(s) for s in _random_seqs_str(5, 20, rng)])
@@ -444,11 +527,21 @@ class TestMLXTraining:
         labels = rng.standard_normal(30)
 
         cpu_model = train_gkmsvr(
-            seqs, labels, kernel_type="direct", l=7, k=5, C=1.0,
+            seqs,
+            labels,
+            kernel_type="direct",
+            l=7,
+            k=5,
+            C=1.0,
             device="cpu",
         )
         mlx_model = train_gkmsvr(
-            seqs, labels, kernel_type="direct", l=7, k=5, C=1.0,
+            seqs,
+            labels,
+            kernel_type="direct",
+            l=7,
+            k=5,
+            C=1.0,
             device="mlx",
         )
 
@@ -466,7 +559,12 @@ class TestMLXTraining:
         neg = _random_seqs_str(15, 20, rng)
 
         model = train_gkmsvm(
-            pos, neg, kernel_type="direct", l=7, k=5, C=1.0,
+            pos,
+            neg,
+            kernel_type="direct",
+            l=7,
+            k=5,
+            C=1.0,
             device="mlx",
         )
 
@@ -482,8 +580,14 @@ class TestMLXTraining:
         neg = _random_seqs_str(15, 20, rng)
 
         model = train_gkmsvm(
-            pos, neg, kernel_type="direct", l=7, k=5, C=1.0,
-            device="auto", verbose=True,
+            pos,
+            neg,
+            kernel_type="direct",
+            l=7,
+            k=5,
+            C=1.0,
+            device="auto",
+            verbose=True,
         )
         assert model.num_support_vectors > 0
         assert "Moving training data to MLX" in capsys.readouterr().out
@@ -492,11 +596,14 @@ class TestMLXTraining:
 class TestMaskedMLX:
     """Metal masked join and l-mer table vs the CPU paths."""
 
-    @pytest.mark.parametrize("kernel_type,params", [
-        ("gkm_cnt", {"L": 8, "k": 5}),
-        ("gkm_esttrunc", {"L": 9, "k": 6, "d": 3}),
-        ("wgkm", {"L": 8, "k": 5, "M": 3, "H": 2.0}),
-    ])
+    @pytest.mark.parametrize(
+        "kernel_type,params",
+        [
+            ("gkm_cnt", {"L": 8, "k": 5}),
+            ("gkm_esttrunc", {"L": 9, "k": 6, "d": 3}),
+            ("wgkm", {"L": 8, "k": 5, "M": 3, "H": 2.0}),
+        ],
+    )
     @pytest.mark.parametrize("col_tile", [4096, 7])
     def test_join_matches_cpu(self, kernel_type, params, col_tile, monkeypatch):
         import gkmsvm.kernels.masked as masked
@@ -513,13 +620,20 @@ class TestMaskedMLX:
 
         plan = kernel._join_plan()
         args = (pack(X), pack(Y), plan, pack(reverse_complement(Y)))
-        np.testing.assert_allclose(masked.masked_pairwise_mlx(*args),
-                                   masked.masked_pairwise(*args), rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(
+            masked.masked_pairwise_mlx(*args),
+            masked.masked_pairwise(*args),
+            rtol=1e-12,
+            atol=1e-12,
+        )
 
-    @pytest.mark.parametrize("kernel_type,params", [
-        ("gkm_esttrunc", {"L": 9, "k": 6, "d": 3}),
-        ("wgkm", {"L": 8, "k": 5, "M": 3, "H": 2.0}),
-    ])
+    @pytest.mark.parametrize(
+        "kernel_type,params",
+        [
+            ("gkm_esttrunc", {"L": 9, "k": 6, "d": 3}),
+            ("wgkm", {"L": 8, "k": 5, "M": 3, "H": 2.0}),
+        ],
+    )
     @pytest.mark.parametrize("table", [False, True])
     def test_model_scores(self, kernel_type, params, table):
         """MLX scoring (masked join or l-mer table) matches CPU scoring."""
@@ -578,8 +692,13 @@ def test_gkmexplain_mlx_reuses_cpu_model():
 
     rng = np.random.default_rng(0)
     sv = np.eye(4)[rng.integers(0, 4, (30, 25))].transpose(0, 2, 1).astype(np.float32)
-    model = GkmSVM(sv, rng.normal(size=30).astype(np.float32), 0.1, "gkm_esttrunc",
-                   {"L": 8, "k": 5, "d": 2})
+    model = GkmSVM(
+        sv,
+        rng.normal(size=30).astype(np.float32),
+        0.1,
+        "gkm_esttrunc",
+        {"L": 8, "k": 5, "d": 2},
+    )
     x = np.eye(4)[rng.integers(0, 4, (2, 25))].transpose(0, 2, 1).astype(np.float32)
     expected = gkmexplain(model, x, mode="hypothetical")
     model.mlx()

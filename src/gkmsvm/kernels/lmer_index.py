@@ -143,15 +143,30 @@ def _query_cpu(bx, offsets, ids, vals, masks, weights, n_lmers, S, n_split, wx):
         acc = part[task]
         for i in range(c * step, min(W, (c + 1) * step)):
             scale = wx[i] if wx.shape[0] > 0 else 1.0
-            _add_window(acc, bx[b, i], scale, offsets, ids, vals, masks, weights, n_lmers)
+            _add_window(
+                acc, bx[b, i], scale, offsets, ids, vals, masks, weights, n_lmers
+            )
     if n_split == 1:
         return part
     return part.reshape(B, n_split, S).sum(axis=1)
 
 
 @njit(parallel=True, cache=True, fastmath={"nsz", "arcp", "contract", "reassoc"})
-def _query_reduce_cpu(bx, offsets, ids, vals, masks, weights, n_lmers, wx, inv_dx, inv_ds,
-                      coef, gamma, n_tasks):
+def _query_reduce_cpu(
+    bx,
+    offsets,
+    ids,
+    vals,
+    masks,
+    weights,
+    n_lmers,
+    wx,
+    inv_dx,
+    inv_ds,
+    coef,
+    gamma,
+    n_tasks,
+):
     """[B]: sum_s coef_s f(K_raw[b, s] * inv_dx[b] * inv_ds[s]), without the [B, S] block.
 
     f(k) = exp(gamma (k - 1)) when gamma is not NaN (RBF), else k. Each task
@@ -168,7 +183,9 @@ def _query_reduce_cpu(bx, offsets, ids, vals, masks, weights, n_lmers, wx, inv_d
         for b in range(task, B, n_tasks):
             for i in range(W):
                 a = wx[i] if wx.shape[0] > 0 else 1.0
-                _add_window(acc, bx[b, i], a, offsets, ids, vals, masks, weights, n_lmers)
+                _add_window(
+                    acc, bx[b, i], a, offsets, ids, vals, masks, weights, n_lmers
+                )
             scale = inv_dx[b]
             total = 0.0
             if rbf:
@@ -187,22 +204,34 @@ def _query_reduce_cpu(bx, offsets, ids, vals, masks, weights, n_lmers, wx, inv_d
 
 
 @njit(inline="always")
-def _add_hits(acc, row, sign, offsets, ids, masks, weights, n_lmers):
-    """acc[s] += sign * K_raw(row, s) for the packed windows in row."""
+def _add_hits(acc, row, sign, rowwt, offsets, ids, vals, masks, weights, n_lmers):
+    """acc[s] += sign * K_raw(row, s) for the packed windows in row; rowwt: their
+    window weights (empty: all 1)."""
     for i in range(row.shape[0]):
-        w = row[i]
-        for t in range(masks.shape[0]):
-            v = np.int64(w ^ masks[t])
-            if v >= n_lmers:  # padding window
-                continue
-            wt = sign * weights[t]
-            for e in range(offsets[v], offsets[v + 1]):
-                acc[ids[e]] += wt
+        scale = sign * rowwt[i] if rowwt.shape[0] > 0 else sign
+        _add_window(acc, row[i], scale, offsets, ids, vals, masks, weights, n_lmers)
 
 
 @njit(parallel=True, cache=True, fastmath={"nsz", "arcp", "contract", "reassoc"})
-def _query_mutants_cpu(old, new, ref, ref_score, offsets, ids, masks, weights, n_lmers,
-                       inv_dx, inv_dmut, inv_ds, coef, gamma, n_tasks):
+def _query_mutants_cpu(
+    old,
+    new,
+    ref,
+    ref_score,
+    offsets,
+    ids,
+    vals,
+    masks,
+    weights,
+    n_lmers,
+    slot_wt,
+    inv_dx,
+    inv_dmut,
+    inv_ds,
+    coef,
+    gamma,
+    n_tasks,
+):
     """[4, L, B] ISM deltas: f(mutant) - ref_score[b], with
     f = sum_s coef_s f(K_raw(mutant, s) inv_dmut inv_ds[s]) as in _query_reduce_cpu.
 
@@ -210,6 +239,8 @@ def _query_mutants_cpu(old, new, ref, ref_score, offsets, ids, masks, weights, n
     [L, B, l] and new [4, L, B, l] hold the windows covering position p. A base
     with the reference's windows and norm (the reference base) gets 0; an N
     replaced by A keeps the forward windows (N packs as A) but not the norm.
+    slot_wt [L, l]: the window weights of those windows (0 for padding; [L, 0]
+    when unweighted).
     """
     L, B = old.shape[0], old.shape[1]
     S = inv_ds.shape[0]
@@ -221,13 +252,36 @@ def _query_mutants_cpu(old, new, ref, ref_score, offsets, ids, masks, weights, n
         tmp = np.empty(S)
         for item in range(task, L * B, n_tasks):
             p, b = item // B, item % B
-            _add_hits(d_old, old[p, b], -1.0, offsets, ids, masks, weights, n_lmers)
+            rowwt = slot_wt[p]
+            _add_hits(
+                d_old,
+                old[p, b],
+                -1.0,
+                rowwt,
+                offsets,
+                ids,
+                vals,
+                masks,
+                weights,
+                n_lmers,
+            )
             for v in range(4):
                 # Window 0 always covers p
                 if new[v, p, b, 0] == old[p, b, 0] and inv_dmut[v, p, b] == inv_dx[b]:
                     continue
                 tmp[:] = d_old
-                _add_hits(tmp, new[v, p, b], 1.0, offsets, ids, masks, weights, n_lmers)
+                _add_hits(
+                    tmp,
+                    new[v, p, b],
+                    1.0,
+                    rowwt,
+                    offsets,
+                    ids,
+                    vals,
+                    masks,
+                    weights,
+                    n_lmers,
+                )
                 scale = inv_dmut[v, p, b]
                 total = 0.0
                 if rbf:
@@ -322,7 +376,9 @@ class LmerIndex:
         wy = kernel.window_weights(W)
         self.vals = np.zeros(0, dtype=np.uint8)
         if wy is not None:  # an RC window carries its forward weight
-            vals = np.concatenate([np.tile(w, self.S) for w in (wy, wy[::-1])][:len(blocks)])
+            vals = np.concatenate(
+                [np.tile(w, self.S) for w in (wy, wy[::-1])][: len(blocks)]
+            )
             self.vals = _counting_sort(keys, vals, self.offsets)
         self._dev = {}
 
@@ -348,8 +404,18 @@ class LmerIndex:
 
             bx = np.ascontiguousarray(bx)
             n_split = min(bx.shape[1], -(-numba.get_num_threads() // bx.shape[0]))
-            return _query_cpu(bx, self.offsets, self.ids, self.vals, self.masks, self.weights,
-                              self.n_lmers, self.S, max(1, n_split), self._wx(bx.shape[1]))
+            return _query_cpu(
+                bx,
+                self.offsets,
+                self.ids,
+                self.vals,
+                self.masks,
+                self.weights,
+                self.n_lmers,
+                self.S,
+                max(1, n_split),
+                self._wx(bx.shape[1]),
+            )
         if dev == "cuda":
             return self._pairwise_cuda(bx)
         return self._pairwise_mlx(bx)
@@ -363,47 +429,90 @@ class LmerIndex:
         import numba
 
         bx = np.ascontiguousarray(bx)
-        return _query_reduce_cpu(bx, self.offsets, self.ids, self.vals, self.masks, self.weights,
-                                 self.n_lmers, self._wx(bx.shape[1]),
-                                 np.ascontiguousarray(inv_dx, dtype=np.float64),
-                                 np.ascontiguousarray(inv_ds, dtype=np.float64),
-                                 np.ascontiguousarray(coef, dtype=np.float64), float(gamma),
-                                 max(1, min(bx.shape[0], 4 * numba.get_num_threads())))
+        return _query_reduce_cpu(
+            bx,
+            self.offsets,
+            self.ids,
+            self.vals,
+            self.masks,
+            self.weights,
+            self.n_lmers,
+            self._wx(bx.shape[1]),
+            np.ascontiguousarray(inv_dx, dtype=np.float64),
+            np.ascontiguousarray(inv_ds, dtype=np.float64),
+            np.ascontiguousarray(coef, dtype=np.float64),
+            float(gamma),
+            max(1, min(bx.shape[0], 4 * numba.get_num_threads())),
+        )
 
-    def mutants(self, old, new, ref, ref_score, inv_dx, inv_dmut, inv_ds, coef, gamma=np.nan):
+    def mutants(
+        self,
+        old,
+        new,
+        ref,
+        ref_score,
+        inv_dx,
+        inv_dmut,
+        inv_ds,
+        coef,
+        gamma=np.nan,
+        slot_wt=None,
+    ):
         """ISM deltas [4, L, B] on CPU (see _query_mutants_cpu), without [rows, S] blocks.
 
-        Not for weighted windows (old/new are window sets, not sequences).
+        slot_wt [L, l]: with window weights, those of the windows in old/new
+        (window sets, not sequences, so their weights can't follow from length).
         """
         import numba
 
-        if len(self.vals):
-            raise NotImplementedError("ISM scores weighted kernels' mutants through model()")
-
         L, B = old.shape[:2]
+        if len(self.vals) and slot_wt is None:
+            raise ValueError("weighted windows need slot_wt")
+
         def f64(a):
             return np.ascontiguousarray(a, dtype=np.float64)
 
         return _query_mutants_cpu(
-            np.ascontiguousarray(old), np.ascontiguousarray(new), f64(ref), f64(ref_score),
-            self.offsets, self.ids, self.masks, self.weights, self.n_lmers, f64(inv_dx),
+            np.ascontiguousarray(old),
+            np.ascontiguousarray(new),
+            f64(ref),
+            f64(ref_score),
+            self.offsets,
+            self.ids,
+            self.vals,
+            self.masks,
+            self.weights,
+            self.n_lmers,
+            np.zeros((L, 0)) if slot_wt is None else f64(slot_wt),
+            f64(inv_dx),
             f64(inv_dmut),
-            f64(inv_ds), f64(coef), float(gamma),
-            max(1, min(L * B, 4 * numba.get_num_threads())))
+            f64(inv_ds),
+            f64(coef),
+            float(gamma),
+            max(1, min(L * B, 4 * numba.get_num_threads())),
+        )
 
     def _arrays(self, dev):
         if dev not in self._dev:
             if dev == "cuda":
                 import cupy as cp
 
-                self._dev[dev] = (cp.asarray(self.offsets), cp.asarray(self.ids),
-                                  cp.asarray(self.masks), cp.asarray(self.weights),
-                                  cp.asarray(self.vals) if len(self.vals) else None)
+                self._dev[dev] = (
+                    cp.asarray(self.offsets),
+                    cp.asarray(self.ids),
+                    cp.asarray(self.masks),
+                    cp.asarray(self.weights),
+                    cp.asarray(self.vals) if len(self.vals) else None,
+                )
             else:
                 import mlx.core as mx
 
-                self._dev[dev] = (mx.array(self.offsets.astype(np.int32)), mx.array(self.ids),
-                                  mx.array(self.masks), mx.array(self.levels))
+                self._dev[dev] = (
+                    mx.array(self.offsets.astype(np.int32)),
+                    mx.array(self.ids),
+                    mx.array(self.masks),
+                    mx.array(self.levels),
+                )
         return self._dev[dev]
 
     def _pairwise_cuda(self, bx):
@@ -425,10 +534,26 @@ class LmerIndex:
         block = 256
         for b0 in range(0, B, 65535):  # grid.y limit
             nb = min(65535, B - b0)
-            _cuda_fn(((n_items + block - 1) // block, nb), (block,),
-                     (bx[b0:b0 + nb], np.int32(W), np.int64(n_items), offsets, ids, masks,
-                      weights, np.int32(len(self.masks)), np.int64(self.n_lmers),
-                      np.int32(self.S), out[b0:b0 + nb], wx, vals, np.int32(weighted)))
+            _cuda_fn(
+                ((n_items + block - 1) // block, nb),
+                (block,),
+                (
+                    bx[b0 : b0 + nb],
+                    np.int32(W),
+                    np.int64(n_items),
+                    offsets,
+                    ids,
+                    masks,
+                    weights,
+                    np.int32(len(self.masks)),
+                    np.int64(self.n_lmers),
+                    np.int32(self.S),
+                    out[b0 : b0 + nb],
+                    wx,
+                    vals,
+                    np.int32(weighted),
+                ),
+            )
         return out
 
     def _pairwise_mlx(self, bx):
@@ -439,7 +564,10 @@ class LmerIndex:
             _metal_fn = mx.fast.metal_kernel(
                 name="gkm_lmer_index_query",
                 input_names=["bx", "offsets", "ids", "masks", "levels", "params"],
-                output_names=["counts"], source=_METAL_SRC, atomic_outputs=True)
+                output_names=["counts"],
+                source=_METAL_SRC,
+                atomic_outputs=True,
+            )
         if len(self.table) > _METAL_MAX_LEVELS or len(self.vals):
             # One int32 [rows, S] block per level; many levels, or window
             # weights (counts no longer per level), query on CPU, which shares
@@ -456,13 +584,26 @@ class LmerIndex:
         n_items = W * len(self.masks)
         for b0 in range(0, B, rows):
             nb = min(rows, B - b0)
-            params = mx.array([W, len(self.masks), self.S, self.n_lmers, nb], dtype=mx.int32)
+            params = mx.array(
+                [W, len(self.masks), self.S, self.n_lmers, nb], dtype=mx.int32
+            )
             counts = _metal_fn(
-                inputs=[mx.array(bx_np[b0:b0 + nb].ravel()), offsets, ids, masks, levels, params],
-                template=[], grid=((n_items + 255) // 256 * 256, nb, 1), threadgroup=(256, 1, 1),
-                output_shapes=[(n_lev * nb * self.S,)], output_dtypes=[mx.int32],
-                init_value=0)[0]
+                inputs=[
+                    mx.array(bx_np[b0 : b0 + nb].ravel()),
+                    offsets,
+                    ids,
+                    masks,
+                    levels,
+                    params,
+                ],
+                template=[],
+                grid=((n_items + 255) // 256 * 256, nb, 1),
+                threadgroup=(256, 1, 1),
+                output_shapes=[(n_lev * nb * self.S,)],
+                output_dtypes=[mx.int32],
+                init_value=0,
+            )[0]
             counts = np.array(counts).reshape(n_lev, nb, self.S)
             for m in range(n_lev):
-                out[b0:b0 + nb] += self.table[m] * counts[m]
+                out[b0 : b0 + nb] += self.table[m] * counts[m]
         return mx.array(out.astype(np.float32))

@@ -18,7 +18,9 @@ from gkmsvm.codec import one_hot_encode, reverse_complement
 from gkmsvm.importers.lsgkm import load_lsgkm_model, parse_lsgkm_header
 
 
-FIXTURE = Path(__file__).parent.parent / "fixtures" / "encode_ENCFF579AOX_10sv.model.txt.gz"
+FIXTURE = (
+    Path(__file__).parent.parent / "fixtures" / "encode_ENCFF579AOX_10sv.model.txt.gz"
+)
 
 
 @pytest.fixture

@@ -40,8 +40,9 @@ def _normalized_dot(raw, diag_x, diag_sv, norm, coef, gamma):
         out[b] = acc
     return out
 
+
 # Kernel modes:
-#   -t 0  gkm_cnt       / direct          Exact gapped k-mer count
+#   -t 0  gkm_cnt       / direct          Gapped k-mer count (pairs within d mismatches)
 #   -t 1  gkm_estfull   / estimated_full  Estimated l-mer kernel, full
 #   -t 2  gkm_esttrunc  / estimated       Estimated l-mer kernel, truncated (default)
 #   -t 3  gkmrbf        / rbf             RBF on estimated kernel
@@ -49,8 +50,13 @@ def _normalized_dot(raw, diag_x, diag_sv, norm, coef, gamma):
 #   -t 5  wgkmrbf       / weighted_rbf    Center-weighted RBF
 
 KERNEL_BUILDERS = {
+    # No d: every pair counts (models saved before d applied to -t 0)
     "gkm_cnt": lambda p: DirectGkmKernel(
-        l=p["L"], k=p["k"], normalize=True, include_rc=p.get("include_rc", True)
+        l=p["L"],
+        k=p["k"],
+        d=p.get("d"),
+        normalize=True,
+        include_rc=p.get("include_rc", True),
     ),
     "gkm_esttrunc": lambda p: EstTruncGkmKernel(
         l=p["L"],
@@ -98,12 +104,12 @@ KERNEL_BUILDERS = {
 }
 
 KERNEL_ALIASES: dict[str | int, str] = {
-    "direct":         "gkm_cnt",
-    "estimated":      "gkm_esttrunc",
+    "direct": "gkm_cnt",
+    "estimated": "gkm_esttrunc",
     "estimated_full": "gkm_estfull",
-    "rbf":            "gkmrbf",
-    "weighted":       "wgkm",
-    "weighted_rbf":   "wgkmrbf",
+    "rbf": "gkmrbf",
+    "weighted": "wgkm",
+    "weighted_rbf": "wgkmrbf",
     0: "gkm_cnt",
     1: "gkm_estfull",
     2: "gkm_esttrunc",
@@ -132,9 +138,7 @@ def resolve_kernel_type(kernel_type: str | int) -> str:
     canonical = KERNEL_ALIASES.get(kernel_type)
     if canonical is not None:
         return canonical
-    supported = ", ".join(
-        f"{a!r}" for a in KERNEL_ALIASES if isinstance(a, str)
-    )
+    supported = ", ".join(f"{a!r}" for a in KERNEL_ALIASES if isinstance(a, str))
     raise NotImplementedError(
         f"Unknown kernel type {kernel_type!r}. "
         f"Aliases: {supported}. "
@@ -236,12 +240,14 @@ class GkmSVM(DeviceModel):
         if self._on_mlx:
             try:
                 import mlx.core as mx
+
                 mx.clear_cache()
             except (ImportError, AttributeError):
                 pass
         if self._on_gpu:
             try:
                 import cupy as cp
+
                 cp.get_default_memory_pool().free_all_blocks()
                 cp.get_default_pinned_memory_pool().free_all_blocks()
             except (ImportError, AttributeError):
@@ -281,7 +287,9 @@ class GkmSVM(DeviceModel):
         if "packed" not in c:
             base = self.kernel.base
             sv = self.support_sequences
-            c["packed"] = base.pack_both(sv) if isinstance(base, PackedGkmKernel) else None
+            c["packed"] = (
+                base.pack_both(sv) if isinstance(base, PackedGkmKernel) else None
+            )
         return c["packed"]
 
     def _inv_norms(self, diag_x, B):
@@ -289,8 +297,11 @@ class GkmSVM(DeviceModel):
         normalization)."""
         if diag_x is None:
             return np.ones(B), np.ones(self.num_support_vectors)
-        return (1 / np.sqrt(np.clip(np.asarray(diag_x, dtype=np.float64), 1e-20, None)),
-                1 / np.sqrt(np.clip(to_cpu(self._sv_diag()).astype(np.float64), 1e-20, None)))
+        return (
+            1 / np.sqrt(np.clip(np.asarray(diag_x, dtype=np.float64), 1e-20, None)),
+            1
+            / np.sqrt(np.clip(to_cpu(self._sv_diag()).astype(np.float64), 1e-20, None)),
+        )
 
     def _sv_diag(self) -> np.ndarray:
         """Base-kernel K_raw(sv, sv) on the model's device (cached)."""
@@ -316,7 +327,9 @@ class GkmSVM(DeviceModel):
 
             packed = self._sv_packed()
             base = self.kernel.base
-            n_windows = 0 if packed is None else sum(p.size for p in packed if p is not None)
+            n_windows = (
+                0 if packed is None else sum(p.size for p in packed if p is not None)
+            )
             use = n_windows > 0 and lmer_index.applies(base, n_windows)
             c["index"] = lmer_index.LmerIndex(base, *packed) if use else None
         return c["index"]
@@ -333,8 +346,9 @@ class GkmSVM(DeviceModel):
         kernel = self.kernel
         base = kernel.base
         if self._sv_packed() is None:
-            return (kernel.pairwise(x, self.support_sequences)
-                    * self.coefficients).sum(axis=1, keepdims=True)
+            return (kernel.pairwise(x, self.support_sequences) * self.coefficients).sum(
+                axis=1, keepdims=True
+            )
         xp = get_array_module(x)
         bx, bx_rc = base.pack_both(x)
         diag_x = base.raw_diag_packed(bx, bx_rc) if base.normalize else None
@@ -352,17 +366,26 @@ class GkmSVM(DeviceModel):
                 np.ascontiguousarray(raw, dtype=np.float64),
                 diag_x.astype(np.float64) if norm else np.ones(1),
                 self._sv_diag().astype(np.float64) if norm else np.ones(1),
-                norm, self.coefficients.astype(np.float64), float(gamma))
+                norm,
+                self.coefficients.astype(np.float64),
+                float(gamma),
+            )
             return out[:, None]
         k = raw.astype(float_dtype(x))
         if diag_x is not None:
-            k = k / xp.clip(xp.sqrt(diag_x.astype(float_dtype(x))[:, None]
-                                    * self._sv_diag()[None, :]),
-                            1e-10, None)
+            k = k / xp.clip(
+                xp.sqrt(
+                    diag_x.astype(float_dtype(x))[:, None] * self._sv_diag()[None, :]
+                ),
+                1e-10,
+                None,
+            )
         return (kernel.finish(k) * self.coefficients).sum(axis=1, keepdims=True)
 
     def __call__(
-        self, x: np.ndarray, *,
+        self,
+        x: np.ndarray,
+        *,
         batch_size: int | None = None,
         verbose: bool = False,
     ) -> np.ndarray:
@@ -384,8 +407,10 @@ class GkmSVM(DeviceModel):
             chunks = range(0, x.shape[0], batch_size)
             if verbose:
                 from tqdm import tqdm
+
                 chunks = tqdm(
-                    chunks, desc="Scoring",
+                    chunks,
+                    desc="Scoring",
                     total=(x.shape[0] + batch_size - 1) // batch_size,
                 )
             parts = []
@@ -407,14 +432,18 @@ class GkmSVM(DeviceModel):
     # Kernel scoring computes [rows, S] kernel values in blocks of at most this
     _MAX_SCORE_BYTES = 512 * 2**20
 
-    def _min_batch_size(self, batch_size: int | None, *, table: bool = True) -> int | None:
+    def _min_batch_size(
+        self, batch_size: int | None, *, table: bool = True
+    ) -> int | None:
         """batch_size, raised when calls go through the masked join.
 
         table: the caller scores through the l-mer table when it applies.
         """
         if batch_size is None:
             return None
-        if (table and self._lmer_table_for(np) is not None) or self._sv_index() is not None:
+        if (
+            table and self._lmer_table_for(np) is not None
+        ) or self._sv_index() is not None:
             return batch_size
         return max(batch_size, self._MIN_BATCH_BYTES // (8 * self.num_support_vectors))
 
@@ -453,10 +482,16 @@ class GkmSVM(DeviceModel):
             return None
         if xp is np:
             return self._lmer_table
-        if self._lmer_table_dev is None or get_array_module(self._lmer_table_dev) is not xp:
+        if (
+            self._lmer_table_dev is None
+            or get_array_module(self._lmer_table_dev) is not xp
+        ):
             # Metal has no float64: MLX gets a float32 copy (scores are float32 there)
-            table = (self._lmer_table.astype(np.float32)
-                     if getattr(xp, "__name__", "") == "mlx.core" else self._lmer_table)
+            table = (
+                self._lmer_table.astype(np.float32)
+                if getattr(xp, "__name__", "") == "mlx.core"
+                else self._lmer_table
+            )
             self._lmer_table_dev = xp.asarray(table)
         return self._lmer_table_dev
 
@@ -483,12 +518,15 @@ class GkmSVM(DeviceModel):
         if table is not None:
             return self._score_lmer_table(x, table)
         rows = max(1, self._MAX_SCORE_BYTES // (8 * self.num_support_vectors))
-        parts = [self._sv_scores(x[s:s + rows]) for s in range(0, x.shape[0], rows)]
+        parts = [self._sv_scores(x[s : s + rows]) for s in range(0, x.shape[0], rows)]
         scores = parts[0] if len(parts) == 1 else xp.concatenate(parts, axis=0)
         return scores + self.bias
 
     def score_variants(
-        self, ref: np.ndarray, alt: np.ndarray, *,
+        self,
+        ref: np.ndarray,
+        alt: np.ndarray,
+        *,
         method: str = "kernel",
         batch_size: int | None = None,
         verbose: bool = False,
@@ -513,20 +551,25 @@ class GkmSVM(DeviceModel):
         if method == "kernel":
             # Both alleles in the same calls share the per-call SV cost
             n = ref.shape[0]
-            scores = self(get_array_module(ref).concatenate([alt, ref]),
-                          batch_size=batch_size, verbose=verbose)
+            scores = self(
+                get_array_module(ref).concatenate([alt, ref]),
+                batch_size=batch_size,
+                verbose=verbose,
+            )
             return scores[:n] - scores[n:]
 
         if method == "gkmexplain":
             from gkmsvm.explain import mutation_impact
 
             return mutation_impact(
-                self, ref, alt, batch_size=batch_size, verbose=verbose,
+                self,
+                ref,
+                alt,
+                batch_size=batch_size,
+                verbose=verbose,
             )
 
-        raise ValueError(
-            f"method must be 'kernel' or 'gkmexplain', got {method!r}"
-        )
+        raise ValueError(f"method must be 'kernel' or 'gkmexplain', got {method!r}")
 
     # Largest l to_deltasvm() accepts: 4^14 float64 weights = 2 GB
     _MAX_DELTASVM_L = 14
@@ -559,8 +602,10 @@ class GkmSVM(DeviceModel):
         """
         kernel = self.kernel.base
         l = kernel.l
-        idx = np.arange(4 ** l)
-        digits = (idx[:, None] // 4 ** np.arange(l - 1, -1, -1)) % 4  # [:, p] = base at p
+        idx = np.arange(4**l)
+        digits = (
+            idx[:, None] // 4 ** np.arange(l - 1, -1, -1)
+        ) % 4  # [:, p] = base at p
         agree = digits == 3 - digits[:, ::-1]
         h = np.asarray(kernel._mismatch_table, dtype=np.float64)
         self_k = np.full(len(idx), h[0])
@@ -570,7 +615,10 @@ class GkmSVM(DeviceModel):
         return self_k if wt is None else self_k * float(wt[0]) ** 2
 
     def to_deltasvm(
-        self, *, device: str = "cpu", query_norm: bool = False,
+        self,
+        *,
+        device: str = "cpu",
+        query_norm: bool = False,
         verbose: bool = False,
     ) -> DeltaSVM:
         """Convert to a DeltaSVM linear scoring model: one weight per l-mer.
@@ -615,7 +663,9 @@ class GkmSVM(DeviceModel):
     # works in [rows, S] blocks of _MAX_SCORE_BYTES)
     _DELTASVM_CHUNK = 65536
 
-    def _deltasvm_weights_from_kernel(self, query_norm: bool, verbose: bool) -> np.ndarray:
+    def _deltasvm_weights_from_kernel(
+        self, query_norm: bool, verbose: bool
+    ) -> np.ndarray:
         """DeltaSVM weights by scoring every l-mer (DeltaSVM index order).
 
         With RC, an l-mer and its reverse complement score the same, so only
@@ -634,9 +684,10 @@ class GkmSVM(DeviceModel):
         starts = range(0, len(todo), self._DELTASVM_CHUNK)
         if verbose:
             from tqdm import tqdm
+
             starts = tqdm(starts, desc="to_deltasvm", total=len(starts))
         for start in starts:
-            idx = todo[start:start + self._DELTASVM_CHUNK]
+            idx = todo[start : start + self._DELTASVM_CHUNK]
             x = np.eye(4, dtype=np.float32)[digits[idx]].transpose(0, 2, 1)
             x = self._match_device(np.ascontiguousarray(x))
             w = to_cpu(self._score_unbatched(x)).ravel().astype(np.float64) - self.bias

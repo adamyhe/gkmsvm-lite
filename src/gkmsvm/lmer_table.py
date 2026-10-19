@@ -46,16 +46,20 @@ def build_lmer_table(kernel, sv_packed, sv_rc_packed, sv_weights) -> np.ndarray 
     if plan is None:
         return None
 
-    n = 4 ** l
+    n = 4**l
     W = sv_packed.shape[1]
     coef = np.asarray(sv_weights, dtype=np.float64)[:, None]
     wy = kernel.window_weights(W)
     wy = np.ones(W) if wy is None else wy.astype(np.float64)
     # An RC window carries the weight of the forward window it came from
-    blocks = [(sv_packed, wy)] + ([(sv_rc_packed, wy[::-1])] if sv_rc_packed is not None else [])
+    blocks = [(sv_packed, wy)] + (
+        [(sv_rc_packed, wy[::-1])] if sv_rc_packed is not None else []
+    )
     V = np.zeros(n)
     for packed, w in blocks:
-        V += np.bincount(packed.ravel().astype(np.int64), weights=(coef * w).ravel(), minlength=n)
+        V += np.bincount(
+            packed.ravel().astype(np.int64), weights=(coef * w).ravel(), minlength=n
+        )
 
     # Packed index = sum_k base_k 4^k, so in a C-order (4,)*l view axis a holds
     # position l - 1 - a
@@ -70,7 +74,9 @@ def build_lmer_table(kernel, sv_packed, sv_rc_packed, sv_weights) -> np.ndarray 
     # {l-1-p} is the marginal on S read at rc(u). Masks whose mirror has the
     # same coefficient then cost one marginal per pair: w = w_self + w_pair
     # + rc(w_pair).
-    coefs = {tuple(int(p) for p in S): coef for _, coef, positions in plan for S in positions}
+    coefs = {
+        tuple(int(p) for p in S): coef for _, coef, positions in plan for S in positions
+    }
     w = np.zeros_like(V)
     w_pair = np.zeros_like(V)
     for S, coef in coefs.items():
@@ -82,4 +88,3 @@ def build_lmer_table(kernel, sv_packed, sv_rc_packed, sv_weights) -> np.ndarray 
     # rc(u): reverse the positions (axes) and complement every base (flip)
     w += w_pair + np.flip(w_pair.transpose(tuple(range(l - 1, -1, -1))))
     return w.ravel()
-

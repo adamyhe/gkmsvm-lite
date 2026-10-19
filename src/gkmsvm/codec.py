@@ -19,21 +19,24 @@ _OHE_MAPPING = np.full(256, -2, dtype=np.int8)
 for _i, _b in enumerate(BASES):
     _OHE_MAPPING[ord(_b)] = _i
     _OHE_MAPPING[ord(_b.lower())] = _i
-_OHE_MAPPING[ord('N')] = -1
-_OHE_MAPPING[ord('n')] = -1
+_OHE_MAPPING[ord("N")] = -1
+_OHE_MAPPING[ord("n")] = -1
 
 
 @numba.njit(cache=True)
-def _fast_one_hot(out, seq, mapping, allow_n):
+def _fast_one_hot(out, seq, mapping, allow_n, allow_other):
     for i in range(len(seq)):
         idx = mapping[seq[i]]
         if idx >= 0:
             out[i, idx] = 1
         elif idx == -1:
             if not allow_n:
-                raise ValueError("Invalid base in sequence")
-        else:
-            raise ValueError("Invalid base in sequence")
+                raise ValueError("Invalid base in sequence (pass allow_n=True for N)")
+        elif not allow_other:
+            raise ValueError(
+                "Invalid base in sequence (pass allow_other=True to read "
+                "non-ACGTN letters as N)"
+            )
 
 
 def one_hot_encode(
@@ -41,13 +44,18 @@ def one_hot_encode(
     *,
     dtype: np.dtype | type = np.float32,
     allow_n: bool = False,
+    allow_other: bool = False,
 ) -> np.ndarray:
     """Encode a DNA string to a [4, L] one-hot array.
 
     Channel order: A=0, C=1, G=2, T=3. Case-insensitive.
 
     Args:
-        allow_n: If True, N bases encode as all-zero (no channel set).
+        allow_n: If True, N bases encode as all-zero (no channel set), which
+            the kernels score as A on the forward strand, as LS-GKM does.
+            Other non-ACGT letters raise unless allow_other.
+        allow_other: If True, any other letter (IUPAC codes, gaps, ...) encodes
+            as N does, implying allow_n: LS-GKM reads every non-ACGT letter as A.
     """
     L = len(sequence)
     if L == 0:
@@ -55,7 +63,7 @@ def one_hot_encode(
 
     seq_bytes = np.frombuffer(bytearray(sequence, "ascii"), dtype=np.uint8)
     ohe = np.zeros((L, 4), dtype=np.int8)
-    _fast_one_hot(ohe, seq_bytes, _OHE_MAPPING, allow_n)
+    _fast_one_hot(ohe, seq_bytes, _OHE_MAPPING, allow_n or allow_other, allow_other)
     return ohe.T.astype(dtype, copy=False)
 
 
@@ -106,8 +114,12 @@ def encode_batch(
     *,
     dtype: np.dtype | type = np.float32,
     pad_value: float = 0.0,
+    allow_n: bool = False,
+    allow_other: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Encode multiple DNA sequences into a padded batch.
+
+    allow_n, allow_other: as in one_hot_encode.
 
     Returns:
         arrays: [B, 4, L_max] one-hot array, padded with pad_value.
@@ -116,7 +128,10 @@ def encode_batch(
     if not sequences:
         raise ValueError("Sequence list must be non-empty")
 
-    encoded = [one_hot_encode(s, dtype=dtype) for s in sequences]
+    encoded = [
+        one_hot_encode(s, dtype=dtype, allow_n=allow_n, allow_other=allow_other)
+        for s in sequences
+    ]
     lengths = [t.shape[1] for t in encoded]
     L_max = max(lengths)
     B = len(sequences)

@@ -84,8 +84,12 @@ def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--rows", type=int, default=5000, help="Query sequences (panel rows)")
-    parser.add_argument("--cols", type=int, default=1000, help="Column sequences (one tile)")
+    parser.add_argument(
+        "--rows", type=int, default=5000, help="Query sequences (panel rows)"
+    )
+    parser.add_argument(
+        "--cols", type=int, default=1000, help="Column sequences (one tile)"
+    )
     parser.add_argument("--masks", type=int, default=32, help="Size-8 masks per launch")
     parser.add_argument("--lanes", type=int, default=16)
     parser.add_argument("--repeats", type=int, default=5)
@@ -113,8 +117,9 @@ def main():
     plan = mask_plan(tuple(kern._mismatch_table), kern.l, kern._min_matches)
     j, _, positions = plan[0]  # size-8 masks
     chunk = positions[: args.masks]
-    offsets, colseq, _ = _build_column_index(by, seq_of_row, mask_runs(chunk), j,
-                                             np.zeros((0, 0), np.uint8))
+    offsets, colseq, _ = _build_column_index(
+        by, seq_of_row, mask_runs(chunk), j, np.zeros((0, 0), np.uint8)
+    )
 
     mod = cp.RawModule(code=_VARIANTS)
     fn = mod.get_function("join_variant")
@@ -127,16 +132,36 @@ def main():
     K = 1 << (2 * j)
     n_win = by.size
     gpu = cp.cuda.runtime.getDeviceProperties(0)["name"].decode()
-    print(f"{gpu}: {B} query x {args.cols} column sequences, {len(chunk)} size-{j} masks, "
-          f"{args.lanes} lanes")
+    print(
+        f"{gpu}: {B} query x {args.cols} column sequences, {len(chunk)} size-{j} masks, "
+        f"{args.lanes} lanes"
+    )
 
     times = {}
     for mode, name in enumerate(["full", "no-atomic", "offsets", "keys"]):
+
         def launch(mode=mode):
-            fn((B,), (256,), (d_bx, np.int32(Wx), d_pos, np.int32(len(chunk)), np.int32(j),
-                              np.int64(K), d_off, d_cs, np.int64(n_win), np.int32(args.cols),
-                              np.int32(args.lanes), np.int32(mode), sink),
-               shared_mem=args.cols * 4)
+            fn(
+                (B,),
+                (256,),
+                (
+                    d_bx,
+                    np.int32(Wx),
+                    d_pos,
+                    np.int32(len(chunk)),
+                    np.int32(j),
+                    np.int64(K),
+                    d_off,
+                    d_cs,
+                    np.int64(n_win),
+                    np.int32(args.cols),
+                    np.int32(args.lanes),
+                    np.int32(mode),
+                    sink,
+                ),
+                shared_mem=args.cols * 4,
+            )
+
         launch()
         cp.cuda.Device().synchronize()
         best = np.inf
@@ -147,10 +172,12 @@ def main():
             best = min(best, time.perf_counter() - t0)
         times[name] = best
         print(f"  {name:10s} {best * 1e3:8.2f} ms")
-    print(f"  atomics ~{(times['full'] - times['no-atomic']) * 1e3:.1f} ms, "
-          f"bucket scans ~{(times['no-atomic'] - times['offsets']) * 1e3:.1f} ms, "
-          f"offset loads ~{(times['offsets'] - times['keys']) * 1e3:.1f} ms, "
-          f"keys {times['keys'] * 1e3:.1f} ms")
+    print(
+        f"  atomics ~{(times['full'] - times['no-atomic']) * 1e3:.1f} ms, "
+        f"bucket scans ~{(times['no-atomic'] - times['offsets']) * 1e3:.1f} ms, "
+        f"offset loads ~{(times['offsets'] - times['keys']) * 1e3:.1f} ms, "
+        f"keys {times['keys'] * 1e3:.1f} ms"
+    )
 
 
 if __name__ == "__main__":

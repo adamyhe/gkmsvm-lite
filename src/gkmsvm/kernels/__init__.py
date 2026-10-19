@@ -8,10 +8,10 @@ from gkmsvm.kernels.weighted import (
 )
 
 __all__ = [
-    "GkmKernel",
-    "DirectGkmKernel",
-    "EstTruncGkmKernel",
-    "RbfGkmKernel",
     "CenterWeightedGkmKernel",
     "CenterWeightedRbfGkmKernel",
+    "DirectGkmKernel",
+    "EstTruncGkmKernel",
+    "GkmKernel",
+    "RbfGkmKernel",
 ]
