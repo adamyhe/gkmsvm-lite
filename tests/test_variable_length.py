@@ -233,13 +233,44 @@ def test_fixed_queries_against_mixed_svs(kernel_type):
         )
 
 
-def test_gkmexplain_on_mixed_svs_raises():
+@pytest.mark.parametrize("kernel_type", ["gkm_cnt", "estimated", "gkmrbf", "wgkm", "wgkmrbf"])
+@pytest.mark.parametrize("mode", ["hypothetical", "perturbation", "importance"])
+def test_gkmexplain_on_mixed_svs(kernel_type, mode):
+    """Attributions are a sum over SVs (an RBF SV's factor depends on its own
+    kernel value only), so a model with SVs of different lengths equals the
+    sum of one-SV models at each SV's length, on every explain path."""
     from gkmsvm import gkmexplain
 
     rng = np.random.default_rng(7)
+    svs = _seqs(rng, 12, 12, 36)
+    coef = rng.normal(size=12)
+    model, _ = _model(svs, coef, kernel_type)
+    x = np.concatenate([_onehot(q) for q in _seqs(rng, 3, 25, 25)])
+    expected = sum(
+        np.asarray(gkmexplain(GkmSVM(_onehot(s), c[None], 0.0, kernel_type, PARAMS), x,
+                              mode=mode))
+        for s, c in zip(svs, coef)
+    )
+    for table, index in [(True, True), (False, True), (False, False)]:
+        model.use_explain_table, model.use_lmer_index = table, index
+        model.clear_caches()
+        np.testing.assert_allclose(gkmexplain(model, x, mode=mode), expected, rtol=1e-10,
+                                   atol=1e-13, err_msg=f"{table=} {index=}")
+
+
+def test_mixed_svs_off_cpu_raise():
+    pytest.importorskip("mlx.core")
+    from gkmsvm.explain import mutation_impact
+    from gkmsvm.ism import ism
+
+    rng = np.random.default_rng(9)
     model, _ = _model(_seqs(rng, 20, 15, 25), rng.normal(size=20), "estimated")
-    with pytest.raises(NotImplementedError, match="stage 4"):
-        gkmexplain(model, _onehot("ACGTACGTACGTAACGTA"))
+    model.mlx()
+    x = _onehot("ACGTACGTACGTAACGTA")
+    for call in (lambda: ism(model, x), lambda: mutation_impact(model, x, x),
+                 lambda: model.score_variants(x, x)):
+        with pytest.raises(NotImplementedError, match="CPU only"):
+            call()
 
 
 def test_npz_and_lsgkm_round_trip(tmp_path):

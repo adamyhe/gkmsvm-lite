@@ -20,6 +20,9 @@ from numba import njit, prange
 
 from gkmsvm.backend import get_array_module, is_mlx
 from gkmsvm.kernels.direct import _packed_mismatches
+from gkmsvm.kernels.packed import PAD_WINDOW
+
+_PAD = PAD_WINDOW
 from gkmsvm.svm import GkmSVM
 
 # ---------------------------------------------------------------------------
@@ -369,7 +372,8 @@ def _explain_cpu(
     wy,
 ):
     """[B, 4, seqlen] attributions of packed_x [B, W] against packed_y [S, Wy];
-    wx [W], wy [Wy]: window weights (empty when unweighted)."""
+    wx [W], wy [S or 1, Wy]: window weights (empty when unweighted). PAD SV
+    windows (SVs of different lengths) are skipped."""
     B, W = packed_x.shape
     S_c, Wy = packed_y.shape
     weighted = wx.shape[0] > 0
@@ -377,14 +381,17 @@ def _explain_cpu(
     for b in prange(B):
         for s in range(S_c):
             ec = eff_coef[b, s]
+            wys = wy[min(np.int64(s), wy.shape[0] - 1)]
             for i in range(W):
                 bx_val = packed_x[b, i]
                 for j in range(Wy):
                     by_val = packed_y[s, j]
+                    if by_val == _PAD:
+                        continue
                     mm = _packed_mismatches(bx_val, by_val)
                     if l - mm < min_matches:
                         continue
-                    ew = ec * wx[i] * wy[j] if weighted else ec
+                    ew = ec * wx[i] * wys[j] if weighted else ec
                     av = ew * table_a[mm]
                     bv = ew * table_b[mm]
                     for k in range(l):
@@ -746,11 +753,7 @@ def gkmexplain(
 
     kernel = model.kernel
     base = kernel.base
-    if model.sv_lengths is not None:
-        raise NotImplementedError(
-            "GkmExplain for models whose SVs differ in length: "
-            "docs/design/variable-length.md, stage 4 (use ism() or mutation_impact())"
-        )
+    model._require_cpu_if_padded()
     if getattr(base, "_mismatch_table", None) is None:
         raise ValueError(
             f"GkmExplain attribution needs a gapped k-mer kernel, not {model.kernel_type!r}; "
@@ -802,9 +805,23 @@ def gkmexplain(
     if xp is not np:
         packed_sv = xp.ascontiguousarray(packed_sv.T)  # [Wy, S] for coalesced reads
     cs = model.sv_chunk_size if model.sv_chunk_size is not None else min(S, 2000)
-    wy = _window_wts(base, sv_fwd.shape[1])
-    if len(wy) and sv_rc is not None:  # an RC window carries its forward weight
-        wy = np.concatenate([wy, wy[::-1]])
+    # [S or 1, Wy] SV window weights, forward then RC (an RC window carries its
+    # forward weight); [1, 0] when unweighted
+    wy = base.row_weights(sv_fwd)
+    if wy is None:
+        wy = np.zeros((1, 0))
+    else:
+        if sv_rc is not None:
+            wy_rc = base.row_weights(sv_rc, rc=True)
+            n = max(len(wy), len(wy_rc))
+            wy = np.concatenate(
+                [
+                    np.broadcast_to(wy, (n, wy.shape[1])),
+                    np.broadcast_to(wy_rc, (n, wy_rc.shape[1])),
+                ],
+                axis=1,
+            )
+        wy = np.ascontiguousarray(wy, dtype=np.float64)
 
     result = xp.zeros((B, 4, seqlen), dtype=np.float64)
     starts = range(0, B, batch_size)
@@ -846,7 +863,7 @@ def gkmexplain(
                     seqlen,
                     is_perturbation,
                     wx,
-                    wy,
+                    wy[s0:s1] if len(wy) > 1 else wy,
                 )
             else:
                 _explain_gpu(
@@ -862,7 +879,7 @@ def gkmexplain(
                     min_matches,
                     is_perturbation,
                     wx,
-                    wy,
+                    wy[0],  # off the CPU SVs share a length (_require_cpu)
                 )
 
     return result
@@ -909,16 +926,14 @@ def _explain_V(model):
         for rc, packed in enumerate(model._sv_packed()):
             if packed is not None:
                 packed = to_cpu(packed)
-                W = packed.shape[1]
-                wy = base.window_weights(W)
-                wy = np.ones(W) if wy is None else wy.astype(np.float64)
-                if rc:  # an RC window carries its forward weight
-                    wy = wy[::-1]
-                V += np.bincount(
-                    packed.ravel().astype(np.int64),
-                    weights=((coef * inv_ds)[:, None] * wy).ravel(),
-                    minlength=len(V),
-                )
+                # Each SV's window weights (an RC window carries its forward
+                # one); PAD past shorter SVs' windows is left out
+                wy = base.row_weights(packed, rc=bool(rc))
+                w = (coef * inv_ds)[:, None]
+                w = np.broadcast_to(w if wy is None else w * wy, packed.shape).ravel()
+                keys = packed.ravel().astype(np.int64)
+                keep = keys < len(V)
+                V += np.bincount(keys[keep], weights=w[keep], minlength=len(V))
         c["explain_V"] = V
     return c["explain_V"]
 
@@ -1369,6 +1384,7 @@ def mutation_impact(
     """
     from gkmsvm.backend import to_cpu
 
+    model._require_cpu_if_padded()
     kernel = model.kernel
     base = kernel.base
     coef = model.coefficients

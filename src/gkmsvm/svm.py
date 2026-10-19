@@ -362,6 +362,14 @@ class GkmSVM(DeviceModel):
         else:
             raise ValueError(f"Unknown format {fmt!r}. Use 'npz' or 'lsgkm'.")
 
+    def _require_cpu_if_padded(self) -> None:
+        """SVs of different lengths run on CPU only for now (the CUDA and Metal
+        kernels don't skip PAD)."""
+        if self.sv_lengths is not None:
+            require_cpu_for_lengths(
+                "cuda" if self._on_gpu else "mlx" if self._on_mlx else "cpu"
+            )
+
     def _sv_packed(self):
         """(fwd, rc or None) packed SV windows, or None when the base kernel has
         no packed path."""
@@ -663,6 +671,7 @@ class GkmSVM(DeviceModel):
         Returns:
             [B, 1] score differences.
         """
+        self._require_cpu_if_padded()
         if method == "kernel":
             # Both alleles in the same calls share the per-call SV cost
             n = ref.shape[0]
@@ -760,6 +769,8 @@ class GkmSVM(DeviceModel):
             DeltaSVM with k=l (one weight per l-mer).
         """
         from gkmsvm.deltasvm import DeltaSVM
+
+        self._require_cpu_if_padded()
 
         l = self.kernel.l
         if l > self._MAX_DELTASVM_L:

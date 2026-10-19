@@ -687,6 +687,16 @@ _LSGKM_EXPLAIN_SETS = {
         for t in ("t0", "t1", "t4", "t5")
         for n in (100, 85)
     },
+    # Models gkmtrain trained on sequences of different lengths (60-140 bp)
+    **{
+        f"ragged_{t}_{n}": (
+            f"lsgkm_ragged_{t}.model.txt.gz",
+            f"lsgkm_wgkm_test{n}.fa",
+            f"lsgkm_ragged_{t}_test{n}",
+        )
+        for t in ("t2", "t4", "t5")
+        for n in (100, 85)
+    },
 }
 
 
@@ -740,7 +750,20 @@ def test_matches_lsgkm_gkmexplain(name, lsgkm_mode, mode):
         )
 
 
-@pytest.mark.parametrize("name", ["t0_85", "t1_85", "t2_85", "t3_85", "t4_85", "t5_85"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "t0_85",
+        "t1_85",
+        "t2_85",
+        "t3_85",
+        "t4_85",
+        "t5_85",
+        "ragged_t2_85",
+        "ragged_t4_85",
+        "ragged_t5_85",
+    ],
+)
 @pytest.mark.parametrize("path", ["index", "join", "brute"])
 def test_matches_lsgkm_mode5_fixture_models(name, path):
     """Mutation impact equals gkmexplain -m 5 through the l-mer index, the

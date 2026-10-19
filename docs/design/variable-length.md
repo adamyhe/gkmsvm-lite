@@ -113,7 +113,7 @@ Using the Beer-lab and kundajelab builds, as for the existing fixtures (`benchma
 1. **Representation and the CPU kernels:** pack with lengths and PAD; skip PAD in brute force, the self-kernels, the masked join, the index and the table; per-row weights. Scoring padded input on CPU matches one-at-a-time scoring and gkmpredict. Padded input on CUDA/MLX raises.
 2. **Models:** importers (lift the error), `sv_lengths`, npz, `save_lsgkm`.
 3. **Fixed-length pipeline:** `extract_loci` with summits, `center_crop`, `--bed`/`--genome`/`--length`/`--variable-length` in the CLI, `length` in training.
-4. **Interpretation with mixed-length SVs:** ISM, GkmExplain (all paths) and mutation impact for imported models, queries fixed; gkmexplain fixtures.
+4. **Interpretation with mixed-length SVs:** ISM, GkmExplain (all paths) and mutation impact for imported models, queries fixed; gkmexplain fixtures. Done: they match the kundajelab fork's gkmexplain on gkmtrain-built mixed-length models.
 5. **Benchmarks:** S3B on the same windows for both tools.
 6. **Later, as needed:** mixed-length queries for ISM/GkmExplain, mixed-length training (Gram, SMO, Nyström), CUDA and Metal kernels for padded input.
 

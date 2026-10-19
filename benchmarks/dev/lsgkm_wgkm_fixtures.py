@@ -304,6 +304,21 @@ def run_explain(explain):
                     [m for m in EXPLAIN_MODES if m != 5 or length % 2],
                 )
             )
+    # Models trained on sequences of different lengths, fixed-length queries
+    for name in RAGGED_MODELS:
+        if not (FIXTURES / f"lsgkm_ragged_{name}.model.txt.gz").exists():
+            continue
+        for fa in sorted(FIXTURES.glob("lsgkm_wgkm_test*.fa")):
+            length = int(fa.stem.removeprefix("lsgkm_wgkm_test"))
+            modes = [m for m in EXPLAIN_MODES if m != 5 or length % 2]
+            jobs.append(
+                (
+                    f"lsgkm_ragged_{name}.model.txt.gz",
+                    fa,
+                    f"lsgkm_ragged_{name}_test{length}",
+                    modes,
+                )
+            )
     for model_gz, fa, prefix, modes in jobs:
         # Plain text, without the "norc 0" line the fork rejects (RC on is its default)
         model = workdir / model_gz.removesuffix(".gz")
