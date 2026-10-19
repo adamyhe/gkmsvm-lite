@@ -12,7 +12,7 @@
 - [x] GkmSVM scoring with memory-capped [rows, S] blocks
 - [x] LS-GKM model importer (plain text and gzip)
 - [x] Classic gkmSVM importer — C gkmSVM LIBSVM-style format (opposite bias sign convention)
-- [x] R gkmSVM importer — `.gkmmodel` unified and `_svalpha.out`/`_svseq.fa` two-file formats
+- [x] Classic (C++) and R gkmSVM importer — `gkmsvm_train`'s `_svalpha.out`/`_svseq.fa` (no bias; the kernel as arguments; non-ACGT dropped as the tools read FASTA), checked against each tool's `gkmsvm_kernel` (`tests/test_importers/test_gkmsvm_tools.py`); also LIBSVM-style and `.gkmmodel` files, which no released tool writes
 - [x] DeltaSVM model + importer (linear gapped k-mer scoring)
 - [x] FASTA I/O and pyfaidx locus extraction
 - [x] Oracle validation against Dongwon-Lee/lsgkm `gkmpredict`
@@ -81,7 +81,7 @@
 Gaps found by checking against LS-GKM (2026-10-19), most important first:
 
 - [ ] **Re-run the dsQTL check** — `tests/test_gpu.py` passes on a CUDA host (2026-10-19, after the `-t 0` `d`, N and padding changes); `benchmarks/agreement_lsgkm.py` still to re-run (last run 2026-10-16, before the N packing change: mutation impact matched the paper's `gkmexplain -m 5` outputs to ~5e-6). CUDA explain paths are checked against CPU only, not against lsgkm directly.
-- [ ] **Importer and SVR oracles** — the classic gkmSVM and R gkmSVM importers, and `train_gkmsvr` (vs kundajelab/lsgkm-svr), have no reference-tool fixtures.
+- [ ] **SVR oracle** — `train_gkmsvr` has no reference-tool fixtures (vs kundajelab/lsgkm-svr).
 - [ ] **`-t 6` gkm_cnt_rbf** — in the kundajelab fork only; not supported.
 
 Performance gaps:

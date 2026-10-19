@@ -446,14 +446,29 @@ def cmd_import(args: argparse.Namespace) -> None:
         from gkmsvm.importers.lsgkm import load_lsgkm_model
 
         model = load_lsgkm_model(inp, device="cpu")
-    elif fmt == "classic":
-        from gkmsvm.importers.classic import load_classic_model
+    elif fmt in ("classic", "r_gkmsvm"):
+        from gkmsvm.importers.classic import _is_svalpha, load_svalpha_model
 
-        model = load_classic_model(inp, device="cpu")
-    elif fmt == "r_gkmsvm":
-        from gkmsvm.importers.r_gkmsvm import load_r_gkmsvm_model
+        if args.svseq is not None or _is_svalpha(Path(inp)):
+            # gkmsvm_train's files, which don't record the kernel
+            model = load_svalpha_model(
+                inp,
+                args.svseq,
+                L=args.l,
+                k=args.k,
+                d=args.d,
+                filter_type=args.filter_type,
+                include_rc=not args.no_rc,
+                device="cpu",
+            )
+        elif fmt == "classic":
+            from gkmsvm.importers.classic import load_classic_model
 
-        model = load_r_gkmsvm_model(inp, device="cpu")
+            model = load_classic_model(inp, device="cpu")
+        else:
+            from gkmsvm.importers.r_gkmsvm import load_r_gkmsvm_model
+
+            model = load_r_gkmsvm_model(inp, device="cpu")
     else:
         print(f"Unknown format: {fmt}", file=sys.stderr)
         sys.exit(1)
@@ -690,6 +705,30 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         choices=["lsgkm", "classic", "r_gkmsvm"],
         help="Source format.",
+    )
+    # gkmsvm_train's PREFIX_svalpha.out + PREFIX_svseq.fa record no kernel
+    g = p.add_argument_group(
+        "classic/R gkmSVM PREFIX_svalpha.out models (the kernel gkmsvm_kernel used)"
+    )
+    g.add_argument(
+        "--svseq", default=None, help="PREFIX_svseq.fa (default: next to the input)."
+    )
+    g.add_argument("-l", type=int, default=None, help="Word length (default: 10).")
+    g.add_argument(
+        "-k", type=int, default=None, help="Informative positions (default: 6)."
+    )
+    g.add_argument("-d", type=int, default=None, help="Max mismatches (default: 3).")
+    g.add_argument(
+        "-t",
+        "--filter-type",
+        type=int,
+        default=None,
+        choices=[0, 1, 2],
+        help="gkmsvm_kernel -t (R useTgkm): 0 full, 1 truncated (default), "
+        "2 gkm counts.",
+    )
+    g.add_argument(
+        "--no-rc", action="store_true", help="Without reverse complements (-R)."
     )
 
     return parser

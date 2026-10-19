@@ -198,19 +198,27 @@ class TestRGkmsvmTwoFile:
         x = one_hot_encode(_make_seqs(1, 15, seed=200)[0])[np.newaxis]
         np.testing.assert_allclose(model_unified(x), model_twofile(x), atol=1e-6)
 
-    def test_coef_seq_mismatch_raises(self, tmp_path):
+    def test_svs_matched_by_id(self, tmp_path):
+        """As gkmsvm_classify: alphas pick their SVs by id (extra records are
+        ignored); an id missing from the FASTA is an error."""
         svs = _make_seqs(3, 11, seed=14)
         alpha_path = tmp_path / "model_svalpha.out"
         svseq_path = tmp_path / "model_svseq.fa"
 
         with open(alpha_path, "w") as f:
-            f.write("#rho 0.1\n#L 5\n#k 3\n")
-            f.write("sv_0\t0.5\n")
-            f.write("sv_1\t-0.3\n")
+            f.write("sv_2\t0.5\n")
+            f.write("sv_0\t-0.3\n")
 
         with open(svseq_path, "w") as f:
             for i, seq in enumerate(svs):
                 f.write(f">sv_{i}\n{seq}\n")
 
-        with pytest.raises(ValueError, match="does not match"):
+        model = load_r_gkmsvm_model(alpha_path, svseq_path=svseq_path, L=5, k=3)
+        assert model.num_support_vectors == 2
+        np.testing.assert_array_equal(
+            model.support_sequences, np.stack([one_hot_encode(svs[i]) for i in (2, 0)])
+        )
+        with open(alpha_path, "a") as f:
+            f.write("sv_9\t1.0\n")
+        with pytest.raises(ValueError, match="not in"):
             load_r_gkmsvm_model(alpha_path, svseq_path=svseq_path)

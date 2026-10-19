@@ -42,9 +42,9 @@ src/gkmsvm/
 │   └── weighted.py      # -t 4 wgkm, -t 5 wgkmrbf
 └── importers/
     ├── lsgkm.py         # load_lsgkm_model()
-    ├── classic.py       # load_classic_model() — C gkmSVM (LIBSVM-style)
+    ├── classic.py       # load_svalpha_model() — gkmsvm_train's _svalpha.out/_svseq.fa (C++ and R); load_classic_model()
     ├── __init__.py      # shared header parsing (parse_header_value) and build_model()
-    ├── r_gkmsvm.py      # load_r_gkmsvm_model() — R gkmSVM (.gkmmodel, _svalpha.out)
+    ├── r_gkmsvm.py      # load_r_gkmsvm_model() — R gkmSVM (_svalpha.out, or .gkmmodel)
     └── deltasvm.py      # load_deltasvm_model()
 ```
 
@@ -60,7 +60,7 @@ src/gkmsvm/
 - Arrays are numpy.ndarray (CPU), cupy.ndarray (NVIDIA GPU), or mlx.core.array (Apple GPU)
 - `model.cuda()` / `model.mlx()` / `model.cpu()` moves arrays between devices (`backend.DeviceModel`, shared by `GkmSVM` and `DeltaSVM`)
 - Kernel normalization on by default, RC equivalence on by default
-- Score = `Σ coef_i × K(x, sv_i) + bias` where `bias = -rho` (LS-GKM) or `+rho` (classic gkmSVM)
+- Score = `Σ coef_i × K(x, sv_i) + bias` where `bias = -rho` (LS-GKM), 0 (classic/R gkmSVM's `gkmsvm_train` files), or `+rho` (LIBSVM-style classic files and `.gkmmodel`, which no released tool writes)
 - `resolve_kernel_type()` maps aliases and integers to canonical internal names
 - Kernel modes: `-t 0` gkm_cnt/direct, `-t 1` gkm_estfull/estimated_full, `-t 2` gkm_esttrunc/estimated (default), `-t 3` gkmrbf/rbf, `-t 4` wgkm/weighted, `-t 5` wgkmrbf/weighted_rbf
 - ISM: `ism(model, x, batch_size=N)` → `[B, 4, L]` score deltas (window-delta optimization)
@@ -107,7 +107,7 @@ src/gkmsvm/
 - The `d` parameter zeros weight table entries for m > d, for every kernel type including `-t 0` (LS-GKM's search visits only pairs within d mismatches; at l=11 k=7 d=3 that drops `-t 0`'s m = 4 term). Without this, scores diverge ~1.5% from `gkmpredict`. `DirectGkmKernel(d=None)` (a `-t 0` model with no `d` in its params, e.g. one saved before d applied to `-t 0`) counts every pair; training stores `d` for every kernel type. Oracle for `-t 0`/`-t 1` scores and attributions: `tests/fixtures/lsgkm_wgkm_t{0,1}_*`.
 - `-t 0` and `-t 2` use completely different weight table math. Do not mix.
 - `score(ALT) - score(REF)` differs from deltaSVM's k-mer-weight linear approximation.
-- Original gkmSVM (`.gkmmodel`) uses opposite sign convention for bias vs LS-GKM. Use `load_classic_model()` not `load_lsgkm_model()`.
+- Classic and R gkmSVM (`PREFIX_svalpha.out` + `PREFIX_svseq.fa`) record no bias and no kernel: pass the `gkmsvm_kernel` parameters (`load_svalpha_model`, defaults l=10 k=6 d=3 `-t 1`). Their FASTA reader drops non-ACGT letters (N is removed, not read as A), so SVs load that way. Oracle: each tool's `gkmsvm_kernel` (`benchmarks/dev/gkmsvm_fixtures.py`); `gkmsvm_classify` itself disagrees with `gkmsvm_kernel` by up to ~2%.
 - `-t 4`/`-t 5` (wgkm/wgkmrbf) are the `-t 2` table (with `d`) times integer window weights from the window's distance to the sequence center: `min(M, floor(M 2^(-|W/2 - i|/H) + 1))` (`weighted._window_weights`, LS-GKM's `gkmkernel_new_object`; M 1-255 and H default to LS-GKM's 50). Not per-position weights inside the l-mer (an earlier version did that and disagreed with gkmpredict). An RC window carries its forward window's weight, so with an even window count the kernel isn't exactly RC-invariant. Oracle: `tests/fixtures/lsgkm_wgkm_*` (`benchmarks/dev/lsgkm_wgkm_fixtures.py`).
 - Packed kernels take l <= 15 (`packed.MAX_L`): a uint32 holds 16 bases, and at l = 16 the all-T l-mer equals `PAD_WINDOW`. LS-GKM allows l <= 12.
 - LS-GKM C is GPL v3 — cannot wrap or link against it (gkmsvm-lite is MIT).

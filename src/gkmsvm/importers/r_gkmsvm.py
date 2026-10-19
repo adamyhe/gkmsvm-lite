@@ -1,15 +1,15 @@
 """Import R gkmSVM models (Ghandi et al. 2016, R/kernlab package).
 
-Two sub-formats:
-  - Unified ``.gkmmodel``: single file with ``#``-prefixed headers
-    (``#rho``, ``#nsv``, ``#npos``, ``#nneg``, ``#L``, ``#k``, ``#d``)
-    and FASTA entries where the header line is ``>seq_id\\tcoefficient``.
-  - Legacy two-file: ``_svalpha.out`` (tab-separated seq_id + coefficient)
-    plus ``_svseq.fa`` (FASTA of support vector sequences).
+gkmSVM's gkmsvm_train (through 0.83) writes PREFIX_svalpha.out and
+PREFIX_svseq.fa, the classic C++ tool's format: no bias (it drops kernlab's
+b), and kernel parameters only on gkmsvm_kernel's and gkmsvm_classify's
+command lines; see classic.load_svalpha_model, which this calls.
 
-Bias convention: score = ... + rho (kernlab convention, opposite from
-LS-GKM's score = ... - rho). The kernel is ``gkm_esttrunc`` unless a
-``#kernel_type`` header says otherwise; ``#L``/``#k``/``#d`` default to
+Also reads a single ``.gkmmodel`` file with ``#``-prefixed headers
+(``#rho``, ``#nsv``, ``#L``, ``#k``, ``#d``, ...) and FASTA entries whose
+header line is ``>seq_id\\tcoefficient``; no released gkmSVM writes it.
+There score = ... + rho, the kernel is ``gkm_esttrunc`` unless a
+``#kernel_type`` header says otherwise, and ``#L``/``#k``/``#d`` default to
 11/7/3.
 
 Use ``load_classic_model()`` for the C gkmSVM / LS-GKM-style format
@@ -31,41 +31,51 @@ def load_r_gkmsvm_model(
     path: str | Path,
     *,
     svseq_path: str | Path | None = None,
+    L: int | None = None,
+    k: int | None = None,
+    d: int | None = None,
+    filter_type: int | None = None,
+    include_rc: bool | None = None,
     dtype: np.dtype | type = np.float32,
     sv_chunk_size: int | None = None,
     device: str = "cpu",
 ) -> GkmSVM:
     """Load an R gkmSVM model.
 
-    Auto-detects format: if *path* is a ``.gkmmodel`` file, parses the
-    unified format (``#``-prefixed headers + FASTA SVs). If *path* ends
-    with ``_svalpha.out`` (or *svseq_path* is provided), uses the
-    legacy two-file format.
+    PREFIX_svalpha.out (with PREFIX_svseq.fa next to it, or *svseq_path*),
+    as gkmsvm_train writes, goes to classic.load_svalpha_model; anything
+    else is read as a ``.gkmmodel`` file.
 
     Args:
-        path: Path to ``.gkmmodel`` file or ``_svalpha.out`` file.
-        svseq_path: Path to ``_svseq.fa`` for the two-file format.
-            If *path* ends with ``_svalpha.out`` and this is not given,
-            the loader looks for a sibling ``_svseq.fa``.
+        path: ``_svalpha.out`` or ``.gkmmodel`` file.
+        svseq_path: ``_svseq.fa`` for the two-file format.
+        L, k, d, filter_type, include_rc: the kernel, as given to
+            gkmsvm_kernel (L, K, maxnmm, useTgkm, addRC); default the
+            package's (10, 6, 3, 1, TRUE). Two-file format only.
         dtype: dtype of the one-hot support vectors. Coefficients are float64 (float32 on MLX) whatever it is.
         sv_chunk_size: ``sv_chunk_size`` of the model (SV chunks in GkmExplain).
         device: ``"cpu"`` (default), ``"cuda"``, ``"mlx"``, or ``"auto"``.
 
     Returns:
-        A GkmSVM instance with bias = +rho.
+        A GkmSVM instance: bias 0 for gkmsvm_train's files (+rho when a
+        ``#rho`` line gives one).
     """
+    from gkmsvm.importers.classic import load_svalpha_model
+
     path = Path(path)
-
-    if svseq_path is not None:
-        return _load_twofile(path, Path(svseq_path), dtype, sv_chunk_size, device)
-
-    if path.name.endswith("_svalpha.out"):
-        stem = path.name[: -len("_svalpha.out")]
-        candidate = path.parent / f"{stem}_svseq.fa"
-        if candidate.exists():
-            return _load_twofile(path, candidate, dtype, sv_chunk_size, device)
-        raise FileNotFoundError(f"Expected companion file {candidate} for {path}")
-
+    if svseq_path is not None or path.name.endswith("_svalpha.out"):
+        return load_svalpha_model(
+            path,
+            svseq_path,
+            L=L,
+            k=k,
+            d=d,
+            filter_type=filter_type,
+            include_rc=include_rc,
+            dtype=dtype,
+            sv_chunk_size=sv_chunk_size,
+            device=device,
+        )
     return _load_gkmmodel(path, dtype, sv_chunk_size, device)
 
 
@@ -113,42 +123,6 @@ def _load_gkmmodel(
         if current_seq_coef is not None and seq_lines:
             coefficients.append(current_seq_coef)
             sequences.append("".join(seq_lines))
-
-    return _build_model(header, coefficients, sequences, dtype, sv_chunk_size, device)
-
-
-def _load_twofile(
-    alpha_path: Path,
-    svseq_path: Path,
-    dtype,
-    sv_chunk_size,
-    device="cpu",
-) -> GkmSVM:
-    """Parse legacy two-file format: _svalpha.out + _svseq.fa."""
-    header: dict = {}
-    coefficients: list[float] = []
-
-    with open(alpha_path) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            if line.startswith("#"):
-                parts = line[1:].split(None, 1)
-                if len(parts) == 2:
-                    parse_header_value(header, parts[0], parts[1])
-                continue
-            parts = line.split("\t")
-            if len(parts) >= 2:
-                coefficients.append(float(parts[1]))
-            else:
-                try:
-                    coefficients.append(float(parts[0]))
-                except ValueError:
-                    continue
-
-    sv_records = read_fasta(svseq_path)
-    sequences = [seq for _, seq in sv_records]
 
     return _build_model(header, coefficients, sequences, dtype, sv_chunk_size, device)
 
