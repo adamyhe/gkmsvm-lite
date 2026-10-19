@@ -1,6 +1,6 @@
 # Variable-length sequences
 
-Status: proposal (2026-10-19). Nothing here is implemented yet.
+Status: accepted (2026-10-19); in progress on the `variable-length` branch.
 
 ## Problem
 
@@ -17,6 +17,28 @@ Nothing about the kernel changes:
     K_raw(x, y) = sum over x's windows i and y's windows j of wt_i(x) wt_j(y) h(m(x_i, y_j))   (+ RC block)
 
 Each sequence contributes only its own windows. wt is 1 except for `-t 4/5`, where it is computed from that sequence's own W. Normalization uses each sequence's own K(x, x). So a variable-length batch only needs to represent **which windows exist** and **each existing window's weight**.
+
+## What the C tools do at the edges
+
+Checked by running the Beer-lab LS-GKM, the kundajelab fork (both `MAX_SEQ_LENGTH` 2048) and mLS-GKM (`MAX_SEQ_LENGTH` 4096, commit 2bb06be) on the same model and inputs:
+
+| | LS-GKM (both builds) | mLS-GKM |
+|---|---|---|
+| Mixed lengths in one file | each sequence has its own windows, `-t 4/5` weights and norm | same; scores identical up to 2,047 bp |
+| Longer than the maximum | first 2,047 bases, with a warning | first 4,095 bases; `gkmpredict` gives no warning |
+| Shorter than l, scoring | score `nan`, no warning (gkmexplain: `nan` attributions) | score `nan`, attributions 0 |
+| Shorter than l, training | one such sequence gives a model with 0 SVs and rho `nan`, exit 0, no warning | same |
+| gkmexplain output | one line per sequence at its own length | same |
+| gkmexplain `-m 5`, even length | assertion abort (exit 134) | same |
+
+## Decisions
+
+1. **API:** both forms. A `[B, 4, L_max]` array plus `lengths`, or a list of `[4, L_i]` arrays or DNA strings (converted with `encode_batch`).
+2. **ISM and GkmExplain output:** padded `[B, 4, L_max]`, zero past each length, for both input forms. It holds the same information as gkmexplain's ragged lines and stays on the device.
+3. **CLI `explain` with mixed lengths:** write padded arrays and warn that TF-MoDISco needs one length.
+4. **Long sequences:** full length. The C tools disagree (2,047 vs 4,095, with and without a warning), so no truncation would reproduce "LS-GKM". A warning names sequences over 2,047 bp, which LS-GKM would cut. An optional `max_length` (e.g. 2047) truncates the same way LS-GKM does. Oracle fixtures stay at 2,047 bp or less.
+5. **Sequences shorter than l:** training raises an error that names them (LS-GKM silently fits a useless model). Scoring returns `nan` for them with a warning, as LS-GKM does, so one bad sequence doesn't stop a batch. ISM and GkmExplain give `nan` rows.
+6. **Mutation impact (`-m 5` semantics) on even lengths:** a clear error, not an abort.
 
 ## Representation: padded arrays with explicit lengths
 
@@ -53,9 +75,9 @@ So every kernel that reads packed windows gets a `w == PAD_WINDOW → skip` test
 - **Inputs:** `model(x, lengths=None)`, `ism`, `gkmexplain`, `mutation_impact`, `score_variants`, `compute_gram`, `train_gkmsvm`/`train_gkmsvr` and `DeltaSVM.__call__` accept either:
   - a `[B, 4, L_max]` array plus `lengths`, or
   - a list of `[4, L_i]` arrays or DNA strings, converted with `codec.encode_batch` (which already returns padded arrays plus a mask; it would return lengths).
-- **Outputs:** scores are `[B, 1]` as now. ISM and GkmExplain return `[B, 4, L_max]`, zero past each length. For list input they could instead return a list of `[4, L_i]` (open question 2).
+- **Outputs:** scores are `[B, 1]` as now. ISM and GkmExplain return `[B, 4, L_max]`, zero past each length, for either input form.
 - **Models:** `GkmSVM.support_sequences` stays `[S, 4, L_max]`, plus `sv_lengths [S]` (None when uniform). npz stores `sv_lengths` (older npz files have none, so they are uniform). `save_lsgkm` writes each SV trimmed to its length. `DeviceModel` moves `sv_lengths` with the arrays.
-- **CLI:** FASTAs with mixed lengths work in every subcommand. `explain` writes padded `[B, 4, L_max]` attribution and sequence arrays; TF-MoDISco needs one length, so the CLI warns, or takes `--crop`, when lengths differ (open question 3).
+- **CLI:** FASTAs with mixed lengths work in every subcommand. `explain` writes padded `[B, 4, L_max]` attribution and sequence arrays and warns when lengths differ (TF-MoDISco needs one length).
 
 ## Validation (LS-GKM oracles)
 
@@ -81,10 +103,3 @@ Using the Beer-lab and kundajelab builds, as for the existing fixtures (`benchma
 6. **Benchmarks:** S3B trains both tools on the same variable-length peaks.
 
 Stages 1 to 3 make imported models and training work on CPU. Each stage is one commit on one branch.
-
-## Open questions
-
-1. **API shape:** padded array plus `lengths`, a list of sequences, or both (recommended: both; lists are converted with `encode_batch`).
-2. **ISM and GkmExplain output for variable-length input:** padded `[B, 4, L_max]`, zero past each length (recommended, since it matches array input and stays on the device), or a list of `[4, L_i]` for list input.
-3. **CLI `explain` with mixed lengths:** TF-MoDISco takes one length. Write padded arrays and warn (recommended), add `--crop L`, or refuse.
-4. **Sequences longer than 2,048 bp:** LS-GKM truncates them to their first 2,047 bases, with a warning. Match that (recommended for imported models and oracle parity), or keep full length?
