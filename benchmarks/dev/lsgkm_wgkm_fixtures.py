@@ -43,6 +43,13 @@ with every fixture model in modes 0, 1, 4 and 5:
   lsgkm_ragged_{t2,t4,t5}_test.pred.txt, lsgkm_ragged_{pos,neg}.fa,
   lsgkm_ragged_query.fa, lsgkm_{wgkm_t0,...,ragged_t5}_query.explain*.txt.gz
 
+With --svr-bin (a build of kundajelab/lsgkm-svr), instead trains epsilon-SVR
+models (-y 3) on the training sets above with continuous labels (motif count
+plus noise) and scores the test sets with its gkmpredict:
+
+  lsgkm_svr_train.fa, lsgkm_svr_labels.txt,
+  lsgkm_svr_{t2,t3,t4}.model.txt.gz, lsgkm_svr_{t2,t3,t4}_test{100,85}.pred.txt
+
 Usage (a host with LS-GKM in the "lsgkm" conda env):
   python benchmarks/dev/lsgkm_wgkm_fixtures.py [--explain-bin ~/lsgkm-kundaje/bin]
   # gkmexplain outputs only, for the models and FASTAs already in tests/fixtures:
@@ -172,6 +179,12 @@ def main():
         help="only the fixtures on sequences of different lengths",
     )
     ap.add_argument(
+        "--svr-bin",
+        default=None,
+        help="directory with kundajelab/lsgkm-svr's gkmtrain and gkmpredict: "
+        "write only the SVR fixtures",
+    )
+    ap.add_argument(
         "--explain-only",
         action="store_true",
         help="only run gkmexplain on the fixture models and FASTAs already written",
@@ -183,6 +196,9 @@ def main():
         explain = Path(args.explain_bin).expanduser() / "gkmexplain"
         if not explain.exists():
             sys.exit(f"{explain} not found")
+    if args.svr_bin:
+        svr_fixtures(Path(args.svr_bin).expanduser())
+        return
     if args.explain_only:
         if explain is None:
             sys.exit("--explain-only needs --explain-bin")
@@ -247,6 +263,61 @@ def main():
     if explain is not None:
         run_explain(explain)
     print("wrote:", *sorted(p.name for p in FIXTURES.glob("lsgkm_wgkm_*")), sep="\n  ")
+
+
+SVR_MODELS = {
+    "t2": ["-t", "2", "-l", "10", "-k", "6", "-d", "3"],
+    "t3": ["-t", "3", "-l", "10", "-k", "6", "-d", "3", "-g", "2.0"],
+    "t4": ["-t", "4", "-l", "10", "-k", "6", "-d", "3", "-M", "20", "-H", "10"],
+}
+
+
+def svr_fixtures(svr_bin):
+    """epsilon-SVR (-c 1 -p 0.1) on the training sets, labels from the motif."""
+    rng = random.Random(3)
+    seqs = [s for kind in ("pos", "neg") for s in _read(f"lsgkm_wgkm_{kind}.fa")]
+    labels = [s.count(MOTIF[2:8]) + rng.gauss(0, 0.3) for s in seqs]
+    fa, lab = FIXTURES / "lsgkm_svr_train.fa", FIXTURES / "lsgkm_svr_labels.txt"
+    write_seqs(fa, seqs, "s")
+    lab.write_text("".join(f"{v:.6f}\n" for v in labels))
+    workdir = Path(tempfile.mkdtemp(prefix="lsgkm_svr_"))
+    for name, opts in SVR_MODELS.items():
+        prefix = workdir / name
+        run(
+            [
+                str(svr_bin / "gkmtrain"),
+                "-y",
+                "3",
+                *opts,
+                "-c",
+                "1.0",
+                "-p",
+                "0.1",
+                str(fa),
+                str(lab),
+                str(prefix),
+            ]
+        )
+        model = Path(f"{prefix}.model.txt")
+        (FIXTURES / f"lsgkm_svr_{name}.model.txt.gz").write_bytes(
+            gzip.compress(model.read_bytes(), mtime=0)
+        )
+        for length in (100, 85):
+            run(
+                [
+                    str(svr_bin / "gkmpredict"),
+                    str(FIXTURES / f"lsgkm_wgkm_test{length}.fa"),
+                    str(model),
+                    str(FIXTURES / f"lsgkm_svr_{name}_test{length}.pred.txt"),
+                ]
+            )
+    print("wrote:", *sorted(p.name for p in FIXTURES.glob("lsgkm_svr_*")), sep="\n  ")
+
+
+def _read(name):
+    """Sequences of a fixture FASTA."""
+    lines = (FIXTURES / name).read_text().split()
+    return [line for line in lines if not line.startswith(">")]
 
 
 def ragged_fixtures(train, predict, workdir):

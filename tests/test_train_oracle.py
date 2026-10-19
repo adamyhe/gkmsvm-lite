@@ -106,3 +106,46 @@ def test_cli_w(tmp_path):
     got = _sv_coefficients(load_model(out))
     assert set(got) == set(ref)
     np.testing.assert_allclose([got[s] for s in ref], list(ref.values()), atol=5e-3)
+
+
+# epsilon-SVR (-y 3 -c 1 -p 0.1) by kundajelab/lsgkm-svr's gkmtrain
+SVR_PARAMS = {
+    "t2": dict(kernel_type=2, l=10, k=6, d=3),
+    "t3": dict(kernel_type=3, l=10, k=6, d=3, gamma=2.0),
+    "t4": dict(kernel_type=4, l=10, k=6, d=3, M=20, H=10),
+}
+
+
+def _svr_predictions(name, length):
+    records = read_fasta(str(FIXTURES / f"lsgkm_wgkm_test{length}.fa"))
+    with open(FIXTURES / f"lsgkm_svr_{name}_test{length}.pred.txt") as f:
+        pred = dict(line.split()[:2] for line in f)
+    return [s for _, s in records], [float(pred[n]) for n, _ in records]
+
+
+@pytest.mark.parametrize("name", SVR_PARAMS)
+def test_svr_matches_lsgkm_svr(name):
+    """train_gkmsvr gives lsgkm-svr's support vectors, coefficients to the
+    1e-3 stopping tolerance and predictions; its model files load and
+    reproduce its gkmpredict."""
+    from gkmsvm.train import train_gkmsvr
+
+    seqs = _seqs("lsgkm_svr_train.fa")
+    labels = np.loadtxt(FIXTURES / "lsgkm_svr_labels.txt")
+    model = train_gkmsvr(
+        seqs, labels, C=1.0, epsilon=0.1, device="cpu", **SVR_PARAMS[name]
+    )
+    imported = load_lsgkm_model(FIXTURES / f"lsgkm_svr_{name}.model.txt.gz")
+    ref = _sv_coefficients(imported)
+    got = _sv_coefficients(model)
+    assert set(got) == set(ref)
+    np.testing.assert_allclose([got[s] for s in ref], list(ref.values()), atol=5e-3)
+    for length in (100, 85):
+        queries, expected = _svr_predictions(name, length)
+        # gkmpredict prints 6 significant digits
+        np.testing.assert_allclose(
+            np.asarray(imported(queries)).ravel(), expected, rtol=2e-5, atol=1e-5
+        )
+        np.testing.assert_allclose(
+            np.asarray(model(queries)).ravel(), expected, atol=5e-4
+        )
