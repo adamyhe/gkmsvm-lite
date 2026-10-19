@@ -630,3 +630,59 @@ class TestLmerIndexGPU:
         model.cuda()
         got = cp.asnumpy(model(cp.asarray(X))).ravel()
         np.testing.assert_allclose(got, cpu, rtol=1e-9, atol=1e-12)
+
+
+WEIGHTED_PARAMS = {"L": 8, "k": 5, "d": 2, "M": 20, "H": 6.0, "gamma": 2.0}
+
+
+class TestWeightedGPU:
+    """-t 4/5 window weights on CUDA (masked join, l-mer index, table, Gram) vs CPU."""
+
+    @staticmethod
+    def _seqs(n, length, seed):
+        X = np.stack([one_hot_encode(s) for s in _make_seqs(n, length, seed=seed)])
+        X[::3, :, 4:9] = 0  # N stretches
+        return X
+
+    @pytest.mark.parametrize("col_tile", [4096, 7])
+    @pytest.mark.parametrize("length", [60, 61])  # odd/even window counts
+    def test_masked_join_matches_cpu(self, col_tile, length, monkeypatch):
+        from gkmsvm.kernels import masked
+        from gkmsvm.kernels.weighted import CenterWeightedGkmKernel
+
+        monkeypatch.setattr(masked, "_GPU_COL_TILE_W", col_tile)
+        kernel = CenterWeightedGkmKernel(8, 5, d=2, M=20, H=6.0)
+        bx = kernel.pack(self._seqs(21, 80, 3))
+        by, by_rc = kernel.pack_both(self._seqs(30, length, 4))
+        plan = kernel._join_plan()
+        wx, wy = kernel.window_weights(bx.shape[1]), kernel.window_weights(by.shape[1])
+        ref = masked.masked_pairwise(bx, by, plan, by_rc, wx=wx, wy=wy)
+        got = masked.masked_pairwise_gpu(cp.asarray(bx), cp.asarray(by), plan,
+                                         cp.asarray(by_rc), wx=wx, wy=wy)
+        np.testing.assert_allclose(cp.asnumpy(got), ref, rtol=1e-12)
+
+    @pytest.mark.parametrize("kernel_type", ["wgkm", "wgkmrbf"])
+    @pytest.mark.parametrize("path", ["index", "join", "table", "brute"])
+    def test_scores_match_cpu(self, kernel_type, path):
+        sv = self._seqs(40, 61, 6)
+        X = self._seqs(30 if path != "brute" else 5, 61, 7)
+        coef = np.random.default_rng(0).standard_normal(40)
+        model = GkmSVM(sv, coef, -0.1, kernel_type, WEIGHTED_PARAMS)
+        model.use_lmer_index = path == "index"
+        model.use_lmer_table = path == "table"
+        cpu = np.asarray(model(X)).ravel()
+        model.cuda()
+        got = cp.asnumpy(model(cp.asarray(X))).ravel()
+        if path == "index":
+            assert model._sv_index() is not None
+        np.testing.assert_allclose(got, cpu, rtol=1e-9, atol=1e-12)
+
+    def test_gram_matches_cpu(self):
+        from gkmsvm.gram import compute_gram
+        from gkmsvm.kernels.weighted import CenterWeightedGkmKernel
+
+        kernel = CenterWeightedGkmKernel(8, 5, d=2, M=20, H=6.0)
+        X = self._seqs(40, 61, 8)
+        ref = compute_gram(kernel, X, chunk_size=16)
+        got = compute_gram(kernel, cp.asarray(X), chunk_size=16)
+        np.testing.assert_allclose(cp.asnumpy(got), ref, rtol=1e-10, atol=1e-12)

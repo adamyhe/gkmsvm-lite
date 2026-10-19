@@ -78,7 +78,7 @@ def test_plan_none_without_cutoff():
 
 
 class TestWeighted:
-    """-t 4 / -t 5 masked path vs the per-position DP path."""
+    """-t 4 / -t 5 masked path (window weights) vs the weighted brute-force loop."""
 
     @staticmethod
     def _pair(rc, rbf=False):
@@ -105,22 +105,15 @@ class TestWeighted:
         if not rbf:
             np.testing.assert_allclose(fast._raw_diagonal(X), ref._raw_diagonal(X), rtol=1e-12)
 
-    def test_n_positions_fall_back(self):
+    def test_self_gram_panels(self):
+        """Self-Gram column panels (diag_offset) weight windows too."""
+        from gkmsvm.kernels.weighted import CenterWeightedGkmKernel
+
         rng = np.random.default_rng(5)
-        X, Y = _onehot(20, 50, rng), _onehot(18, 40, rng)
-        X[0, :, 7] = 0  # an N
-        fast, ref = self._pair(True)
-        np.testing.assert_allclose(fast.pairwise(X, Y), ref.pairwise(X, Y), rtol=1e-12)
-
-
-def test_weighted_per_position_chunks_over_columns():
-    """The per-position path splits the columns to cap its match tensor."""
-    from gkmsvm.kernels.weighted import CenterWeightedGkmKernel
-
-    rng = np.random.default_rng(6)
-    X, Y = _onehot(3, 40, rng), _onehot(30, 40, rng)
-    kernel = CenterWeightedGkmKernel(8, 5, M=3, H=2.0)
-    kernel.use_masked = False
-    ref = kernel.pairwise(X, Y)
-    kernel._MATCH_BYTES = 1  # one column per chunk
-    np.testing.assert_allclose(kernel.pairwise(X, Y), ref, rtol=1e-12)
+        X = _onehot(40, 41, rng)  # even window count
+        kernel = CenterWeightedGkmKernel(8, 5, M=20, H=3.0)
+        bx, brc = kernel.pack_both(X)
+        full = kernel.raw_packed(bx, bx, brc)
+        upper = kernel.raw_packed(bx, bx[10:], brc[10:], diag_offset=10)
+        keep = np.arange(40)[:, None] <= np.arange(10, 40)[None, :]
+        np.testing.assert_allclose(upper[keep], full[:, 10:][keep], rtol=1e-12)

@@ -14,7 +14,7 @@ Ship an LS-GKM model importer and predictor before building training. Match `gkm
 
 `-t 3` (`gkmrbf`) wraps the normalized `-t 2` kernel with an RBF transform: `K_rbf(x,y) = exp(gamma * (K_norm(x,y) - 1))`, matching lsgkm. This equals `exp(-gamma/2 * ||phi(x) - phi(y)||^2)` on unit-norm features. Self-similarity is always 1.
 
-`-t 4` (`wgkm`) uses center-weighted position importance. Positions near the l-mer center get weight 1.0; edges decay as `2^(-d/H)`. A window pair contributes the elementary symmetric polynomial e_k of the weights at agreeing positions: exact position weighting, not a mismatch-count average. It runs as a masked join with one level per size-k mask (coefficient = product of its weights); inputs with N use a per-position match path with an e_k DP.
+`-t 4` (`wgkm`) is the `-t 2` kernel with a weight on each l-mer window, as in LS-GKM's `gkmkernel_new_object`: window i of a sequence with W windows weighs `min(M, floor(M 2^(-|W/2 - i|/H) + 1))` (W/2 rounded down), an integer from 1 to M, and a window pair contributes the product of its windows' weights times the `-t 2` table entry. A reverse-complement window carries the weight of the forward window it came from, so with an even W the kernel isn't exactly RC-invariant (neither is LS-GKM's). Weights depend only on a window's position and the sequence length, so packed kernels take them as one `[W]` vector per side (`window_weights(W)`): the brute-force loop multiplies them in, the masked join and the l-mer index store each column window's weight next to its id (uint8; the CUDA join counts in uint64, exact), and the l-mer table weights each SV window's contribution and each query lookup.
 
 `-t 5` (`wgkmrbf`) applies the same RBF transform to the normalized center-weighted kernel.
 

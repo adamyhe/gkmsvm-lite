@@ -56,8 +56,8 @@ def train_gkmsvm(
         d: Maximum mismatch depth.
         C: SVM regularization parameter.
         gamma: RBF gamma (for -t 3, -t 5).
-        M: Center-weight window size (for -t 4, -t 5).
-        H: Center-weight decay (for -t 4, -t 5).
+        M: Weight of the center window, 1-255 (-t 4, -t 5; default 50, as LS-GKM).
+        H: Half-life of the window weights in bp (-t 4, -t 5; default 50).
         include_rc: Include reverse complement in kernel.
         solver: ``"auto"`` (``"libsvm"`` when the N x N Gram fits in 75%
             of available RAM and under ``max_gram_gb``, else ``"smo"``),
@@ -148,8 +148,8 @@ def train_gkmsvr(
         C: Regularization parameter.
         epsilon: Epsilon-tube width — errors within ±epsilon are ignored.
         gamma: RBF gamma (for -t 3, -t 5).
-        M: Center-weight window size (for -t 4, -t 5).
-        H: Center-weight decay (for -t 4, -t 5).
+        M: Weight of the center window, 1-255 (-t 4, -t 5; default 50, as LS-GKM).
+        H: Half-life of the window weights in bp (-t 4, -t 5; default 50).
         include_rc: Include reverse complement in kernel.
         solver: ``"auto"`` (precomputed Gram if it fits), ``"nystrom"``
             (Nyström low-rank approximation — faster but approximate),
@@ -242,15 +242,13 @@ def _build_kernel(kernel_type, l, k, d, gamma, M, H, include_rc):
     """Resolve kernel type, build params dict, instantiate kernel."""
     kernel_type = resolve_kernel_type(kernel_type)
     kernel_params = {"L": l, "k": k, "include_rc": include_rc}
-    if kernel_type in ("gkm_esttrunc", "gkm_estfull", "gkmrbf"):
+    if kernel_type != "gkm_cnt":
         kernel_params["d"] = d
     if kernel_type in ("gkmrbf", "wgkmrbf"):
         kernel_params["gamma"] = gamma
     if kernel_type in ("wgkm", "wgkmrbf"):
-        if M is None or H is None:
-            raise ValueError("M and H are required for weighted kernels (-t 4/-t 5)")
-        kernel_params["M"] = M
-        kernel_params["H"] = H
+        kernel_params["M"] = 50 if M is None else M  # LS-GKM defaults
+        kernel_params["H"] = 50.0 if H is None else H
     kernel = KERNEL_BUILDERS[kernel_type](kernel_params)
     return kernel, kernel_type, kernel_params
 

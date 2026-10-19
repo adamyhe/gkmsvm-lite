@@ -113,7 +113,8 @@ def main():
     plan = mask_plan(tuple(kern._mismatch_table), kern.l, kern._min_matches)
     j, _, positions = plan[0]  # size-8 masks
     chunk = positions[: args.masks]
-    offsets, colseq = _build_column_index(by, seq_of_row, mask_runs(chunk), j)
+    offsets, colseq, _ = _build_column_index(by, seq_of_row, mask_runs(chunk), j,
+                                             np.zeros((0, 0), np.uint8))
 
     mod = cp.RawModule(code=_VARIANTS)
     fn = mod.get_function("join_variant")

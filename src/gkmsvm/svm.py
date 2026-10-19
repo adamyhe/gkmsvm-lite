@@ -6,7 +6,6 @@ import numpy as np
 from numba import njit, prange
 
 from gkmsvm.backend import DeviceModel, float_dtype, get_array_module, to_cpu
-from gkmsvm.codec import reverse_complement
 from gkmsvm.kernels.direct import DirectGkmKernel
 from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
 from gkmsvm.kernels.packed import PackedGkmKernel
@@ -80,16 +79,18 @@ KERNEL_BUILDERS = {
     "wgkm": lambda p: CenterWeightedGkmKernel(
         l=p["L"],
         k=p["k"],
-        M=p["M"],
-        H=p["H"],
+        d=p.get("d", 3),
+        M=p.get("M", 50),
+        H=p.get("H", 50.0),
         normalize=True,
         include_rc=p.get("include_rc", True),
     ),
     "wgkmrbf": lambda p: CenterWeightedRbfGkmKernel(
         l=p["L"],
         k=p["k"],
-        M=p["M"],
-        H=p["H"],
+        d=p.get("d", 3),
+        M=p.get("M", 50),
+        H=p.get("H", 50.0),
         gamma=p.get("gamma", 1.0),
         normalize=True,
         include_rc=p.get("include_rc", True),
@@ -273,61 +274,15 @@ class GkmSVM(DeviceModel):
         else:
             raise ValueError(f"Unknown format {fmt!r}. Use 'npz' or 'lsgkm'.")
 
-    def _sv_n_rows(self) -> np.ndarray:
-        """Indices of the SVs the packed path can't represent (cached): those
-        with N under a kernel where N agrees with nothing (-t 4/5). They are
-        scored by ``base.raw_packed_n``; every other SV is packed."""
-        c = self._sv_cache
-        if "n_rows" not in c:
-            base = self.kernel.base
-            sv = to_cpu(self.support_sequences)
-            rows = np.zeros(0, dtype=np.int64)
-            if hasattr(base, "raw_packed_n") and not base.packs(sv):
-                rows = np.flatnonzero((sv.max(axis=1) == 0).any(axis=1))
-            c["n_rows"] = rows
-        return c["n_rows"]
-
     def _sv_packed(self):
-        """(fwd, rc or None) packed windows of the SVs without N rows (all SVs,
-        unless _sv_n_rows() is non-empty), or None when the base kernel has no
-        packed path."""
+        """(fwd, rc or None) packed SV windows, or None when the base kernel has
+        no packed path."""
         c = self._sv_cache
         if "packed" not in c:
             base = self.kernel.base
             sv = self.support_sequences
-            n_rows = self._sv_n_rows()
-            if len(n_rows):
-                keep = self._sv_order()[:sv.shape[0] - len(n_rows)]
-                sv = sv[get_array_module(sv).asarray(keep)]
-            ok = isinstance(base, PackedGkmKernel) and base.packs(sv)
-            c["packed"] = base.pack_both(sv) if ok else None
+            c["packed"] = base.pack_both(sv) if isinstance(base, PackedGkmKernel) else None
         return c["packed"]
-
-    def _sv_order(self) -> np.ndarray:
-        """SV indices, packed SVs first, then _sv_n_rows()."""
-        S = self.num_support_vectors
-        n_rows = self._sv_n_rows()
-        return np.concatenate([np.setdiff1d(np.arange(S), n_rows), n_rows])
-
-    def _sv_n_windows(self):
-        """(fwd, fwd N masks, rc, rc N masks) of the _sv_n_rows() SVs, on CPU (cached)."""
-        c = self._sv_cache
-        if "n_windows" not in c:
-            base = self.kernel.base
-            sv = to_cpu(self.support_sequences)[self._sv_n_rows()]
-            parts = [base.pack(sv), base.pack_nmask(sv)]
-            if base.include_rc:
-                rc = reverse_complement(sv)
-                parts += [base.pack(rc), base.pack_nmask(rc)]
-            else:
-                parts += [None, None]
-            c["n_windows"] = tuple(parts)
-        return c["n_windows"]
-
-    def _sv_split(self):
-        """(SV indices in the packed SVs' column order, _sv_n_rows()), on CPU."""
-        n_rows = self._sv_n_rows()
-        return self._sv_order()[:self.num_support_vectors - len(n_rows)], n_rows
 
     def _inv_norms(self, diag_x, B):
         """1 / sqrt(K(x, x)) [B] and 1 / sqrt(K(sv, sv)) [S] on CPU (ones without
@@ -337,28 +292,14 @@ class GkmSVM(DeviceModel):
         return (1 / np.sqrt(np.clip(np.asarray(diag_x, dtype=np.float64), 1e-20, None)),
                 1 / np.sqrt(np.clip(to_cpu(self._sv_diag()).astype(np.float64), 1e-20, None)))
 
-    def _join_sv_columns(self, packed_part, n_part):
-        """[B, S] in SV order from the packed SVs' columns and the N rows' columns."""
-        if not len(self._sv_n_rows()):
-            return packed_part
-        xp = get_array_module(n_part)
-        both = n_part if packed_part is None else xp.concatenate([packed_part, n_part], axis=1)
-        return both[:, xp.asarray(np.argsort(self._sv_order()))]
-
     def _sv_diag(self) -> np.ndarray:
         """Base-kernel K_raw(sv, sv) on the model's device (cached)."""
         c = self._sv_cache
         if "diag" not in c:
             packed = self._sv_packed()
             base = self.kernel.base
-            n_rows = self._sv_n_rows()
             if packed is None:
                 diag = base._raw_diagonal(self.support_sequences, chunk_size=1000)
-            elif len(n_rows):
-                sv = self.support_sequences
-                n_diag = base._raw_diagonal(sv[get_array_module(sv).asarray(n_rows)])
-                diag = self._join_sv_columns(
-                    base.raw_diag_packed(*packed)[None], n_diag[None])[0]
             else:
                 diag = base.raw_diag_packed(*packed)
             c["diag"] = diag.astype(float_dtype(diag))
@@ -383,22 +324,15 @@ class GkmSVM(DeviceModel):
     def _sv_raw(self, bx):
         """Base-kernel K_raw [B, S] of packed query rows bx against the SVs."""
         index = self._sv_index()
-        base = self.kernel.base
-        packed = self._sv_packed()
-
-        def packed_raw():
-            return index.pairwise(bx) if index is not None else base.raw_packed(bx, *packed)
-
-        if not len(self._sv_n_rows()):
-            return packed_raw()
-        n_part = base.raw_packed_n(bx, *self._sv_n_windows())
-        return self._join_sv_columns(packed_raw() if packed[0].shape[0] else None, n_part)
+        if index is not None:
+            return index.pairwise(bx)
+        return self.kernel.base.raw_packed(bx, *self._sv_packed())
 
     def _sv_scores(self, x):
         """sum_s coef_s K(x, sv_s) [B, 1] of one-hot x (on the model's device)."""
         kernel = self.kernel
         base = kernel.base
-        if self._sv_packed() is None or not base.packs(x):
+        if self._sv_packed() is None:
             return (kernel.pairwise(x, self.support_sequences)
                     * self.coefficients).sum(axis=1, keepdims=True)
         xp = get_array_module(x)
@@ -409,12 +343,7 @@ class GkmSVM(DeviceModel):
         if xp is np and index is not None:
             # Fused index query + reduction: no [B, S] block at all
             inv_dx, inv_ds = self._inv_norms(diag_x, x.shape[0])
-            packed, n_rows = self._sv_split()
-            out = index.reduce(bx, inv_dx, inv_ds[packed], self.coefficients[packed], gamma)
-            if len(n_rows):  # the few SVs with N, densely
-                k = base.raw_packed_n(bx, *self._sv_n_windows()) * inv_dx[:, None] * inv_ds[n_rows]
-                out = out + (kernel.finish(k) * self.coefficients[n_rows]).sum(axis=1)
-            return out[:, None]
+            return index.reduce(bx, inv_dx, inv_ds, self.coefficients, gamma)[:, None]
         raw = self._sv_raw(bx)
         if xp is np:
             # Normalize, finish and reduce in one parallel pass, no [B, S] temporaries
@@ -492,8 +421,8 @@ class GkmSVM(DeviceModel):
     def _build_lmer_table(self) -> np.ndarray | None:
         """Exact table w(u) = sum_sv c_sv K_raw(u, sv) over packed l-mers (cached).
 
-        None when the kernel has no table (RBF, weighted, no mismatch
-        cutoff, l > lmer_table.MAX_TABLE_L).
+        None when the kernel has no table (RBF, no mismatch cutoff,
+        l > lmer_table.MAX_TABLE_L).
         """
         if self._lmer_table is None:
             from gkmsvm.lmer_table import build_lmer_table
@@ -508,12 +437,7 @@ class GkmSVM(DeviceModel):
             if kernel.normalize:
                 diag = to_cpu(self._sv_diag()).astype(np.float64)
                 coef = coef / np.sqrt(np.clip(diag, 1e-10, None))
-            nmask = {}
-            if len(self._sv_n_rows()):  # N agrees with nothing
-                nmask = {"sv_nmask": kernel.pack_nmask(sv),
-                         "sv_rc_nmask": None if rc is None
-                         else kernel.pack_nmask(reverse_complement(sv))}
-            table = build_lmer_table(kernel, fwd, rc, coef, **nmask)
+            table = build_lmer_table(kernel, fwd, rc, coef)
             self._lmer_table = False if table is None else table
         return None if self._lmer_table is False else self._lmer_table
 
@@ -537,11 +461,16 @@ class GkmSVM(DeviceModel):
         return self._lmer_table_dev
 
     def _score_lmer_table(self, x, table):
-        """f(x) = sum of table weights over x's windows / sqrt(K(x, x)) + b."""
+        """f(x) = sum of table weights over x's windows (times their window
+        weights) / sqrt(K(x, x)) + b."""
         xp = get_array_module(x)
         kernel = self.kernel
         packed, packed_rc = kernel.pack_both(x)
-        raw = table[packed].sum(axis=1)
+        wx = kernel.window_weights(packed.shape[1])
+        if wx is None:
+            raw = table[packed].sum(axis=1)
+        else:
+            raw = (table[packed] * xp.asarray(wx)).sum(axis=1)
         if kernel.normalize:
             diag_x = kernel.raw_diag_packed(packed, packed_rc).astype(raw.dtype)
             raw = raw / xp.sqrt(xp.clip(diag_x, 1e-10, None))
@@ -551,7 +480,7 @@ class GkmSVM(DeviceModel):
         """Score one batch on the model's device."""
         xp = get_array_module(x)
         table = self._lmer_table_for(xp)
-        if table is not None and self.kernel.packs(x):
+        if table is not None:
             return self._score_lmer_table(x, table)
         rows = max(1, self._MAX_SCORE_BYTES // (8 * self.num_support_vectors))
         parts = [self._sv_scores(x[s:s + rows]) for s in range(0, x.shape[0], rows)]
@@ -613,6 +542,10 @@ class GkmSVM(DeviceModel):
         # Packed index has position k in digit k (low first); DeltaSVM's has
         # position 0 most significant, so reverse the digit order
         w = table.reshape((4,) * l).transpose(tuple(range(l - 1, -1, -1))).ravel()
+        # An l-mer alone is one window, weighted M for -t 4 (which normalization cancels)
+        wt = kernel.window_weights(1)
+        if wt is not None:
+            w = w * float(wt[0])
         if query_norm and kernel.normalize:
             w = w / np.sqrt(np.clip(self._lmer_self_kernels(), 1e-10, None))
         return w.astype(np.float64)
@@ -621,36 +554,20 @@ class GkmSVM(DeviceModel):
         """K_raw(u, u) for every l-mer u, in DeltaSVM index order.
 
         The identical pair plus, with RC, the pair (u, rc u), which agrees at
-        positions p where u_p is the complement of u_{l-1-p}.
+        positions p where u_p is the complement of u_{l-1-p}; times the
+        window's weight squared (-t 4).
         """
-        from gkmsvm.kernels.weighted import (
-            CenterWeightedGkmKernel,
-            _elementary_symmetric_k,
-        )
-
         kernel = self.kernel.base
         l = kernel.l
         idx = np.arange(4 ** l)
         digits = (idx[:, None] // 4 ** np.arange(l - 1, -1, -1)) % 4  # [:, p] = base at p
         agree = digits == 3 - digits[:, ::-1]
-        if isinstance(kernel, CenterWeightedGkmKernel):
-            w = kernel._pos_weights
-            self_k = np.full(len(idx), _elementary_symmetric_k(w, kernel.k))
-            if kernel.include_rc:
-                # e_k of the weights at agreeing positions, per l-mer
-                dp = np.zeros((len(idx), kernel.k + 1))
-                dp[:, 0] = 1.0
-                for p in range(l):
-                    v = agree[:, p] * w[p]
-                    for j in range(min(p + 1, kernel.k), 0, -1):
-                        dp[:, j] += v * dp[:, j - 1]
-                self_k = self_k + dp[:, kernel.k]
-            return self_k
         h = np.asarray(kernel._mismatch_table, dtype=np.float64)
         self_k = np.full(len(idx), h[0])
         if kernel.include_rc:
             self_k = self_k + h[(~agree).sum(axis=1)]
-        return self_k
+        wt = kernel.window_weights(1)
+        return self_k if wt is None else self_k * float(wt[0]) ** 2
 
     def to_deltasvm(
         self, *, device: str = "cpu", query_norm: bool = False,

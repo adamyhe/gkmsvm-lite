@@ -125,15 +125,13 @@ class TestTrainGkmsvm:
 
         assert model.sv_chunk_size == 5
 
-    def test_weighted_kernel_requires_M_H(self):
+    def test_weighted_kernel_defaults_M_H(self):
+        """M and H default to LS-GKM's 50 and 50."""
         rng = np.random.default_rng(42)
         pos = _random_seqs_str(10, 20, rng)
         neg = _random_seqs_str(10, 20, rng)
-
-        with pytest.raises(ValueError, match="M and H are required"):
-            train_gkmsvm(
-                pos, neg, kernel_type="weighted", l=7, k=5, C=1.0
-            )
+        model = train_gkmsvm(pos, neg, kernel_type="weighted", l=7, k=5, C=1.0)
+        assert (model.kernel.M, model.kernel.H) == (50, 50.0)
 
     def test_empty_seqs_raises(self):
         with pytest.raises(ValueError, match="non-empty"):

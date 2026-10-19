@@ -180,17 +180,17 @@ All six kernel types are supported for both training and inference:
 | `-t 2` | `estimated` | Default. Truncated estimated kernel, fastest for large l. |
 | `-t 1` | `estimated_full` | Like estimated but without truncation. |
 | `-t 3` | `rbf` | RBF transform on estimated kernel. Better for some tasks. |
-| `-t 4` | `weighted` | Center-weighted positions. Requires `M` and `H` parameters. |
-| `-t 5` | `weighted_rbf` | Center-weighted + RBF. Requires `M`, `H`, and `gamma`. |
+| `-t 4` | `weighted` | `-t 2` with l-mers near the sequence center weighted up to `M` times more (`M`, `H`; LS-GKM defaults 50, 50). |
+| `-t 5` | `weighted_rbf` | Center-weighted + RBF (`M`, `H`, `gamma`). |
 
 ```python
 # Weighted kernel example
 model = train_gkmsvm(
     pos, neg,
     kernel_type="weighted",
-    l=11, k=7,
-    M=5,      # center-weight window size
-    H=1.0,    # decay half-life
+    l=11, k=7, d=3,
+    M=50,     # weight of the center window (1-255)
+    H=50.0,   # half-life of the weights, in bp from the center
 )
 ```
 

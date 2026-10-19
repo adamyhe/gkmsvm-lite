@@ -48,8 +48,8 @@ gkmsvm train -p positive.fa -n negative.fa -o model.npz -t estimated -l 11 -k 7 
 | `--cache-size` | SMO kernel-column cache size (default: sized from available RAM) |
 | `--no-rc` | Disable reverse complement |
 | `--gamma` | RBF gamma for `-t 3`, `-t 5` (default: 1.0) |
-| `-M` | Center-weight window for `-t 4`, `-t 5` |
-| `-H` | Center-weight decay for `-t 4`, `-t 5` |
+| `-M` | Weight of the center window, 1-255, for `-t 4`, `-t 5` (default 50) |
+| `-H` | Half-life of the window weights in bp, for `-t 4`, `-t 5` (default 50) |
 | `--device` | Compute device (default: auto) |
 
 Output format is auto-detected from the file extension: `.npz` for native format, anything else for LS-GKM text format.

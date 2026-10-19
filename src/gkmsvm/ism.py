@@ -2,8 +2,9 @@
 
 Window-delta optimization: when a single base changes, only ~l of the
 W = L - l + 1 windows are affected. Instead of recomputing the full kernel,
-we compute the delta from the affected windows only. Inputs the packed
-path can't represent (weighted kernels with N) score every mutant instead.
+we compute the delta from the affected windows only. Kernels with window
+weights (-t 4/-t 5), whose window sets here don't follow sequence positions,
+score every mutant instead.
 """
 
 from __future__ import annotations
@@ -38,7 +39,8 @@ def ism(
     """
     x = model._match_device(x)
     base = model.kernel.base
-    packed = model._sv_packed() is not None and base.packs(x)
+    packed = (model._sv_packed() is not None
+              and base.window_weights(x.shape[2] - base.l + 1) is None)
     fn = _ism_packed if packed else _ism_mutants
 
     bs = batch_size if batch_size is not None else (1 if verbose else None)
@@ -120,8 +122,6 @@ def _ism_index(model, x, _table=None):
 
     One fused pass per (position, sequence) adds the changed windows' hits to
     the reference row and reduces over SVs, so no [mutants, S] block exists.
-    SVs with N (weighted kernels) are outside the index and add their part
-    densely: [4, L, B, S_N] for the few of them.
     """
     kernel = model.kernel
     base = kernel.base
@@ -132,23 +132,10 @@ def _ism_index(model, x, _table=None):
     inv_dmut = (np.ones(new.shape[:3]) if mut_diag is None
                 else 1 / np.sqrt(np.clip(np.asarray(mut_diag, dtype=np.float64), 1e-20, None)))
     gamma = kernel.gamma if isinstance(kernel, RbfKernel) else np.nan
-    packed, n_rows = model._sv_split()
     coef = model.coefficients
-    ref = index.pairwise(bx)  # [B, S_packed]
-    ref_score = index.reduce(bx, inv_dx, inv_ds[packed], coef[packed], gamma)
-    out = index.mutants(old, new, ref, ref_score, inv_dx, inv_dmut, inv_ds[packed],
-                        coef[packed], gamma)
-    if len(n_rows):
-        L, B, l = old.shape
-        windows = model._sv_n_windows()
-        ref_n = base.raw_packed_n(bx, *windows)  # [B, S_N]
-        old_n = base.raw_packed_n(old.reshape(L * B, l), *windows).reshape(L, B, -1)
-        new_n = base.raw_packed_n(new.reshape(4 * L * B, l), *windows).reshape(4, L, B, -1)
-        c_n, ds_n = coef[n_rows], inv_ds[n_rows]
-        k_mut = (ref_n + (new_n - old_n[None])) * inv_dmut[..., None] * ds_n
-        k_ref = ref_n * inv_dx[:, None] * ds_n
-        out = out + ((kernel.finish(k_mut) * c_n).sum(axis=3)
-                     - (kernel.finish(k_ref) * c_n).sum(axis=1))
+    ref = index.pairwise(bx)  # [B, S]
+    ref_score = index.reduce(bx, inv_dx, inv_ds, coef, gamma)
+    out = index.mutants(old, new, ref, ref_score, inv_dx, inv_dmut, inv_ds, coef, gamma)
     return out.transpose(2, 0, 1)
 
 

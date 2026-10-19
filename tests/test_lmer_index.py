@@ -59,7 +59,7 @@ def test_applies():
     assert lmer_index.applies(EstTruncGkmKernel(11, 7, d=3))
     assert not lmer_index.applies(DirectGkmKernel(11, 7))  # 31,714 neighbors per window
     assert not lmer_index.applies(EstTruncGkmKernel(13, 7, d=2))  # l > MAX_L
-    assert lmer_index.applies(CenterWeightedGkmKernel(8, 5, M=3, H=2.0))  # 1,000 neighbors
+    assert lmer_index.applies(CenterWeightedGkmKernel(8, 5, M=3, H=2.0))  # 1,000 neighbors (d=3)
 
 
 MODELS = [
@@ -124,21 +124,9 @@ def test_gram_and_columns_match_pairwise(name):
             np.testing.assert_allclose(cols[i], expected[i], rtol=1e-10, atol=1e-12)
 
 
-def test_weighted_with_n_uses_onehot_path():
-    """N positions: the packed path would treat N as A, so the one-hot path runs."""
-    kernel = CenterWeightedGkmKernel(8, 5, M=3, H=2.0)
-    rng = np.random.default_rng(6)
-    X = _onehot(20, 30, rng)
-    X[3, :, 10] = 0
-    assert not kernel.packs(X)
-    ref = CenterWeightedGkmKernel(8, 5, M=3, H=2.0)
-    ref.use_masked = False
-    np.testing.assert_allclose(compute_gram(kernel, X), ref.pairwise(X, X), rtol=1e-10)
-
-
 def test_applies_dense_neighborhoods():
     """Large neighborhoods qualify only over columns with >= 4 windows per l-mer."""
-    k = CenterWeightedGkmKernel(11, 7, M=3, H=2.0)  # 25,774 neighbors
+    k = EstTruncGkmKernel(11, 7, d=4)  # 31,714 neighbors
     assert not lmer_index.applies(k)
     assert not lmer_index.applies(k, n_windows=3 * 4**11)
     assert lmer_index.applies(k, n_windows=4 * 4**11)
