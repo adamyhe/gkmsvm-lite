@@ -25,7 +25,7 @@ from math import comb
 import numpy as np
 from numba import njit, prange
 
-from gkmsvm.kernels.packed import PAD_WINDOW
+from gkmsvm.kernels.direct import _spans
 
 # Largest number of masks worth joining; above this the brute-force loop wins
 _MAX_MASKS = 1000
@@ -105,9 +105,6 @@ def _masked_key(w, runs):
     return key
 
 
-_PAD = PAD_WINDOW
-
-
 @njit(parallel=True, cache=True)
 def _build_column_index(by, seq_of_row, runs, j, wby):
     """Counting sort of column windows by masked key, one index per mask.
@@ -126,20 +123,18 @@ def _build_column_index(by, seq_of_row, runs, j, wby):
     offsets = np.zeros((M, K + 1), dtype=np.int32)
     colseq = np.empty((M, R * W), dtype=np.int32)
     colwt = np.empty((M, R * W if weighted else 0), dtype=np.uint8)
+    sp = _spans(by)  # each row's non-PAD windows
     for m in prange(M):
         mr = runs[m]
         for r in range(R):
-            for w in range(W):
-                if by[r, w] != _PAD:
-                    offsets[m, _masked_key(by[r, w], mr) + 1] += 1
+            for w in range(sp[r, 0], sp[r, 1]):
+                offsets[m, _masked_key(by[r, w], mr) + 1] += 1
         for key in range(K):
             offsets[m, key + 1] += offsets[m, key]
         fill = offsets[m, :K].copy()
         for r in range(R):
             s = seq_of_row[r]
-            for w in range(W):
-                if by[r, w] == _PAD:
-                    continue
+            for w in range(sp[r, 0], sp[r, 1]):
                 key = _masked_key(by[r, w], mr)
                 colseq[m, fill[key]] = s
                 if weighted:
@@ -160,14 +155,13 @@ def _join_rows(bx, runs, offsets, colseq, coef, result, wx, colwt):
     B, Wx = bx.shape
     M = runs.shape[0]
     weighted = colwt.shape[1] > 0
+    sx = _spans(bx)  # each row's non-PAD windows
     for b in prange(B):
         row = result[b]
         wb = wx[min(np.int64(b), wx.shape[0] - 1)]
         for m in range(M):
             mr = runs[m]
-            for i in range(Wx):
-                if bx[b, i] == _PAD:
-                    continue
+            for i in range(sx[b, 0], sx[b, 1]):
                 key = _masked_key(bx[b, i], mr)
                 if weighted:
                     c = coef * wb[i]
@@ -189,6 +183,7 @@ def _join_rows_upper(bx, runs, offsets, colseq, coef, result, row_min, wx, colwt
     B, Wx = bx.shape
     M = runs.shape[0]
     weighted = colwt.shape[1] > 0
+    sx = _spans(bx)  # each row's non-PAD windows
     for idx in prange(B):
         # Alternate rows from both ends: rows late in a diagonal block skip
         # most columns, and prange hands each thread a contiguous range
@@ -198,9 +193,7 @@ def _join_rows_upper(bx, runs, offsets, colseq, coef, result, row_min, wx, colwt
         wb = wx[min(np.int64(b), wx.shape[0] - 1)]
         for m in range(M):
             mr = runs[m]
-            for i in range(Wx):
-                if bx[b, i] == _PAD:
-                    continue
+            for i in range(sx[b, 0], sx[b, 1]):
                 key = _masked_key(bx[b, i], mr)
                 # Ids ascend within a bucket: scan from the end and stop at
                 # the first column below cmin (cheaper than a binary search)

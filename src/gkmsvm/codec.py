@@ -144,3 +144,38 @@ def encode_batch(
         mask[i, :length] = True
 
     return batch, mask
+
+
+def center_crop(seqs, length: int, names=None):
+    """Center-crop sequences to length bp (the window starts at (L - length) // 2).
+
+    seqs: DNA strings, [4, L] arrays, or a [B, 4, L] array. Returns the same
+    kind (a list for list input). Sequences shorter than length can't be
+    cropped (there are no flanks to extend from): ValueError naming them
+    (names, else their indices); extract windows from the genome instead
+    (``fasta.extract_loci``) or keep each length (``lengths=``).
+    """
+    if not isinstance(seqs, (list, tuple)):
+        L = seqs.shape[-1]
+        if L < length:
+            raise ValueError(f"sequences are {L} bp, shorter than length {length}")
+        start = (L - length) // 2
+        return seqs[..., start : start + length]
+    lens = [len(s) if isinstance(s, str) else s.shape[-1] for s in seqs]
+    short = [i for i, n in enumerate(lens) if n < length]
+    if short:
+        label = [str(names[i]) if names is not None else str(i) for i in short[:5]]
+        more = f" and {len(short) - 5} more" if len(short) > 5 else ""
+        raise ValueError(
+            f"{len(short)} sequences are shorter than {length} bp and can't be "
+            f"center-cropped: {', '.join(label)}{more}"
+        )
+    out = []
+    for s, n in zip(seqs, lens):
+        start = (n - length) // 2
+        out.append(
+            s[start : start + length]
+            if isinstance(s, str)
+            else s[..., start : start + length]
+        )
+    return out
