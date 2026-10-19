@@ -288,7 +288,7 @@ def _build_kernel(kernel_type, l, k, d, gamma, M, H, include_rc):
     """Resolve kernel type, build params dict, instantiate kernel."""
     kernel_type = resolve_kernel_type(kernel_type)
     kernel_params = {"L": l, "k": k, "d": d, "include_rc": include_rc}
-    if kernel_type in ("gkmrbf", "wgkmrbf"):
+    if kernel_type in ("gkmrbf", "wgkmrbf", "gkm_cnt_rbf"):
         kernel_params["gamma"] = gamma
     if kernel_type in ("wgkm", "wgkmrbf"):
         kernel_params["M"] = 50 if M is None else M  # LS-GKM defaults

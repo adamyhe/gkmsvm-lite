@@ -9,7 +9,7 @@ precomputed mask) and adds table[m] to every column in that row. Each
 matching window pair is visited once, and a call's cost depends only on the
 queries.
 
-Applies to the count-table kernels (-t 0-5; -t 3/-t 5 through their base),
+Applies to the count-table kernels (-t 0-6; the RBF kernels through their base),
 where a neighbor's weight depends on its mismatch count. With window weights
 (-t 4/-t 5) every CSR entry also holds its window's weight, and a query
 window's hits are scaled by its own. The neighborhood

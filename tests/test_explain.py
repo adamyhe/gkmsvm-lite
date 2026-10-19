@@ -684,7 +684,7 @@ _LSGKM_EXPLAIN_SETS = {
             f"lsgkm_wgkm_test{n}.fa",
             f"lsgkm_wgkm_{t}_test{n}",
         )
-        for t in ("t0", "t1", "t4", "t5")
+        for t in ("t0", "t1", "t4", "t5", "t6")
         for n in (100, 85)
     },
     # Models gkmtrain trained on sequences of different lengths (60-140 bp)
@@ -759,6 +759,7 @@ def test_matches_lsgkm_gkmexplain(name, lsgkm_mode, mode):
         "t3_85",
         "t4_85",
         "t5_85",
+        "t6_85",
         "ragged_t2_85",
         "ragged_t4_85",
         "ragged_t5_85",
@@ -802,7 +803,7 @@ def test_matches_lsgkm_mode5_fixture_models(name, path):
 # Every fixture model on queries of odd lengths from 31 to 151 bp, with N
 # stretches (lsgkm_ragged_query.fa)
 _LSGKM_QUERY_MODELS = [
-    *(f"lsgkm_wgkm_{t}" for t in ("t0", "t1", "t4", "t5")),
+    *(f"lsgkm_wgkm_{t}" for t in ("t0", "t1", "t4", "t5", "t6")),
     "lsgkm_mode5_est",
     "lsgkm_mode5_rbf",
     *(f"lsgkm_ragged_{t}" for t in ("t2", "t4", "t5")),
@@ -898,9 +899,12 @@ def test_importance_credits_n_to_a():
     np.testing.assert_allclose(imp.sum(), model(x)[0, 0] - model.bias, rtol=1e-9)
 
 
-@pytest.mark.parametrize("name", ["t0_100", "t0_85", "t1_100", "t1_85"])
+@pytest.mark.parametrize(
+    "name", ["t0_100", "t0_85", "t1_100", "t1_85", "t6_100", "t6_85"]
+)
 def test_fixture_models_match_gkmpredict(name):
-    """The -t 0/-t 1 fixture models' scores equal gkmpredict's."""
+    """The -t 0/-t 1/-t 6 fixture models' scores equal gkmpredict's (-t 6:
+    the kundajelab fork's)."""
     from gkmsvm.fasta import read_fasta
     from gkmsvm.importers.lsgkm import load_lsgkm_model
 

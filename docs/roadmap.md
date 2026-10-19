@@ -9,6 +9,7 @@
 - [x] RbfGkmKernel (`-t 3` / `gkmrbf` / `rbf`)
 - [x] CenterWeightedGkmKernel (`-t 4` / `wgkm` / `weighted`)
 - [x] CenterWeightedRbfGkmKernel (`-t 5` / `wgkmrbf` / `weighted_rbf`)
+- [x] `-t 6` / `gkm_cnt_rbf` / `direct_rbf` (RBF on `-t 0`, the kundajelab fork's): its gkmtrain, gkmpredict and gkmexplain (modes 0/1/4/5) as oracles
 - [x] GkmSVM scoring with memory-capped [rows, S] blocks
 - [x] LS-GKM model importer (plain text and gzip)
 - [x] Classic gkmSVM importer — C gkmSVM LIBSVM-style format (opposite bias sign convention)
@@ -82,7 +83,6 @@
 Gaps found by checking against LS-GKM (2026-10-19), most important first:
 
 - [ ] **Re-run the dsQTL check** — `tests/test_gpu.py` passes on a CUDA host (2026-10-19, after the `-t 0` `d`, N and padding changes); `benchmarks/agreement_lsgkm.py` still to re-run (last run 2026-10-16, before the N packing change: mutation impact matched the paper's `gkmexplain -m 5` outputs to ~5e-6). CUDA explain paths are checked against CPU only, not against lsgkm directly.
-- [ ] **`-t 6` gkm_cnt_rbf** — in the kundajelab fork only; not supported.
 
 Performance gaps:
 

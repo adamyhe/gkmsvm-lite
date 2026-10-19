@@ -170,6 +170,7 @@ All six kernel types are supported for both training and inference:
 | `-t 3` | `rbf` | RBF transform on estimated kernel. Better for some tasks. |
 | `-t 4` | `weighted` | `-t 2` with l-mers near the sequence center weighted up to `M` times more (`M`, `H`; LS-GKM defaults 50, 50). |
 | `-t 5` | `weighted_rbf` | Center-weighted + RBF (`M`, `H`, `gamma`). |
+| `-t 6` | `direct_rbf` | RBF on the gapped k-mer count kernel (`gamma`; `gkm_cnt_rbf`, in the kundajelab lsgkm fork only). |
 
 ```python
 # Weighted kernel example

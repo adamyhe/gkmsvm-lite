@@ -9,7 +9,15 @@ from gkmsvm.kernels.packed import PAD_WINDOW
 from gkmsvm.svm import GkmSVM
 
 PARAMS = {"L": 6, "k": 4, "d": 2, "M": 20, "H": 6.0, "gamma": 2.0}
-KERNELS = ["gkm_cnt", "estimated_full", "estimated", "gkmrbf", "wgkm", "wgkmrbf"]
+KERNELS = [
+    "gkm_cnt",
+    "estimated_full",
+    "estimated",
+    "gkmrbf",
+    "wgkm",
+    "wgkmrbf",
+    "gkm_cnt_rbf",
+]
 
 
 def _seqs(rng, n, lo, hi, with_n=True):
@@ -348,7 +356,7 @@ def test_mixed_lengths_on_device(device, kernel_type):
             for mode in ("hypothetical", "perturbation"):
                 m.use_explain_table = table
                 out[f"explain {mode} {key}"] = gkmexplain(m, q, mode=mode)
-        if kernel_type not in ("gkmrbf", "wgkmrbf"):
+        if kernel_type not in ("gkmrbf", "wgkmrbf", "gkm_cnt_rbf"):
             out["deltasvm"] = m.to_deltasvm(query_norm=True).weights
         return {k: _np(v) for k, v in out.items()}
 

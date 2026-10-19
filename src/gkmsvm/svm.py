@@ -52,6 +52,8 @@ def _normalized_dot(raw, diag_x, diag_sv, norm, coef, gamma):
 #   -t 3  gkmrbf        / rbf             RBF on estimated kernel
 #   -t 4  wgkm          / weighted        Center-weighted gapped k-mer
 #   -t 5  wgkmrbf       / weighted_rbf    Center-weighted RBF
+#   -t 6  gkm_cnt_rbf   / direct_rbf      RBF on the gapped k-mer count kernel
+#                                         (kundajelab/lsgkm fork)
 
 KERNEL_BUILDERS = {
     # No d: every pair counts (models saved before d applied to -t 0)
@@ -105,6 +107,16 @@ KERNEL_BUILDERS = {
         normalize=True,
         include_rc=p.get("include_rc", True),
     ),
+    "gkm_cnt_rbf": lambda p: RbfKernel(
+        DirectGkmKernel(
+            l=p["L"],
+            k=p["k"],
+            d=p.get("d", 3),
+            normalize=True,
+            include_rc=p.get("include_rc", True),
+        ),
+        gamma=p.get("gamma", 1.0),
+    ),
 }
 
 KERNEL_ALIASES: dict[str | int, str] = {
@@ -114,12 +126,14 @@ KERNEL_ALIASES: dict[str | int, str] = {
     "rbf": "gkmrbf",
     "weighted": "wgkm",
     "weighted_rbf": "wgkmrbf",
+    "direct_rbf": "gkm_cnt_rbf",
     0: "gkm_cnt",
     1: "gkm_estfull",
     2: "gkm_esttrunc",
     3: "gkmrbf",
     4: "wgkm",
     5: "wgkmrbf",
+    6: "gkm_cnt_rbf",
 }
 
 
@@ -136,7 +150,7 @@ def resolve_kernel_type(kernel_type: str | int) -> str:
         if canonical is None:
             raise ValueError(
                 f"Unknown kernel type integer {kernel_type}. "
-                f"Valid: 0-5 (LS-GKM -t flag)"
+                f"Valid: 0-6 (LS-GKM -t flag; 6 from the kundajelab fork)"
             )
         return canonical
     if kernel_type in KERNEL_BUILDERS:

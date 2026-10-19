@@ -149,7 +149,7 @@ def _add_kernel_args(parser: argparse.ArgumentParser) -> None:
         "-t",
         "--kernel-type",
         default="estimated",
-        help="Kernel type: 0-5, or name (default: estimated).",
+        help="Kernel type: 0-6, or name (default: estimated).",
     )
     parser.add_argument("-l", type=int, default=11, help="L-mer length (default: 11).")
     parser.add_argument(

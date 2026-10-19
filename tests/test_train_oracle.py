@@ -20,6 +20,8 @@ PARAMS = {
     "t3": dict(kernel_type=3, l=10, k=6, d=3, gamma=2.0),
     "t4": dict(kernel_type=4, l=11, k=7, d=3, M=20, H=10),
     "t5": dict(kernel_type=5, l=10, k=6, d=3, M=50, H=30, gamma=2.0),
+    # gkm_cnt_rbf, trained by the kundajelab fork's gkmtrain
+    "t6": dict(kernel_type=6, l=10, k=6, d=3, gamma=2.0),
     # -w: the positives' C is w*C
     "t2w2": dict(kernel_type=2, l=10, k=6, d=3, pos_weight=2.0),
     "t4w05": dict(kernel_type=4, l=11, k=7, d=3, M=20, H=10, pos_weight=0.5),

@@ -320,5 +320,5 @@ def test_resolve_kernel_type_takes_cli_integers():
 
     for t in range(6):
         assert resolve_kernel_type(str(t)) == resolve_kernel_type(t)
-    with pytest.raises(ValueError, match="Valid: 0-5"):
+    with pytest.raises(ValueError, match="Valid: 0-6"):
         resolve_kernel_type("7")
