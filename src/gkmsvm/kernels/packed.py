@@ -59,9 +59,10 @@ class PackedGkmKernel(GkmKernel):
         """_join_plan() for the pairwise kernel, unless use_masked is off."""
         return self._join_plan() if self.use_masked else None
 
-    def packs(self, x) -> bool:
-        """Whether the packed path is exact for x (always, unless overridden)."""
-        return True
+    def window_weights(self, W: int):
+        """[W] uint8 weights of a sequence's W windows (forward order; a reverse
+        complement's windows carry them reversed), or None when every window
+        counts once. Only -t 4/-t 5 weight windows (kernels/weighted.py)."""
 
     def _check_length(self, L: int) -> None:
         if L < self.l:
@@ -116,18 +117,27 @@ class PackedGkmKernel(GkmKernel):
             diag_offset.. of one set (a self-Gram column panel); entries below
             the diagonal may be left 0 (CPU masked join only).
 
+        Rows and columns are whole sequences' windows, in order: window
+        weights (window_weights) follow their positions.
+
         CPU and CUDA return float64; MLX returns float32 on the device.
         """
         dev = device_of(bx)
         plan = self._masked_plan()
         small = min(bx.shape[0], by.shape[0]) < _MASKED_MIN_ROWS
+        wx, wy = self.window_weights(bx.shape[1]), self.window_weights(by.shape[1])
         if plan is not None and not (small and self._HAS_BRUTE):
-            return _masked(bx, by, plan, by_rc, diag_offset, dev)
+            return _masked(bx, by, plan, by_rc, diag_offset, dev, wx, wy)
         if not self._HAS_BRUTE:
             raise ValueError(f"{type(self).__name__} needs the masked join (use_masked=True)")
-        raw = self._brute(bx, by, dev)
+        if wx is None:
+            raw = self._brute(bx, by, dev)
+            if by_rc is not None:
+                raw = raw + self._brute(bx, by_rc, dev)
+            return raw
+        raw = self._brute(bx, by, dev, wx, wy)
         if by_rc is not None:
-            raw = raw + self._brute(bx, by_rc, dev)
+            raw = raw + self._brute(bx, by_rc, dev, wx, wy[::-1])
         return raw
 
     # Whether _brute exists; without it the masked join serves every size
@@ -176,10 +186,8 @@ class PackedGkmKernel(GkmKernel):
     # -- GkmKernel interface --------------------------------------------------
 
     def _raw_pairwise(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
-        if self.packs(x) and self.packs(y):
-            by, by_rc = self.pack_both(y)
-            return self.raw_packed(self.pack(x), by, by_rc).astype(float_dtype(x))
-        return self._raw_pairwise_onehot(x, y)
+        by, by_rc = self.pack_both(y)
+        return self.raw_packed(self.pack(x), by, by_rc).astype(float_dtype(x))
 
     def _raw_diagonal(self, x: np.ndarray, *, chunk_size: int | None = None) -> np.ndarray:
         xp = get_array_module(x)
@@ -187,26 +195,23 @@ class PackedGkmKernel(GkmKernel):
         if chunk_size is not None and chunk_size < B:
             return xp.concatenate([self._raw_diagonal(x[s:s + chunk_size])
                                    for s in range(0, B, chunk_size)])
-        if self.packs(x):
-            return self.raw_diag_packed(*self.pack_both(x)).astype(float_dtype(x))
-        return self._raw_diagonal_onehot(x)
-
-    def _raw_pairwise_onehot(self, x, y):
-        raise NotImplementedError
-
-    def _raw_diagonal_onehot(self, x):
-        raise NotImplementedError
+        return self.raw_diag_packed(*self.pack_both(x)).astype(float_dtype(x))
 
 
-def _masked(bx, by, plan, by_rc, diag_offset, dev):
+def _masked(bx, by, plan, by_rc, diag_offset, dev, wx=None, wy=None):
     from gkmsvm.kernels import masked
 
     if dev == "cpu":
-        return masked.masked_pairwise(bx, by, plan, by_rc, diag_offset=diag_offset)
+        return masked.masked_pairwise(bx, by, plan, by_rc, diag_offset=diag_offset,
+                                      wx=wx, wy=wy)
     if dev == "cuda":
-        return masked.masked_pairwise_gpu(bx, by, plan, by_rc)
+        return masked.masked_pairwise_gpu(bx, by, plan, by_rc, wx=wx, wy=wy)
     import mlx.core as mx
 
+    if wx is not None:  # Metal counts in int32; weighted windows join on the CPU
+        out = masked.masked_pairwise(np.asarray(bx), np.asarray(by), plan,
+                                     None if by_rc is None else np.asarray(by_rc), wx=wx, wy=wy)
+        return mx.array(out.astype(np.float32))
     # Exact integer counts combined in float64; Metal holds float32
     return mx.array(masked.masked_pairwise_mlx(bx, by, plan, by_rc).astype(np.float32))
 

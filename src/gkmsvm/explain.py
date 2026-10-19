@@ -579,7 +579,7 @@ def gkmexplain(
 
     kernel = model.kernel
     base = kernel.base
-    if getattr(base, "_mismatch_table", None) is None:
+    if getattr(base, "_mismatch_table", None) is None or base.window_weights(1) is not None:
         raise ValueError(
             f"GkmExplain attribution supports -t 0/1/2/3 kernels, not {model.kernel_type!r}; "
             "use mutation_impact() or ism()"
@@ -948,7 +948,7 @@ def _explain_lmer_cuda(model, x, V, index, coef, inv_ds, masks, levels, table_a,
         V = c["explain_V_cuda"]
         offsets = ids = None
     else:
-        offsets, ids, _, _ = index._arrays("cuda")
+        offsets, ids = index._arrays("cuda")[:2]
         coef_d = cp.asarray(coef)
         inv_ds_d = cp.asarray(inv_ds)
     masks, levels = cp.asarray(masks), cp.asarray(levels)
@@ -1035,7 +1035,7 @@ def mutation_impact(
         xp = get_array_module(r)
         n = r.shape[0]
         both = xp.concatenate([r, a])
-        if packed_svs and base.packs(both):
+        if packed_svs:
             # One call for both alleles (the masked join builds its SV index once)
             bx, bx_rc = base.pack_both(both)
             k_both = model._sv_raw(bx)

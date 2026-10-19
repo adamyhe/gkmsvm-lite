@@ -50,7 +50,7 @@ def compute_gram(
     # Tiles come from the base kernel's packed path (the base of -t 3/-t 5,
     # then finish() applies the RBF), unless it can't pack these inputs
     base = kernel.base
-    packed = isinstance(base, PackedGkmKernel) and base.packs(X) and (symmetric or base.packs(Y))
+    packed = isinstance(base, PackedGkmKernel)
 
     # The masked join builds an index of the column sequences on every call,
     # so compute whole column panels (all rows, or all rows up to the

@@ -26,7 +26,7 @@ class KernelColumnCache:
         self._N = X.shape[0]
         self._mlx = is_mlx(X)
         base = kernel.base
-        self._use_fast = isinstance(base, PackedGkmKernel) and base.packs(X)
+        self._use_fast = isinstance(base, PackedGkmKernel)
         if self._use_fast:
             self._packed, self._packed_rc = base.pack_both(X)
             self._X = None

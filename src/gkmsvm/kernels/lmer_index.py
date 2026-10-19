@@ -9,14 +9,13 @@ precomputed mask) and adds table[m] to every column in that row. Each
 matching window pair is visited once, and a call's cost depends only on the
 queries.
 
-Applies to the count-table kernels (-t 0/1/2, and -t 3 through its base),
-where a neighbor's weight depends on its mismatch count, and to the
-center-weighted kernel (-t 4, and -t 5 through its base), where it is e_k of
-the position weights on the agreeing positions (dmax = l - k). The
-neighborhood sum_{m <= dmax} C(l, m) 3^m must be at most MAX_NEIGHBORS (e.g.
-4,984 for l=11 d=3; 3,676 for weighted l=10 k=7), or DENSE_MAX_NEIGHBORS
-when the columns are dense enough that lookups return many hits (see
-applies()), with l <= MAX_L.
+Applies to the count-table kernels (-t 0-5; -t 3/-t 5 through their base),
+where a neighbor's weight depends on its mismatch count. With window weights
+(-t 4/-t 5) every CSR entry also holds its window's weight, and a query
+window's hits are scaled by its own. The neighborhood
+sum_{m <= dmax} C(l, m) 3^m must be at most MAX_NEIGHBORS (e.g. 4,984 for
+l=11 d=3), or DENSE_MAX_NEIGHBORS when the columns are dense enough that
+lookups return many hits (see applies()), with l <= MAX_L.
 """
 
 from __future__ import annotations
@@ -30,7 +29,7 @@ from gkmsvm.backend import to_cpu
 
 # Neighbors per query window above which the masked join is used instead
 MAX_NEIGHBORS = 8192
-# Larger neighborhoods (e.g. weighted l=11 k=7, 25,774) when each neighbor
+# Larger neighborhoods (e.g. l=11 d=4, 25,774) when each neighbor
 # lookup returns many hits: the index is then bound by the matching window
 # pairs, as any exact per-column method is. Measured on 300 bp queries,
 # wgkmrbf: tie with the join at 0.6-2 column windows per l-mer (4k-16k SVs),
@@ -75,8 +74,6 @@ def _dmax(kernel) -> int | None:
     """Most mismatches with a non-zero pair weight, or None for kernels without an index."""
     if getattr(kernel, "_mismatch_table", None) is not None:
         return kernel.l - kernel._min_matches
-    if getattr(kernel, "_pos_weights", None) is not None:  # -t 4: k agreeing positions
-        return kernel.l - kernel.k
     return None
 
 
@@ -96,22 +93,11 @@ def applies(kernel, n_windows: int | None = None) -> bool:
 
 
 def index_neighbors(kernel):
-    """XOR masks of every l-mer within the kernel's cutoff and their pair weights.
-
-    Count-table kernels weight a neighbor by its mismatch count; the
-    center-weighted kernel by e_k of the position weights where it agrees.
-    """
-    l, dmax = kernel.l, _dmax(kernel)
-    table = getattr(kernel, "_mismatch_table", None)
-    if table is not None:
-        masks, levels = neighbor_masks(l, np.asarray(table, dtype=np.float64), dmax)
-        return masks, np.asarray(table, dtype=np.float64)[levels]
-    from gkmsvm.kernels.weighted import _agreement_weights
-
-    masks, _ = neighbor_masks(l, np.ones(l + 1), dmax)
-    fields = (masks[:, None] >> (2 * np.arange(l, dtype=np.uint32))) & np.uint32(3)
-    agree = ((fields == 0) << np.arange(l)).sum(axis=1)
-    return masks, _agreement_weights(kernel._pos_weights, kernel.k)[agree]
+    """XOR masks of every l-mer within the kernel's cutoff and their pair
+    weights (by mismatch count)."""
+    table = np.asarray(kernel._mismatch_table, dtype=np.float64)
+    masks, levels = neighbor_masks(kernel.l, table, _dmax(kernel))
+    return masks, table[levels]
 
 
 @njit(cache=True)
@@ -126,10 +112,29 @@ def _counting_sort(keys, ids, offsets):
     return out
 
 
+@njit(inline="always")
+def _add_window(acc, w, scale, offsets, ids, vals, masks, weights, n_lmers):
+    """acc[s] += scale * K_raw(window w, s); vals: the entries' window weights
+    (empty: all 1)."""
+    weighted = vals.shape[0] > 0
+    for t in range(masks.shape[0]):
+        v = np.int64(w ^ masks[t])
+        if v >= n_lmers:  # padding window
+            continue
+        wt = scale * weights[t]
+        if weighted:
+            for e in range(offsets[v], offsets[v + 1]):
+                acc[ids[e]] += wt * vals[e]
+        else:
+            for e in range(offsets[v], offsets[v + 1]):
+                acc[ids[e]] += wt
+
+
 @njit(parallel=True, cache=True)
-def _query_cpu(bx, offsets, ids, masks, weights, n_lmers, S, n_split):
+def _query_cpu(bx, offsets, ids, vals, masks, weights, n_lmers, S, n_split, wx):
     """Each row's windows in n_split chunks (so few rows still use every
-    thread), each accumulating into its own row of partial sums."""
+    thread), each accumulating into its own row of partial sums. wx: the
+    query windows' weights (empty: all 1)."""
     B, W = bx.shape
     part = np.zeros((B * n_split, S), dtype=np.float64)
     step = (W + n_split - 1) // n_split
@@ -137,22 +142,16 @@ def _query_cpu(bx, offsets, ids, masks, weights, n_lmers, S, n_split):
         b, c = task // n_split, task % n_split
         acc = part[task]
         for i in range(c * step, min(W, (c + 1) * step)):
-            w = bx[b, i]
-            for t in range(masks.shape[0]):
-                v = np.int64(w ^ masks[t])
-                if v >= n_lmers:  # padding window
-                    continue
-                wt = weights[t]
-                for e in range(offsets[v], offsets[v + 1]):
-                    acc[ids[e]] += wt
+            scale = wx[i] if wx.shape[0] > 0 else 1.0
+            _add_window(acc, bx[b, i], scale, offsets, ids, vals, masks, weights, n_lmers)
     if n_split == 1:
         return part
     return part.reshape(B, n_split, S).sum(axis=1)
 
 
 @njit(parallel=True, cache=True, fastmath={"nsz", "arcp", "contract", "reassoc"})
-def _query_reduce_cpu(bx, offsets, ids, masks, weights, n_lmers, inv_dx, inv_ds, coef,
-                      gamma, n_tasks):
+def _query_reduce_cpu(bx, offsets, ids, vals, masks, weights, n_lmers, wx, inv_dx, inv_ds,
+                      coef, gamma, n_tasks):
     """[B]: sum_s coef_s f(K_raw[b, s] * inv_dx[b] * inv_ds[s]), without the [B, S] block.
 
     f(k) = exp(gamma (k - 1)) when gamma is not NaN (RBF), else k. Each task
@@ -168,14 +167,8 @@ def _query_reduce_cpu(bx, offsets, ids, masks, weights, n_lmers, inv_dx, inv_ds,
         acc = np.zeros(S)
         for b in range(task, B, n_tasks):
             for i in range(W):
-                w = bx[b, i]
-                for t in range(masks.shape[0]):
-                    v = np.int64(w ^ masks[t])
-                    if v >= n_lmers:  # padding window
-                        continue
-                    wt = weights[t]
-                    for e in range(offsets[v], offsets[v + 1]):
-                        acc[ids[e]] += wt
+                a = wx[i] if wx.shape[0] > 0 else 1.0
+                _add_window(acc, bx[b, i], a, offsets, ids, vals, masks, weights, n_lmers)
             scale = inv_dx[b]
             total = 0.0
             if rbf:
@@ -256,9 +249,12 @@ extern "C" __global__ void lmer_index_query(
     const unsigned int* __restrict__ bx, int W, long long n_items,
     const long long* __restrict__ offsets, const int* __restrict__ ids,
     const unsigned int* __restrict__ masks, const double* __restrict__ weights,
-    int n_masks, long long n_lmers, int S, double* __restrict__ out)
+    int n_masks, long long n_lmers, int S, double* __restrict__ out,
+    const unsigned char* __restrict__ wx, const unsigned char* __restrict__ vals,
+    int weighted)
 {
-    // grid.y = query row; each thread takes one (window, neighbor) item
+    // grid.y = query row; each thread takes one (window, neighbor) item.
+    // wx, vals: window weights of the queries and entries (-t 4/5, weighted = 1)
     long long it = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (it >= n_items) return;
     int b = blockIdx.y;
@@ -267,6 +263,12 @@ extern "C" __global__ void lmer_index_query(
     if (v >= n_lmers) return;  // padding window
     double wt = weights[t];
     double* row = out + (long long)b * S;
+    if (weighted) {
+        wt *= wx[i];
+        for (long long e = offsets[v]; e < offsets[v + 1]; e++)
+            atomicAdd(&row[ids[e]], wt * vals[e]);
+        return;
+    }
     for (long long e = offsets[v]; e < offsets[v + 1]; e++) atomicAdd(&row[ids[e]], wt);
 }
 """
@@ -315,10 +317,22 @@ class LmerIndex:
         self.offsets = np.zeros(self.n_lmers + 1, dtype=np.int64)
         np.cumsum(counts, out=self.offsets[1:])
         self.ids = _counting_sort(keys, ids, self.offsets)
+        # Window weights (-t 4/5): each entry's, and the query windows' by length
+        self.window_weights = kernel.window_weights
+        wy = kernel.window_weights(W)
+        self.vals = np.zeros(0, dtype=np.uint8)
+        if wy is not None:  # an RC window carries its forward weight
+            vals = np.concatenate([np.tile(w, self.S) for w in (wy, wy[::-1])][:len(blocks)])
+            self.vals = _counting_sort(keys, vals, self.offsets)
         self._dev = {}
 
+    def _wx(self, W):
+        """Query window weights as float64 (empty when unweighted)."""
+        wx = self.window_weights(W)
+        return np.zeros(0) if wx is None else wx.astype(np.float64)
+
     def nbytes(self) -> int:
-        return self.offsets.nbytes + self.ids.nbytes
+        return self.offsets.nbytes + self.ids.nbytes + self.vals.nbytes
 
     def pairwise(self, bx):
         """K_raw [B, S] of packed query rows bx [B, W] against the columns.
@@ -334,8 +348,8 @@ class LmerIndex:
 
             bx = np.ascontiguousarray(bx)
             n_split = min(bx.shape[1], -(-numba.get_num_threads() // bx.shape[0]))
-            return _query_cpu(bx, self.offsets, self.ids, self.masks, self.weights,
-                              self.n_lmers, self.S, max(1, n_split))
+            return _query_cpu(bx, self.offsets, self.ids, self.vals, self.masks, self.weights,
+                              self.n_lmers, self.S, max(1, n_split), self._wx(bx.shape[1]))
         if dev == "cuda":
             return self._pairwise_cuda(bx)
         return self._pairwise_mlx(bx)
@@ -349,15 +363,22 @@ class LmerIndex:
         import numba
 
         bx = np.ascontiguousarray(bx)
-        return _query_reduce_cpu(bx, self.offsets, self.ids, self.masks, self.weights,
-                                 self.n_lmers, np.ascontiguousarray(inv_dx, dtype=np.float64),
+        return _query_reduce_cpu(bx, self.offsets, self.ids, self.vals, self.masks, self.weights,
+                                 self.n_lmers, self._wx(bx.shape[1]),
+                                 np.ascontiguousarray(inv_dx, dtype=np.float64),
                                  np.ascontiguousarray(inv_ds, dtype=np.float64),
                                  np.ascontiguousarray(coef, dtype=np.float64), float(gamma),
                                  max(1, min(bx.shape[0], 4 * numba.get_num_threads())))
 
     def mutants(self, old, new, ref, ref_score, inv_dx, inv_dmut, inv_ds, coef, gamma=np.nan):
-        """ISM deltas [4, L, B] on CPU (see _query_mutants_cpu), without [rows, S] blocks."""
+        """ISM deltas [4, L, B] on CPU (see _query_mutants_cpu), without [rows, S] blocks.
+
+        Not for weighted windows (old/new are window sets, not sequences).
+        """
         import numba
+
+        if len(self.vals):
+            raise NotImplementedError("ISM scores weighted kernels' mutants through model()")
 
         L, B = old.shape[:2]
         def f64(a):
@@ -376,7 +397,8 @@ class LmerIndex:
                 import cupy as cp
 
                 self._dev[dev] = (cp.asarray(self.offsets), cp.asarray(self.ids),
-                                  cp.asarray(self.masks), cp.asarray(self.weights))
+                                  cp.asarray(self.masks), cp.asarray(self.weights),
+                                  cp.asarray(self.vals) if len(self.vals) else None)
             else:
                 import mlx.core as mx
 
@@ -390,9 +412,14 @@ class LmerIndex:
         global _cuda_fn
         if _cuda_fn is None:
             _cuda_fn = cp.RawKernel(_CUDA_SRC, "lmer_index_query")
-        offsets, ids, masks, weights = self._arrays("cuda")
+        offsets, ids, masks, weights, vals = self._arrays("cuda")
         bx = cp.ascontiguousarray(bx, dtype=cp.uint32)
         B, W = bx.shape
+        weighted = vals is not None
+        if weighted:
+            wx = cp.asarray(self.window_weights(W))
+        else:
+            wx = vals = cp.zeros(1, dtype=cp.uint8)
         out = cp.zeros((B, self.S), dtype=cp.float64)
         n_items = W * len(self.masks)
         block = 256
@@ -401,7 +428,7 @@ class LmerIndex:
             _cuda_fn(((n_items + block - 1) // block, nb), (block,),
                      (bx[b0:b0 + nb], np.int32(W), np.int64(n_items), offsets, ids, masks,
                       weights, np.int32(len(self.masks)), np.int64(self.n_lmers),
-                      np.int32(self.S), out[b0:b0 + nb]))
+                      np.int32(self.S), out[b0:b0 + nb], wx, vals, np.int32(weighted)))
         return out
 
     def _pairwise_mlx(self, bx):
@@ -413,9 +440,10 @@ class LmerIndex:
                 name="gkm_lmer_index_query",
                 input_names=["bx", "offsets", "ids", "masks", "levels", "params"],
                 output_names=["counts"], source=_METAL_SRC, atomic_outputs=True)
-        if len(self.table) > _METAL_MAX_LEVELS:
-            # One int32 [rows, S] block per level: weighted kernels (hundreds of
-            # distinct weights) query on CPU, which shares memory with the GPU
+        if len(self.table) > _METAL_MAX_LEVELS or len(self.vals):
+            # One int32 [rows, S] block per level; many levels, or window
+            # weights (counts no longer per level), query on CPU, which shares
+            # memory with the GPU
             return mx.array(self.pairwise(np.asarray(to_cpu(bx))).astype(np.float32))
         if self.offsets[-1] >= 2**31:
             raise ValueError("l-mer index too large for the Metal kernel")

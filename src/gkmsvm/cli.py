@@ -27,8 +27,10 @@ def _add_kernel_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("-d", type=int, default=3, help="Max mismatches (default: 3).")
     parser.add_argument("--no-rc", action="store_true", help="Disable reverse complement.")
     parser.add_argument("--gamma", type=float, default=1.0, help="RBF gamma (for -t 3, 5).")
-    parser.add_argument("-M", type=int, default=None, help="Center-weight window (for -t 4, 5).")
-    parser.add_argument("-H", type=float, default=None, help="Center-weight decay (for -t 4, 5).")
+    parser.add_argument("-M", type=int, default=None,
+                        help="Center window weight, 1-255 (for -t 4, 5; default: 50).")
+    parser.add_argument("-H", type=float, default=None,
+                        help="Window weight half-life in bp (for -t 4, 5; default: 50).")
 
 
 def _load_model(path: str, device: str = "cpu"):
