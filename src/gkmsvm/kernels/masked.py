@@ -25,6 +25,8 @@ from math import comb
 import numpy as np
 from numba import njit, prange
 
+from gkmsvm.kernels.packed import PAD_WINDOW
+
 # Largest number of masks worth joining; above this the brute-force loop wins
 _MAX_MASKS = 1000
 # Masks per chunk: bounds the column-side index memory per call
@@ -103,14 +105,19 @@ def _masked_key(w, runs):
     return key
 
 
+_PAD = PAD_WINDOW
+
+
 @njit(parallel=True, cache=True)
 def _build_column_index(by, seq_of_row, runs, j, wby):
     """Counting sort of column windows by masked key, one index per mask.
 
     by: [R, W] packed windows; row r belongs to column sequence seq_of_row[r].
+    PAD_WINDOW (padding past a shorter sequence's windows) is left out.
     wby: [R, W] uint8 window weights, or [0, 0] for unweighted windows.
     Returns offsets [M, 4^j + 1], colseq [M, R*W] (column sequence ids in
-    key order) and colwt (their weights; [M, 0] when unweighted).
+    key order; the tail past offsets[m, -1] unused) and colwt (their
+    weights; [M, 0] when unweighted).
     """
     R, W = by.shape
     M = runs.shape[0]
@@ -123,13 +130,16 @@ def _build_column_index(by, seq_of_row, runs, j, wby):
         mr = runs[m]
         for r in range(R):
             for w in range(W):
-                offsets[m, _masked_key(by[r, w], mr) + 1] += 1
+                if by[r, w] != _PAD:
+                    offsets[m, _masked_key(by[r, w], mr) + 1] += 1
         for key in range(K):
             offsets[m, key + 1] += offsets[m, key]
         fill = offsets[m, :K].copy()
         for r in range(R):
             s = seq_of_row[r]
             for w in range(W):
+                if by[r, w] == _PAD:
+                    continue
                 key = _masked_key(by[r, w], mr)
                 colseq[m, fill[key]] = s
                 if weighted:
@@ -141,7 +151,9 @@ def _build_column_index(by, seq_of_row, runs, j, wby):
 @njit(parallel=True, cache=True, fastmath=True)
 def _join_rows(bx, runs, offsets, colseq, coef, result, wx, colwt):
     """result[b, s] += coef for every (query window, column window, mask) match,
-    times wx[i] colwt[t] for weighted windows (colwt with 0 columns: unweighted).
+    times wx[b, i] colwt[t] for weighted windows (colwt with 0 columns:
+    unweighted; wx [1, Wx] when every row has the same weights). PAD query
+    windows are skipped.
 
     Each query sequence's row is owned by one thread, so there are no races.
     """
@@ -150,12 +162,15 @@ def _join_rows(bx, runs, offsets, colseq, coef, result, wx, colwt):
     weighted = colwt.shape[1] > 0
     for b in prange(B):
         row = result[b]
+        wb = wx[min(np.int64(b), wx.shape[0] - 1)]
         for m in range(M):
             mr = runs[m]
             for i in range(Wx):
+                if bx[b, i] == _PAD:
+                    continue
                 key = _masked_key(bx[b, i], mr)
                 if weighted:
-                    c = coef * wx[i]
+                    c = coef * wb[i]
                     for t in range(offsets[m, key], offsets[m, key + 1]):
                         row[colseq[m, t]] += c * colwt[m, t]
                 else:
@@ -180,15 +195,18 @@ def _join_rows_upper(bx, runs, offsets, colseq, coef, result, row_min, wx, colwt
         b = idx // 2 if idx % 2 == 0 else B - 1 - idx // 2
         row = result[b]
         cmin = row_min[b]
+        wb = wx[min(np.int64(b), wx.shape[0] - 1)]
         for m in range(M):
             mr = runs[m]
             for i in range(Wx):
+                if bx[b, i] == _PAD:
+                    continue
                 key = _masked_key(bx[b, i], mr)
                 # Ids ascend within a bucket: scan from the end and stop at
                 # the first column below cmin (cheaper than a binary search)
                 lo = offsets[m, key]
                 t = offsets[m, key + 1] - 1
-                ci = coef * wx[i] if weighted else coef
+                ci = coef * wb[i] if weighted else coef
                 while t >= lo:
                     c = colseq[m, t]
                     if c < cmin:
@@ -197,20 +215,28 @@ def _join_rows_upper(bx, runs, offsets, colseq, coef, result, row_min, wx, colwt
                     t -= 1
 
 
-def _block_weights(wy, n_rows, n_blocks):
-    """[n_rows, W] uint8 weights of column rows alternating forward and RC
-    windows (n_blocks per sequence), or [0, 0] without weights."""
-    if wy is None:
+def _column_weights(blocks, S, interleave):
+    """[R, W] uint8 weights of the column rows built from blocks (row_weights
+    of S column sequences each: [S, W], or [1, W] shared, or None): stacked
+    block after block, or with interleave alternating per sequence; [0, 0]
+    without weights."""
+    if blocks[0] is None:
         return np.zeros((0, 0), dtype=np.uint8)
-    w = np.stack([wy, wy[::-1]][:n_blocks])  # an RC window carries its forward weight
-    return np.ascontiguousarray(np.tile(w, (n_rows // n_blocks, 1)), dtype=np.uint8)
+    full = [np.broadcast_to(b, (S, b.shape[1])) for b in blocks]
+    w = (
+        np.stack(full, axis=1).reshape(-1, full[0].shape[1])
+        if interleave
+        else np.concatenate(full)
+    )
+    return np.ascontiguousarray(w, dtype=np.uint8)
 
 
 def _row_weights(wx):
-    return np.zeros(0) if wx is None else np.asarray(wx, dtype=np.float64)
+    """Query row weights as float64 [1 or B, Wx], [1, 0] when unweighted."""
+    return np.zeros((1, 0)) if wx is None else np.asarray(wx, dtype=np.float64)
 
 
-def _masked_pairwise_upper(bx, by_blocks, plan, diag_offset, wx, wy):
+def _masked_pairwise_upper(bx, by_blocks, plan, diag_offset, wx, wy_blocks):
     """Rows 0..B-1 against columns diag_offset.. of the same sequences.
 
     Only entries with column >= row are computed (the rest stay 0).
@@ -222,7 +248,7 @@ def _masked_pairwise_upper(bx, by_blocks, plan, diag_offset, wx, wy):
     S, W = by_blocks[0].shape
     by = np.ascontiguousarray(np.stack(by_blocks, axis=1).reshape(-1, W))
     seq_of_row = np.repeat(np.arange(S, dtype=np.int32), len(by_blocks))
-    wby = _block_weights(wy, by.shape[0], len(by_blocks))
+    wby = _column_weights(wy_blocks, S, interleave=True)
     row_min = np.maximum(0, np.arange(B) - diag_offset).astype(np.int64)
     result = np.zeros((B, S), dtype=np.float64)
     for j, coef, positions in plan:
@@ -245,7 +271,14 @@ def _masked_pairwise_upper(bx, by_blocks, plan, diag_offset, wx, wy):
 
 
 def masked_pairwise(
-    bx_packed, by_packed, plan, by_rc_packed=None, diag_offset=None, wx=None, wy=None
+    bx_packed,
+    by_packed,
+    plan,
+    by_rc_packed=None,
+    diag_offset=None,
+    wx=None,
+    wy=None,
+    wy_rc=None,
 ):
     """Raw kernel [B, S] from packed windows via masked joins.
 
@@ -257,29 +290,25 @@ def masked_pairwise(
     diag_offset: the rows are sequences 0..B-1 and the columns sequences
         diag_offset..diag_offset+S-1 of one set (a self-Gram column panel);
         entries below the diagonal are skipped and left 0.
-    wx, wy: [Wx], [Wy] window weights of the rows and columns (forward order;
-        RC windows carry them reversed), or None.
+    wx, wy, wy_rc: row_weights of the rows, columns and RC columns ([1, W]
+        when shared by every row, [R, W] for padded rows), or None.
+    Rows and columns may hold PAD_WINDOW past a shorter sequence's windows;
+    it is skipped.
     """
     bx = np.ascontiguousarray(bx_packed)
     if diag_offset is not None:
         blocks = [by_packed] + ([by_rc_packed] if by_rc_packed is not None else [])
-        return _masked_pairwise_upper(bx, blocks, plan, diag_offset, wx, wy)
+        w_blocks = [wy] + ([wy_rc] if by_rc_packed is not None else [])
+        return _masked_pairwise_upper(bx, blocks, plan, diag_offset, wx, w_blocks)
     S = by_packed.shape[0]
     if by_rc_packed is not None:
         by = np.ascontiguousarray(np.concatenate([by_packed, by_rc_packed]))
         seq_of_row = np.concatenate([np.arange(S), np.arange(S)]).astype(np.int32)
-        wby = (
-            np.zeros((0, 0), np.uint8)
-            if wy is None
-            else np.ascontiguousarray(
-                np.concatenate([np.tile(wy, (S, 1)), np.tile(wy[::-1], (S, 1))]),
-                dtype=np.uint8,
-            )
-        )
+        wby = _column_weights([wy, wy_rc], S, interleave=False)
     else:
         by = np.ascontiguousarray(by_packed)
         seq_of_row = np.arange(S, dtype=np.int32)
-        wby = _block_weights(wy, S, 1)
+        wby = _column_weights([wy], S, interleave=False)
     result = np.zeros((bx.shape[0], S), dtype=np.float64)
     for j, coef, positions in plan:
         step = _cpu_mask_chunk(by.size, j)

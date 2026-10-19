@@ -1,13 +1,28 @@
-# Variable-length sequences
+# Sequence lengths: fixed windows, with variable length for compatibility
 
 Status: accepted (2026-10-19); in progress on the `variable-length` branch.
 
-## Problem
+## Direction
+
+The main pipeline works on **fixed-length windows**, as the ENCODE gkm-SVM and DART-Eval pipelines (and every benchmark here) do:
+
+- **From peaks:** `--bed peaks.narrowPeak --genome genome.fa` (Python: `extract_loci`) reads `--length` bp centered on each peak's summit (narrowPeak column 10), or its midpoint when there is no summit. Windows past a chromosome end are dropped and counted.
+- **From FASTA:** records longer than `--length` are center-cropped. Records shorter than it are an **error** that reports them (there are no flanks to extend from) and points to `--bed`/`--genome` or `--variable-length`.
+- **`--length` defaults:** training 300 bp (the ENCODE and DART-Eval convention); scoring, ISM and GkmExplain the model's SV length (given explicitly for a model whose SVs differ in length).
+
+**Variable length is a compatibility option** for LS-GKM, which trains on and scores sequences as they are:
+
+- Importing and scoring LS-GKM models whose SVs differ in length works by default (it can't be avoided: the SVs are the model).
+- Mixed-length queries and training are opt-in: `--variable-length` in the CLI, `lengths=` or a list of sequences in Python.
+- Priorities follow from this. CPU kernels for padded SVs and queries, the importers and serialization come first; GkmExplain and ISM on models with mixed-length SVs (queries still fixed) next. Mixed-length queries for ISM/GkmExplain, mixed-length training, and the CUDA/Metal kernels for padded input come last, as demand shows.
+- Benchmark S3B gives both tools the same 300 bp summit windows.
+
+## Problem (compatibility)
 
 LS-GKM trains on and scores sequences of any length (up to `MAX_SEQ_LENGTH` = 2048 bp in `libsvm_gkm.h`). Each sequence has its own `seqlen - L + 1` windows. For `-t 4/5`, its window weights come from its own window count (`gkmkernel_new_object`). gkmsvm-lite assumes one length per array everywhere:
 
 - **Importing** an LS-GKM model whose SVs differ in length raises (`importers.build_model`). Many real models are like this, since LS-GKM is usually trained on peaks.
-- **Training and the CLI** stack per-sequence one-hot arrays, so mixed lengths raise. Benchmark S3B works around it: LS-GKM trains on the variable-length peaks and gkmsvm-lite on fixed 300 bp windows (`benchmarks/ctcf_data.py`).
+- **Training and the CLI** stack per-sequence one-hot arrays, so mixed lengths raise. Benchmark S3B gave LS-GKM the variable-length peaks and gkmsvm-lite fixed 300 bp windows (`benchmarks/ctcf_data.py`); it now gives both the windows.
 - **`model()`, ISM, GkmExplain and mutation impact** take `[B, 4, L]` with a single L.
 
 ## What LS-GKM computes
@@ -77,7 +92,7 @@ So every kernel that reads packed windows gets a `w == PAD_WINDOW → skip` test
   - a list of `[4, L_i]` arrays or DNA strings, converted with `codec.encode_batch` (which already returns padded arrays plus a mask; it would return lengths).
 - **Outputs:** scores are `[B, 1]` as now. ISM and GkmExplain return `[B, 4, L_max]`, zero past each length, for either input form.
 - **Models:** `GkmSVM.support_sequences` stays `[S, 4, L_max]`, plus `sv_lengths [S]` (None when uniform). npz stores `sv_lengths` (older npz files have none, so they are uniform). `save_lsgkm` writes each SV trimmed to its length. `DeviceModel` moves `sv_lengths` with the arrays.
-- **CLI:** FASTAs with mixed lengths work in every subcommand. `explain` writes padded `[B, 4, L_max]` attribution and sequence arrays and warns when lengths differ (TF-MoDISco needs one length).
+- **CLI:** with `--variable-length`, FASTAs with mixed lengths work in every subcommand. `explain` writes padded `[B, 4, L_max]` attribution and sequence arrays and warns when lengths differ (TF-MoDISco needs one length).
 
 ## Validation (LS-GKM oracles)
 
@@ -95,11 +110,11 @@ Using the Beer-lab and kundajelab builds, as for the existing fixtures (`benchma
 
 ## Stages
 
-1. **Representation and the CPU kernels:** pack with lengths and PAD; skip PAD in brute force, the self-kernels, the masked join, the index and the table; per-row weights. Scoring padded input on CPU matches one-at-a-time scoring and gkmpredict.
-2. **Models:** importers (lift the error), `sv_lengths`, npz, `save_lsgkm`, device moves; CLI `predict` on mixed FASTAs.
-3. **Training:** Gram, SMO and Nyström with lengths; `train_gkmsvm`/`train_gkmsvr` and the CLI; gkmtrain fixtures.
-4. **Interpretation:** ISM, GkmExplain (all paths), mutation impact; gkmexplain fixtures.
-5. **CUDA and Metal:** PAD skips and per-row weights in the RawKernels and Metal kernels; `test_gpu.py` / `test_mlx.py` variable-length cases.
-6. **Benchmarks:** S3B trains both tools on the same variable-length peaks.
+1. **Representation and the CPU kernels:** pack with lengths and PAD; skip PAD in brute force, the self-kernels, the masked join, the index and the table; per-row weights. Scoring padded input on CPU matches one-at-a-time scoring and gkmpredict. Padded input on CUDA/MLX raises.
+2. **Models:** importers (lift the error), `sv_lengths`, npz, `save_lsgkm`.
+3. **Fixed-length pipeline:** `extract_loci` with summits, `center_crop`, `--bed`/`--genome`/`--length`/`--variable-length` in the CLI, `length` in training.
+4. **Interpretation with mixed-length SVs:** ISM, GkmExplain (all paths) and mutation impact for imported models, queries fixed; gkmexplain fixtures.
+5. **Benchmarks:** S3B on the same windows for both tools.
+6. **Later, as needed:** mixed-length queries for ISM/GkmExplain, mixed-length training (Gram, SMO, Nyström), CUDA and Metal kernels for padded input.
 
-Stages 1 to 3 make imported models and training work on CPU. Each stage is one commit on one branch.
+Each stage is one commit on one branch.

@@ -24,11 +24,13 @@ def save_npz(model, path: str | Path) -> None:
     if model.sv_chunk_size is not None:
         metadata["sv_chunk_size"] = model.sv_chunk_size
 
+    extra = {} if model.sv_lengths is None else {"sv_lengths": model.sv_lengths}
     np.savez(
         path,
         support_sequences=to_cpu(model.support_sequences),
         coefficients=to_cpu(model.coefficients),
         metadata=np.void(json.dumps(metadata).encode("utf-8")),
+        **extra,
     )
 
 
@@ -76,6 +78,8 @@ def load_npz(path: str | Path, *, device: str = "cpu"):
 
     return GkmSVM(
         support_sequences=data["support_sequences"],
+        # Files from before SVs of different lengths have none: uniform
+        sv_lengths=data["sv_lengths"] if "sv_lengths" in data.files else None,
         coefficients=data["coefficients"],
         bias=metadata["bias"],
         kernel_type=metadata["kernel_type"],
@@ -122,8 +126,10 @@ def save_lsgkm(model, path: str | Path) -> None:
     lines.append(f"nr_sv {n_pos} {n_neg}")
     lines.append("SV")
 
+    lengths = model.sv_lengths
     for i in range(len(coefs)):
-        seq_str = one_hot_decode(svs[i])
+        sv = svs[i] if lengths is None else svs[i][:, : lengths[i]]  # drop the padding
+        seq_str = one_hot_decode(sv)
         lines.append(f"{coefs[i]} {seq_str}")
 
     text = "\n".join(lines) + "\n"

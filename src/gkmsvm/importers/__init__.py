@@ -90,12 +90,11 @@ def build_model(
         one_hot_encode(seq, dtype=dtype, allow_n=True, allow_other=True)
         for seq in sequences
     ]
-    lengths = {t.shape[1] for t in encoded}
-    if len(lengths) > 1:
-        raise ValueError(
-            f"All support vector sequences must have the same length, "
-            f"got lengths: {sorted(lengths)}"
-        )
+    # SVs of different lengths (LS-GKM trained on peaks as they are) are
+    # padded to the longest, with sv_lengths
+    from gkmsvm.svm import as_batch
+
+    support_sequences, sv_lengths = as_batch(encoded)
     kernel_type = header.get("kernel_type", default_kernel)
     if kernel_type is None:
         raise ValueError("Model file missing kernel_type field")
@@ -108,7 +107,8 @@ def build_model(
         if key in header:
             kernel_params[key] = header[key]
     return GkmSVM(
-        support_sequences=np.stack(encoded),
+        support_sequences=support_sequences,
+        sv_lengths=sv_lengths,
         coefficients=np.array(coefficients, dtype=np.float64),
         bias=bias,
         kernel_type=kernel_type,

@@ -117,10 +117,10 @@ def _add_window(acc, w, scale, offsets, ids, vals, masks, weights, n_lmers):
     """acc[s] += scale * K_raw(window w, s); vals: the entries' window weights
     (empty: all 1)."""
     weighted = vals.shape[0] > 0
+    if np.int64(w) >= n_lmers:  # padding window
+        return
     for t in range(masks.shape[0]):
         v = np.int64(w ^ masks[t])
-        if v >= n_lmers:  # padding window
-            continue
         wt = scale * weights[t]
         if weighted:
             for e in range(offsets[v], offsets[v + 1]):
@@ -134,15 +134,16 @@ def _add_window(acc, w, scale, offsets, ids, vals, masks, weights, n_lmers):
 def _query_cpu(bx, offsets, ids, vals, masks, weights, n_lmers, S, n_split, wx):
     """Each row's windows in n_split chunks (so few rows still use every
     thread), each accumulating into its own row of partial sums. wx: the
-    query windows' weights (empty: all 1)."""
+    query windows' weights, [B or 1, W] ([1, 0]: all 1)."""
     B, W = bx.shape
     part = np.zeros((B * n_split, S), dtype=np.float64)
     step = (W + n_split - 1) // n_split
     for task in prange(B * n_split):
         b, c = task // n_split, task % n_split
         acc = part[task]
+        wb = wx[min(np.int64(b), wx.shape[0] - 1)]
         for i in range(c * step, min(W, (c + 1) * step)):
-            scale = wx[i] if wx.shape[0] > 0 else 1.0
+            scale = wb[i] if wb.shape[0] > 0 else 1.0
             _add_window(
                 acc, bx[b, i], scale, offsets, ids, vals, masks, weights, n_lmers
             )
@@ -181,8 +182,9 @@ def _query_reduce_cpu(
     for task in prange(n_tasks):
         acc = np.zeros(S)
         for b in range(task, B, n_tasks):
+            wb = wx[min(np.int64(b), wx.shape[0] - 1)]
             for i in range(W):
-                a = wx[i] if wx.shape[0] > 0 else 1.0
+                a = wb[i] if wb.shape[0] > 0 else 1.0
                 _add_window(
                     acc, bx[b, i], a, offsets, ids, vals, masks, weights, n_lmers
                 )
@@ -367,25 +369,37 @@ class LmerIndex:
         keys = np.concatenate([b.ravel() for b in blocks]).astype(np.int64)
         W = blocks[0].shape[1]
         ids = np.tile(np.repeat(np.arange(self.S, dtype=np.int32), W), len(blocks))
+        # Window weights (-t 4/5): each entry's, and the query windows' (row_weights)
+        self.row_weights = kernel.row_weights
+        self.window_weights = kernel.window_weights
+        vals = None
+        if (
+            kernel.window_weights(W) is not None
+        ):  # an RC window carries its forward weight
+            vals = np.concatenate(
+                [
+                    np.broadcast_to(kernel.row_weights(b, rc=k == 1), b.shape).ravel()
+                    for k, b in enumerate(blocks)
+                ]
+            )
+        keep = keys < self.n_lmers  # PAD past shorter sequences' windows
+        if not keep.all():
+            keys, ids = keys[keep], ids[keep]
+            vals = None if vals is None else vals[keep]
         counts = np.bincount(keys, minlength=self.n_lmers)
         self.offsets = np.zeros(self.n_lmers + 1, dtype=np.int64)
         np.cumsum(counts, out=self.offsets[1:])
         self.ids = _counting_sort(keys, ids, self.offsets)
-        # Window weights (-t 4/5): each entry's, and the query windows' by length
-        self.window_weights = kernel.window_weights
-        wy = kernel.window_weights(W)
         self.vals = np.zeros(0, dtype=np.uint8)
-        if wy is not None:  # an RC window carries its forward weight
-            vals = np.concatenate(
-                [np.tile(w, self.S) for w in (wy, wy[::-1])][: len(blocks)]
-            )
-            self.vals = _counting_sort(keys, vals, self.offsets)
+        if vals is not None:
+            self.vals = _counting_sort(keys, np.ascontiguousarray(vals), self.offsets)
         self._dev = {}
 
-    def _wx(self, W):
-        """Query window weights as float64 (empty when unweighted)."""
-        wx = self.window_weights(W)
-        return np.zeros(0) if wx is None else wx.astype(np.float64)
+    def _wx(self, bx):
+        """Query rows' window weights as float64 [B or 1, W] ([1, 0] when
+        unweighted)."""
+        wx = self.row_weights(bx)
+        return np.zeros((1, 0)) if wx is None else wx.astype(np.float64)
 
     def nbytes(self) -> int:
         return self.offsets.nbytes + self.ids.nbytes + self.vals.nbytes
@@ -414,7 +428,7 @@ class LmerIndex:
                 self.n_lmers,
                 self.S,
                 max(1, n_split),
-                self._wx(bx.shape[1]),
+                self._wx(bx),
             )
         if dev == "cuda":
             return self._pairwise_cuda(bx)
@@ -437,7 +451,7 @@ class LmerIndex:
             self.masks,
             self.weights,
             self.n_lmers,
-            self._wx(bx.shape[1]),
+            self._wx(bx),
             np.ascontiguousarray(inv_dx, dtype=np.float64),
             np.ascontiguousarray(inv_ds, dtype=np.float64),
             np.ascontiguousarray(coef, dtype=np.float64),

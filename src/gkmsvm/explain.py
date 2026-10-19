@@ -713,6 +713,7 @@ def gkmexplain(
                 model.bias,
                 model.kernel_type,
                 model._kernel_params,
+                sv_lengths=model.sv_lengths,
                 sv_chunk_size=model.sv_chunk_size,
             )
             cpu_model.use_lmer_index = model.use_lmer_index
@@ -745,6 +746,11 @@ def gkmexplain(
 
     kernel = model.kernel
     base = kernel.base
+    if model.sv_lengths is not None:
+        raise NotImplementedError(
+            "GkmExplain for models whose SVs differ in length: "
+            "docs/design/variable-length.md, stage 4 (use ism() or mutation_impact())"
+        )
     if getattr(base, "_mismatch_table", None) is None:
         raise ValueError(
             f"GkmExplain attribution needs a gapped k-mer kernel, not {model.kernel_type!r}; "

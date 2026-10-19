@@ -27,6 +27,13 @@ models of the mode 5 fixtures:
   lsgkm_wgkm_t{0,1,4,5}_test{100,85}.explain{0,1,4}.txt.gz, ..._test85.explain5.txt.gz
   lsgkm_mode5_{est,rbf}.explain{0,1,4}.txt.gz, lsgkm_mode5_{est,rbf}_test{100,85}.explain*.txt.gz
 
+With --ragged, instead trains on sequences of different lengths (60-140
+bp, N stretches) and scores a 30-200 bp test set with one sequence shorter
+than l (docs/design/variable-length.md):
+
+  lsgkm_ragged_{t2,t4,t5}.model.txt.gz, lsgkm_ragged_test.fa,
+  lsgkm_ragged_{t2,t4,t5}_test.pred.txt
+
 Usage (a host with LS-GKM in the "lsgkm" conda env):
   python benchmarks/dev/lsgkm_wgkm_fixtures.py [--explain-bin ~/lsgkm-kundaje/bin]
   # gkmexplain outputs only, for the models and FASTAs already in tests/fixtures:
@@ -51,6 +58,26 @@ from _common import lsgkm_binary, write_seqs
 FIXTURES = Path(__file__).resolve().parents[2] / "tests" / "fixtures"
 MOTIF = "TGACTCAGCA"
 EXPLAIN_MODES = (0, 1, 4, 5)
+RAGGED_MODELS = {
+    "t2": ["-t", "2", "-l", "10", "-k", "6", "-d", "3"],
+    "t4": ["-t", "4", "-l", "10", "-k", "6", "-d", "3", "-M", "20", "-H", "10"],
+    "t5": [
+        "-t",
+        "5",
+        "-l",
+        "10",
+        "-k",
+        "6",
+        "-d",
+        "3",
+        "-M",
+        "50",
+        "-H",
+        "30",
+        "-g",
+        "2.0",
+    ],
+}
 MODELS = {
     "t0": ["-t", "0", "-l", "10", "-k", "6"],
     "t1": ["-t", "1", "-l", "11", "-k", "7", "-d", "3"],
@@ -107,6 +134,11 @@ def main():
         help=f"comma-separated models to train (default: {','.join(MODELS)})",
     )
     ap.add_argument(
+        "--ragged",
+        action="store_true",
+        help="only the fixtures on sequences of different lengths",
+    )
+    ap.add_argument(
         "--explain-only",
         action="store_true",
         help="only run gkmexplain on the fixture models and FASTAs already written",
@@ -129,6 +161,9 @@ def main():
     if not (train and predict):
         sys.exit("gkmtrain/gkmpredict not found (--conda-env / --bin-dir)")
     workdir = Path(tempfile.mkdtemp(prefix="lsgkm_wgkm_"))
+    if args.ragged:
+        ragged_fixtures(train, predict, workdir)
+        return
     rng = random.Random(0)
 
     pos = [random_seq(rng, 100) for _ in range(80)]
@@ -180,6 +215,54 @@ def main():
     if explain is not None:
         run_explain(explain)
     print("wrote:", *sorted(p.name for p in FIXTURES.glob("lsgkm_wgkm_*")), sep="\n  ")
+
+
+def ragged_fixtures(train, predict, workdir):
+    """Models trained on, and scores of, sequences of different lengths."""
+    rng = random.Random(1)
+    pos = []
+    for _ in range(100):
+        s = random_seq(rng, rng.randint(60, 140))
+        a = rng.randrange(len(s) - len(MOTIF))
+        pos.append(s[:a] + MOTIF + s[a + len(MOTIF) :])
+    neg = [random_seq(rng, rng.randint(60, 140)) for _ in range(100)]
+    pos = [add_n(rng, s) if i % 5 == 0 else s for i, s in enumerate(pos)]
+    neg = [add_n(rng, s) if i % 5 == 0 else s for i, s in enumerate(neg)]
+    write_seqs(workdir / "pos.fa", pos, "p")
+    write_seqs(workdir / "neg.fa", neg, "n")
+    test = [random_seq(rng, rng.randint(30, 200)) for _ in range(24)]
+    test[:6] = [s[:10] + MOTIF + s[20:] for s in test[:6]]
+    test += [add_n(rng, s) for s in test[:6]] + ["ACGTA"]  # shorter than l: NaN
+    fa = FIXTURES / "lsgkm_ragged_test.fa"
+    write_seqs(fa, test, "t")
+    for name, opts in RAGGED_MODELS.items():
+        prefix = workdir / f"ragged_{name}"
+        run(
+            [
+                train,
+                *opts,
+                "-c",
+                "1.0",
+                str(workdir / "pos.fa"),
+                str(workdir / "neg.fa"),
+                str(prefix),
+            ]
+        )
+        model = Path(f"{prefix}.model.txt")
+        (FIXTURES / f"lsgkm_ragged_{name}.model.txt.gz").write_bytes(
+            gzip.compress(model.read_bytes(), mtime=0)
+        )
+        run(
+            [
+                predict,
+                str(fa),
+                str(model),
+                str(FIXTURES / f"lsgkm_ragged_{name}_test.pred.txt"),
+            ]
+        )
+    print(
+        "wrote:", *sorted(p.name for p in FIXTURES.glob("lsgkm_ragged_*")), sep="\n  "
+    )
 
 
 def run_explain(explain):

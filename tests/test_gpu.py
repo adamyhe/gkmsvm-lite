@@ -779,7 +779,15 @@ class TestWeightedGPU:
         by, by_rc = kernel.pack_both(self._seqs(30, length, 4))
         plan = kernel._join_plan()
         wx, wy = kernel.window_weights(bx.shape[1]), kernel.window_weights(by.shape[1])
-        ref = masked.masked_pairwise(bx, by, plan, by_rc, wx=wx, wy=wy)
+        ref = masked.masked_pairwise(
+            bx,
+            by,
+            plan,
+            by_rc,
+            wx=kernel.row_weights(bx),
+            wy=kernel.row_weights(by),
+            wy_rc=kernel.row_weights(by_rc, rc=True),
+        )
         got = masked.masked_pairwise_gpu(
             cp.asarray(bx), cp.asarray(by), plan, cp.asarray(by_rc), wx=wx, wy=wy
         )

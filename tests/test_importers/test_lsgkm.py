@@ -217,7 +217,9 @@ class TestLoadModelErrors:
         with pytest.raises(ValueError, match="Expected 5"):
             load_lsgkm_model(p)
 
-    def test_variable_length_svs(self, tmp_path):
+    def test_variable_length_svs_load_padded(self, tmp_path):
+        """SVs of different lengths load padded, with sv_lengths
+        (tests/test_variable_length.py checks their scores)."""
         p = tmp_path / "varlen.model.txt"
         p.write_text(
             textwrap.dedent("""\
@@ -234,8 +236,9 @@ class TestLoadModelErrors:
             -1.0 ACGTAC
         """)
         )
-        with pytest.raises(ValueError, match="same length"):
-            load_lsgkm_model(p)
+        model = load_lsgkm_model(p)
+        assert model.support_sequences.shape == (2, 4, 6)
+        np.testing.assert_array_equal(model.sv_lengths, [4, 6])
 
 
 def test_svs_with_other_letters_load_as_n(tmp_path):

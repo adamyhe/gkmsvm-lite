@@ -5,7 +5,9 @@ from math import comb
 import numpy as np
 from numba import njit, prange
 
-from gkmsvm.kernels.packed import PackedGkmKernel, device_of
+from gkmsvm.kernels.packed import PAD_WINDOW, PackedGkmKernel, device_of
+
+_PAD = PAD_WINDOW
 
 # ---------------------------------------------------------------------------
 # Numba-accelerated kernels
@@ -28,21 +30,52 @@ def _packed_mismatches(a, b):
     return _popcount(((x >> 1) | x) & np.uint32(0x55555555))
 
 
+@njit(cache=True)
+def _spans(packed):
+    """[R, 2] (start, end) of each row's non-PAD windows (one contiguous run:
+    first in forward rows, last in RC rows)."""
+    R, W = packed.shape
+    out = np.zeros((R, 2), dtype=np.int64)
+    for r in range(R):
+        start = 0
+        while start < W and packed[r, start] == _PAD:
+            start += 1
+        end = start
+        while end < W and packed[r, end] != _PAD:
+            end += 1
+        out[r, 0] = start
+        out[r, 1] = end
+    return out
+
+
+@njit(cache=True)
+def _counts(packed):
+    """Number of windows before the first PAD in each row (forward rows)."""
+    R, W = packed.shape
+    out = np.empty(R, dtype=np.int64)
+    for r in range(R):
+        n = 0
+        while n < W and packed[r, n] != _PAD:
+            n += 1
+        out[r] = n
+    return out
+
+
 @njit(parallel=True, cache=True, fastmath=True)
 def _fused_pairwise_packed_numba(bx, by, table, l, min_matches):
-    """Fused pairwise using packed uint32 comparison with min-matches skip."""
+    """Fused pairwise using packed uint32 comparison with min-matches skip;
+    PAD windows (rows of shorter sequences) are skipped."""
     B = bx.shape[0]
-    Wx = bx.shape[1]
     S = by.shape[0]
-    Wy = by.shape[1]
+    sx, sy = _spans(bx), _spans(by)
     result = np.empty((B, S), dtype=np.float64)
     for idx in prange(B * S):
         b = idx // S
         s = idx % S
         acc = 0.0
-        for i in range(Wx):
+        for i in range(sx[b, 0], sx[b, 1]):
             bx_val = bx[b, i]
-            for j in range(Wy):
+            for j in range(sy[s, 0], sy[s, 1]):
                 matches = l - _packed_mismatches(bx_val, by[s, j])
                 if matches >= min_matches:
                     acc += table[l - matches]
@@ -132,19 +165,22 @@ def _self_diagonal_packed_numba(bx, by, table, l):
     Both blocks are symmetric, so each unordered pair is visited once: the
     forward block as (i, j), the RC block as (i, W-1-j), since its column j is
     rc(window W-1-j). A row whose RC block isn't the reverse complement of its
-    forward one visits every RC pair.
+    forward one visits every RC pair. A padded row (a shorter sequence) is
+    its first n windows, and its RC block reversed, whose pads come last too.
     """
     B, W = bx.shape
     has_rc = by.shape[1] > W
+    counts = _counts(bx)
     result = np.empty(B, dtype=np.float64)
     for b in prange(B):
-        fwd = bx[b]
+        n = counts[b]
+        fwd = bx[b, :n]
         acc = _block_sum(fwd, fwd, True, table)
         if has_rc:
             # RC windows in forward order: rev[k] = rc(fwd[k]) when paired
-            rev = by[b, W:][::-1].copy()
+            rev = by[b, W:][::-1][:n].copy()
             paired = True
-            for k in range(W):
+            for k in range(n):
                 if rev[k] != _rc_window(fwd[k], l):
                     paired = False
                     break
@@ -599,6 +635,12 @@ class DirectGkmKernel(PackedGkmKernel):
     def raw_diag_mutants(self, bx, bx_rc, new, new_rc, diag):
         """See PackedGkmKernel.raw_diag_mutants; on CPU only pairs touching a
         changed window are visited (about 4 l W per mutant instead of W^2)."""
+        from gkmsvm.kernels.packed import is_padded
+
+        if is_padded(bx):
+            raise NotImplementedError(
+                "ISM on sequences of different lengths: docs/design/variable-length.md, stage 4"
+            )
         if device_of(bx) != "cpu":
             return super().raw_diag_mutants(bx, bx_rc, new, new_rc, diag)
         B = bx.shape[0]

@@ -8,7 +8,12 @@ from numba import njit, prange
 from gkmsvm.backend import DeviceModel, float_dtype, get_array_module, to_cpu
 from gkmsvm.kernels.direct import DirectGkmKernel
 from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
-from gkmsvm.kernels.packed import PackedGkmKernel
+from gkmsvm.kernels.packed import (
+    PAD_WINDOW,
+    PackedGkmKernel,
+    require_cpu_for_lengths,
+    is_padded,
+)
 from gkmsvm.kernels.rbf import RbfGkmKernel, RbfKernel
 from gkmsvm.kernels.weighted import (
     CenterWeightedGkmKernel,
@@ -146,6 +151,79 @@ def resolve_kernel_type(kernel_type: str | int) -> str:
     )
 
 
+# LS-GKM's MAX_SEQ_LENGTH (libsvm_gkm.h) is 2048: gkmtrain/gkmpredict read
+# at most this many bases of a sequence, with a warning
+LSGKM_MAX_LENGTH = 2047
+
+
+def _uniform_or_lengths(lengths, shape) -> np.ndarray | None:
+    """lengths as host int64 [B], or None when every row is shape[2] long."""
+    if lengths is None:
+        return None
+    lengths = np.asarray(to_cpu(lengths), dtype=np.int64).reshape(-1)
+    B, _, L = shape
+    if lengths.shape[0] != B or (lengths < 0).any() or (lengths > L).any():
+        raise ValueError(f"lengths must be {B} values in 0..{L}")
+    return None if (lengths == L).all() else lengths
+
+
+def as_batch(x, lengths=None):
+    """(x [B, 4, L_max], lengths or None) from a one-hot array (with lengths of
+    its rows when they differ) or a list of [4, L_i] arrays or DNA strings
+    (N allowed). Warns about sequences longer than LS-GKM reads."""
+    import warnings
+
+    if isinstance(x, (list, tuple)):
+        if lengths is not None:
+            raise ValueError("lengths go with a padded array, not a list")
+        if not len(x):
+            raise ValueError("no sequences")
+        if isinstance(x[0], str):
+            from gkmsvm.codec import one_hot_encode
+
+            x = [one_hot_encode(s, allow_n=True) for s in x]
+        lens = np.array([a.shape[-1] for a in x], dtype=np.int64)
+        xp = get_array_module(x[0])
+        out = xp.zeros((len(x), 4, int(lens.max())), dtype=x[0].dtype)
+        for i, a in enumerate(x):
+            out[i, :, : a.shape[-1]] = a
+        x, lengths = out, lens
+    lengths = _uniform_or_lengths(lengths, x.shape)
+    longest = int(x.shape[2] if lengths is None else lengths.max())
+    if longest > LSGKM_MAX_LENGTH:
+        warnings.warn(
+            f"sequences up to {longest} bp: LS-GKM reads only the first "
+            f"{LSGKM_MAX_LENGTH} bases of longer ones",
+            stacklevel=3,
+        )
+    return x, lengths
+
+
+def _short_rows(lengths, l):
+    """[B] bool, rows shorter than l (no windows), or None when there are none."""
+    if lengths is None:
+        return None
+    short = lengths < l
+    if not short.any():
+        return None
+    import warnings
+
+    warnings.warn(
+        f"{int(short.sum())} sequences are shorter than l = {l}: their scores are NaN",
+        stacklevel=3,
+    )
+    return short
+
+
+def _nan_rows(out, short):
+    """out with the rows in short set to NaN (on out's device)."""
+    if short is None:
+        return out
+    xp = get_array_module(out)
+    mask = xp.asarray(short)[:, None]
+    return xp.where(mask, xp.nan, out)
+
+
 class GkmSVM(DeviceModel):
     """Gapped k-mer SVM model for sequence classification.
 
@@ -166,6 +244,7 @@ class GkmSVM(DeviceModel):
         kernel_type: str | int,
         kernel_params: dict,
         *,
+        sv_lengths=None,
         sv_chunk_size: int | None = None,
         device: str = "cpu",
     ):
@@ -184,6 +263,9 @@ class GkmSVM(DeviceModel):
             )
 
         self.support_sequences = support_sequences
+        # SVs of different lengths: support_sequences is padded to the longest
+        # and sv_lengths [S] (host int64) gives each one's; None when uniform
+        self.sv_lengths = _uniform_or_lengths(sv_lengths, support_sequences.shape)
         # One-hot SVs keep the caller's dtype; coefficients are float64 (float32 on MLX)
         self.coefficients = coefficients.astype(float_dtype(coefficients))
         self.bias = bias
@@ -288,8 +370,12 @@ class GkmSVM(DeviceModel):
             base = self.kernel.base
             sv = self.support_sequences
             c["packed"] = (
-                base.pack_both(sv) if isinstance(base, PackedGkmKernel) else None
+                base.pack_both(sv, self.sv_lengths)
+                if isinstance(base, PackedGkmKernel)
+                else None
             )
+            if c["packed"] is None and self.sv_lengths is not None:
+                raise ValueError("SVs of different lengths need a packed kernel")
         return c["packed"]
 
     def _inv_norms(self, diag_x, B):
@@ -341,8 +427,9 @@ class GkmSVM(DeviceModel):
             return index.pairwise(bx)
         return self.kernel.base.raw_packed(bx, *self._sv_packed())
 
-    def _sv_scores(self, x):
-        """sum_s coef_s K(x, sv_s) [B, 1] of one-hot x (on the model's device)."""
+    def _sv_scores(self, x, lengths=None):
+        """sum_s coef_s K(x, sv_s) [B, 1] of one-hot x (on the model's device);
+        lengths: each row's length when they differ."""
         kernel = self.kernel
         base = kernel.base
         if self._sv_packed() is None:
@@ -350,7 +437,7 @@ class GkmSVM(DeviceModel):
                 axis=1, keepdims=True
             )
         xp = get_array_module(x)
-        bx, bx_rc = base.pack_both(x)
+        bx, bx_rc = base.pack_both(x, lengths)
         diag_x = base.raw_diag_packed(bx, bx_rc) if base.normalize else None
         gamma = kernel.gamma if isinstance(kernel, RbfKernel) else np.nan
         index = self._sv_index()
@@ -384,15 +471,20 @@ class GkmSVM(DeviceModel):
 
     def __call__(
         self,
-        x: np.ndarray,
+        x,
         *,
+        lengths=None,
         batch_size: int | None = None,
         verbose: bool = False,
     ) -> np.ndarray:
         """Compute SVM decision values.
 
         Args:
-            x: [B, 4, L] one-hot encoded DNA sequences.
+            x: [B, 4, L] one-hot encoded DNA sequences, or a list of [4, L_i]
+                arrays or DNA strings of any lengths.
+            lengths: [B] lengths of the rows of a padded x (sequences of
+                different lengths, all-zero past each one's end); None when
+                every row is L long.
             batch_size: Process inputs in batches of this size.  ``None``
                 means process all at once (internally in blocks that cap the
                 [batch, S] kernel values at ``_MAX_SCORE_BYTES``).  Raised to
@@ -400,8 +492,17 @@ class GkmSVM(DeviceModel):
             verbose: Show a tqdm progress bar over input batches.
 
         Returns:
-            [B, 1] uncalibrated decision values.
+            [B, 1] uncalibrated decision values; NaN for sequences shorter
+            than the window length l (with a warning), as LS-GKM gives.
         """
+        x, lengths = as_batch(x, lengths)
+        if lengths is not None or self.sv_lengths is not None:
+            require_cpu_for_lengths(
+                "cuda" if self._on_gpu else "mlx" if self._on_mlx else "cpu"
+            )
+        short = _short_rows(lengths, self.kernel.base.l)
+        if short is not None and short.all():
+            return _nan_rows(np.zeros((x.shape[0], 1)), short)
         batch_size = self._min_batch_size(batch_size)
         if batch_size is not None and x.shape[0] > batch_size:
             chunks = range(0, x.shape[0], batch_size)
@@ -417,10 +518,11 @@ class GkmSVM(DeviceModel):
             for start in chunks:
                 end = min(start + batch_size, x.shape[0])
                 batch = self._match_device(x[start:end])
-                parts.append(to_cpu(self._score_unbatched(batch)))
-            return np.concatenate(parts, axis=0)
+                lb = None if lengths is None else lengths[start:end]
+                parts.append(to_cpu(self._score_unbatched(batch, lb)))
+            return _nan_rows(np.concatenate(parts, axis=0), short)
 
-        return self._score_unbatched(self._match_device(x))
+        return _nan_rows(self._score_unbatched(self._match_device(x), lengths), short)
 
     # "auto" builds the l-mer table only for models at least this large
     _LMER_TABLE_MIN_SVS = 500
@@ -461,7 +563,7 @@ class GkmSVM(DeviceModel):
                 self._lmer_table = False
                 return None
             sv = to_cpu(self.support_sequences).astype(np.float64)
-            fwd, rc = kernel.pack_both(sv)
+            fwd, rc = kernel.pack_both(sv, self.sv_lengths)
             coef = to_cpu(self.coefficients).astype(np.float64)
             if kernel.normalize:
                 diag = to_cpu(self._sv_diag()).astype(np.float64)
@@ -495,30 +597,43 @@ class GkmSVM(DeviceModel):
             self._lmer_table_dev = xp.asarray(table)
         return self._lmer_table_dev
 
-    def _score_lmer_table(self, x, table):
+    def _score_lmer_table(self, x, table, lengths=None):
         """f(x) = sum of table weights over x's windows (times their window
         weights) / sqrt(K(x, x)) + b."""
         xp = get_array_module(x)
         kernel = self.kernel
-        packed, packed_rc = kernel.pack_both(x)
-        wx = kernel.window_weights(packed.shape[1])
-        if wx is None:
-            raw = table[packed].sum(axis=1)
+        packed, packed_rc = kernel.pack_both(x, lengths)
+        wx = kernel.row_weights(packed)  # 0 on PAD
+        pad = None
+        if lengths is not None and is_padded(packed):
+            pad = packed == PAD_WINDOW
+            vals = table[xp.where(pad, 0, packed)]
         else:
-            raw = (table[packed] * xp.asarray(wx)).sum(axis=1)
+            vals = table[packed]
+        if wx is not None:
+            raw = (vals * xp.asarray(wx)).sum(axis=1)
+        elif pad is not None:
+            raw = xp.where(pad, 0.0, vals).sum(axis=1)
+        else:
+            raw = vals.sum(axis=1)
         if kernel.normalize:
             diag_x = kernel.raw_diag_packed(packed, packed_rc).astype(raw.dtype)
             raw = raw / xp.sqrt(xp.clip(diag_x, 1e-10, None))
         return raw[:, None] + self.bias
 
-    def _score_unbatched(self, x: np.ndarray) -> np.ndarray:
+    def _score_unbatched(self, x: np.ndarray, lengths=None) -> np.ndarray:
         """Score one batch on the model's device."""
         xp = get_array_module(x)
         table = self._lmer_table_for(xp)
         if table is not None:
-            return self._score_lmer_table(x, table)
+            return self._score_lmer_table(x, table, lengths)
         rows = max(1, self._MAX_SCORE_BYTES // (8 * self.num_support_vectors))
-        parts = [self._sv_scores(x[s : s + rows]) for s in range(0, x.shape[0], rows)]
+        parts = [
+            self._sv_scores(
+                x[s : s + rows], None if lengths is None else lengths[s : s + rows]
+            )
+            for s in range(0, x.shape[0], rows)
+        ]
         scores = parts[0] if len(parts) == 1 else xp.concatenate(parts, axis=0)
         return scores + self.bias
 
