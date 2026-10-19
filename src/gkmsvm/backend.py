@@ -12,6 +12,7 @@ Install extras for GPU support::
 
 from __future__ import annotations
 
+import functools
 from typing import Any
 
 import numpy as np
@@ -23,6 +24,19 @@ try:
 except ImportError:
     cp = None  # type: ignore[assignment]
     HAS_CUPY = False
+
+
+@functools.lru_cache(maxsize=None)
+def cuda_available() -> bool:
+    """Whether CuPy has a CUDA GPU to run on. HAS_CUPY only says CuPy imports,
+    which it also does on machines without a GPU (a cluster's CPU nodes can carry
+    an NVIDIA driver library, often an old one), so ``"auto"`` checks this."""
+    if not HAS_CUPY:
+        return False
+    try:
+        return cp.cuda.runtime.getDeviceCount() > 0
+    except Exception:  # no driver, a driver too old for CuPy's runtime, no device
+        return False
 
 try:
     import mlx.core as mx
@@ -137,7 +151,7 @@ class DeviceModel:
         elif device == "mlx":
             self.mlx()
         elif device == "auto":
-            if HAS_CUPY:
+            if cuda_available():
                 self.cuda()
             elif HAS_MLX:
                 self.mlx()

@@ -747,9 +747,9 @@ def main():
         parser.error(f"unknown parameter set(s): {', '.join(unknown)}")
 
     if args.device == "auto":
-        from gkmsvm.backend import HAS_CUPY, HAS_MLX
+        from gkmsvm.backend import HAS_MLX, cuda_available
 
-        if HAS_CUPY:
+        if cuda_available():
             args.device = "cuda"
         elif HAS_MLX:
             args.device = "mlx"
