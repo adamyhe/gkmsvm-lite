@@ -312,6 +312,40 @@ class TestGPUGkmExplain:
             cp.asnumpy(gpu_result), cpu_result, rtol=1e-9, atol=1e-12,
         )
 
+    @pytest.mark.parametrize("mode", ["hypothetical", "perturbation"])
+    @pytest.mark.parametrize("kernel_type", ["gkm_esttrunc", "gkmrbf"])
+    def test_lmer_path_matches_cpu(self, kernel_type, mode):
+        """The CUDA l-mer path, over several 128-window tiles and mask slices."""
+        from gkmsvm.explain import gkmexplain
+
+        model = _make_model(40, 200, kernel_type,
+                            {"L": 11, "k": 7, "d": 3, "gamma": 2.0}, seed=4)
+        x = np.stack([one_hot_encode(s) for s in _make_seqs(3, 300, seed=38)])
+        cpu_result = gkmexplain(model, x, mode=mode)
+
+        model.cuda()
+        gpu_result = gkmexplain(model, cp.asarray(x), mode=mode, batch_size=2)
+
+        np.testing.assert_allclose(
+            cp.asnumpy(gpu_result), cpu_result, rtol=1e-9, atol=1e-12,
+        )
+
+    def test_lmer_path_matches_fused(self, monkeypatch):
+        """-t 0 at dmax 5 (143,980 neighbors): l-mer path == per-SV kernel."""
+        from gkmsvm import explain
+
+        model = _make_model(20, 100, "gkm_cnt", {"L": 11, "k": 7}, seed=5)
+        model.cuda()
+        x = cp.asarray(np.stack([one_hot_encode(s) for s in _make_seqs(2, 150, seed=39)]))
+        monkeypatch.setattr(explain, "_EXPLAIN_SV_WINDOWS_PER_NEIGHBOR", 0.01)
+        lmer = explain.gkmexplain(model, x, mode="hypothetical")
+        model.use_lmer_index = False
+        fused = explain.gkmexplain(model, x, mode="hypothetical")
+
+        np.testing.assert_allclose(
+            cp.asnumpy(lmer), cp.asnumpy(fused), rtol=1e-9, atol=1e-12,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Kernel pairwise (lower-level)

@@ -124,8 +124,9 @@ def _self_diagonal_packed_numba(bx, by, table, l, by_pattern=False):
 
     Both blocks are symmetric, so each unordered pair is visited once: the
     forward block as (i, j), the RC block as (i, W-1-j), since its column j is
-    rc(window W-1-j). A row where that pairing fails (N positions pack as A on
-    both strands) visits every RC pair.
+    rc(window W-1-j). A row where that pairing fails (RC windows packed from the
+    one-hot RC, where N is A on both strands: the weighted kernels' N rows)
+    visits every RC pair.
     """
     B, W = bx.shape
     has_rc = by.shape[1] > W

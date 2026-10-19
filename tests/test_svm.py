@@ -228,3 +228,64 @@ class TestToDeltaSVM:
         )
         with pytest.raises(ValueError, match="l <= 14"):
             model.to_deltasvm()
+
+
+class TestNPacking:
+    """N reads as A on the forward strand and T on the reverse one, as in lsgkm
+    (which encodes N as A before taking the reverse complement)."""
+
+    @staticmethod
+    def _seqs_with_n(n, length, seed):
+        rng = random.Random(seed)
+        seqs = []
+        for _ in range(n):
+            s = [rng.choice("ACGT") for _ in range(length)]
+            a = rng.randrange(length - 8)
+            s[a:a + 8] = "N" * 8
+            seqs.append("".join(s))
+        return seqs
+
+    @pytest.mark.parametrize("kernel_type", ["gkm_cnt", "gkm_esttrunc", "gkmrbf"])
+    def test_rc_windows_read_n_as_t(self, kernel_type):
+        from gkmsvm.codec import reverse_complement
+
+        model = GkmSVM(np.stack([one_hot_encode("ACGTACGTACGT")]), np.ones(1), 0.0,
+                       kernel_type, {"L": 6, "k": 4, "d": 2, "gamma": 1.0})
+        base = model.kernel.base
+        seqs = self._seqs_with_n(5, 40, seed=0)
+        x = np.stack([one_hot_encode(s, allow_n=True) for s in seqs])
+        as_a = np.stack([one_hot_encode(s.replace("N", "A")) for s in seqs])
+        fwd, rc = base.pack_both(x)
+        np.testing.assert_array_equal(fwd, base.pack(as_a))
+        np.testing.assert_array_equal(rc, base.pack(reverse_complement(as_a)))
+
+    def test_scoring_paths_agree_with_n_svs(self):
+        """The l-mer table (which relies on the RC block being the reverse
+        complement), the l-mer index, the masked join and brute force agree for
+        SVs with N, and attributions sum to score - bias."""
+        from gkmsvm.explain import gkmexplain
+
+        rng = np.random.default_rng(0)
+        svs = np.stack([one_hot_encode(s, allow_n=True)
+                        for s in self._seqs_with_n(40, 50, seed=1)])
+        model = GkmSVM(svs, rng.normal(size=40), 0.3, "gkm_esttrunc",
+                       {"L": 8, "k": 5, "d": 2})
+        x = np.stack([one_hot_encode(s) for s in TestNPacking._acgt(20, 50, seed=2)])
+        model.use_lmer_table = True
+        table = model(x)
+        model.use_lmer_table = False
+        index = model(x)
+        model.use_lmer_index = False
+        masked = model(x)
+        model.kernel.use_masked = False
+        model.clear_caches()
+        brute = model(x)
+        for other in (index, masked, brute):
+            np.testing.assert_allclose(table, other, rtol=1e-10, atol=1e-12)
+        imp = gkmexplain(model, x, mode="importance").sum(axis=(1, 2))
+        np.testing.assert_allclose(imp, brute.ravel() - 0.3, rtol=1e-10, atol=1e-12)
+
+    @staticmethod
+    def _acgt(n, length, seed):
+        rng = random.Random(seed)
+        return ["".join(rng.choice("ACGT") for _ in range(length)) for _ in range(n)]
