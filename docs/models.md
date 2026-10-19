@@ -176,7 +176,7 @@ All six kernel types are supported for both training and inference:
 
 | Flag | Alias | Use case |
 |---|---|---|
-| `-t 0` | `direct` | Exact k-mer counting. Best for short sequences or small k. |
+| `-t 0` | `direct` | Gapped k-mer counting over window pairs within `d` mismatches, as in LS-GKM. Best for short sequences or small k. |
 | `-t 2` | `estimated` | Default. Truncated estimated kernel, fastest for large l. |
 | `-t 1` | `estimated_full` | Like estimated but without truncation. |
 | `-t 3` | `rbf` | RBF transform on estimated kernel. Better for some tasks. |

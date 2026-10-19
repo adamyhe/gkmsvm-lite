@@ -74,7 +74,7 @@ Accepts the same kernel and device options as `train`. SVR uses the precomputed 
 
 ## explain
 
-Compute GkmExplain hypothetical attribution scores (`-t 0/1/2` models). Outputs two `.npz` files directly usable with [TF-MoDISco](https://github.com/jmschrei/tfmodisco-lite).
+Compute GkmExplain hypothetical attribution scores (any kernel type). Outputs two `.npz` files directly usable with [TF-MoDISco](https://github.com/jmschrei/tfmodisco-lite).
 
 ```bash
 gkmsvm explain -m model.npz -i sequences.fa -o attr.npz -s seqs.npz --device cuda

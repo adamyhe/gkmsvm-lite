@@ -241,9 +241,7 @@ def _move_to_device(X: np.ndarray, device: str, verbose: bool) -> np.ndarray:
 def _build_kernel(kernel_type, l, k, d, gamma, M, H, include_rc):
     """Resolve kernel type, build params dict, instantiate kernel."""
     kernel_type = resolve_kernel_type(kernel_type)
-    kernel_params = {"L": l, "k": k, "include_rc": include_rc}
-    if kernel_type != "gkm_cnt":
-        kernel_params["d"] = d
+    kernel_params = {"L": l, "k": k, "d": d, "include_rc": include_rc}
     if kernel_type in ("gkmrbf", "wgkmrbf"):
         kernel_params["gamma"] = gamma
     if kernel_type in ("wgkm", "wgkmrbf"):

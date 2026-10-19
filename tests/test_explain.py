@@ -580,3 +580,112 @@ def test_explain_table_auto_and_caching():
     rbf.use_explain_table = True
     gkmexplain(rbf, x, mode="hypothetical")
     assert rbf._explain_tables == {}
+
+
+_FIXTURES = __import__("pathlib").Path(__file__).parent / "fixtures"
+# (model, test FASTA, gkmexplain output prefix): -t 0 to -t 5, with
+# N stretches and odd/even window counts (benchmarks/dev/lsgkm_wgkm_fixtures.py)
+_LSGKM_EXPLAIN_SETS = {
+    "t2": ("lsgkm_mode5_est.model.txt.gz", "lsgkm_mode5_test51.fa", "lsgkm_mode5_est"),
+    "t3": ("lsgkm_mode5_rbf.model.txt.gz", "lsgkm_mode5_test51.fa", "lsgkm_mode5_rbf"),
+    **{f"{t}_{n}": (f"lsgkm_mode5_{kind}.model.txt.gz", f"lsgkm_wgkm_test{n}.fa",
+                    f"lsgkm_mode5_{kind}_test{n}")
+       for t, kind in (("t2", "est"), ("t3", "rbf")) for n in (100, 85)},
+    **{f"{t}_{n}": (f"lsgkm_wgkm_{t}.model.txt.gz", f"lsgkm_wgkm_test{n}.fa",
+                    f"lsgkm_wgkm_{t}_test{n}")
+       for t in ("t0", "t1", "t4", "t5") for n in (100, 85)},
+}
+
+
+def _read_lsgkm_explain(path):
+    """gkmexplain output: name, score, then A,C,G,T per position split by ';'."""
+    import gzip
+
+    with gzip.open(path, "rt") as f:
+        rows = [line.rstrip("\n").split("\t") for line in f]
+    return np.stack([np.array([[float(v) for v in pos.split(",")] for pos in r[2].split(";")]).T
+                     for r in rows])
+
+
+@pytest.mark.parametrize("name", _LSGKM_EXPLAIN_SETS)
+@pytest.mark.parametrize("lsgkm_mode,mode", [(0, "importance"), (1, "hypothetical"),
+                                             (4, "perturbation")])
+def test_matches_lsgkm_gkmexplain(name, lsgkm_mode, mode):
+    """Attributions equal the kundajelab/lsgkm fork's gkmexplain. Perturbation is
+    its mode 4, over every pair a substitution changes (mode 3 leaves out pairs
+    with d + 1 mismatches); importance credits N to A, which N packs as."""
+    from gkmsvm.fasta import read_fasta
+    from gkmsvm.importers.lsgkm import load_lsgkm_model
+
+    model_file, fasta, prefix = _LSGKM_EXPLAIN_SETS[name]
+    oracle = _FIXTURES / f"{prefix}.explain{lsgkm_mode}.txt.gz"
+    if not oracle.exists():
+        pytest.skip("gkmexplain fixtures not generated")
+    model = load_lsgkm_model(_FIXTURES / model_file)
+    x = np.stack([one_hot_encode(s, allow_n=True, dtype=np.float64)
+                  for _, s in read_fasta(str(_FIXTURES / fasta))])
+    expected = _read_lsgkm_explain(oracle)
+    for table, index in [(True, True), (False, True), (False, False)]:
+        model.use_explain_table, model.use_lmer_index = table, index
+        model.clear_caches()
+        # gkmexplain prints 6 significant digits
+        np.testing.assert_allclose(gkmexplain(model, x, mode=mode), expected,
+                                   rtol=2e-5, atol=5e-6 * np.abs(expected).max(),
+                                   err_msg=f"{table=} {index=}")
+
+
+@pytest.mark.parametrize("name", ["t0_85", "t1_85", "t2_85", "t3_85", "t4_85", "t5_85"])
+@pytest.mark.parametrize("path", ["index", "join", "brute"])
+def test_matches_lsgkm_mode5_fixture_models(name, path):
+    """Mutation impact equals gkmexplain -m 5 through the l-mer index, the
+    masked join and the brute-force kernel."""
+    from gkmsvm.explain import mutation_impact
+    from gkmsvm.fasta import read_fasta
+    from gkmsvm.importers.lsgkm import load_lsgkm_model
+
+    model_file, fasta, prefix = _LSGKM_EXPLAIN_SETS[name]
+    oracle = _FIXTURES / f"{prefix}.explain5.txt.gz"
+    if not oracle.exists():
+        pytest.skip("gkmexplain fixtures not generated")
+    model = load_lsgkm_model(_FIXTURES / model_file)
+    model.use_lmer_index = path == "index"
+    model.kernel.base.use_masked = path != "brute"
+    seqs = [s for _, s in read_fasta(str(_FIXTURES / fasta))]
+    c = len(seqs[0]) // 2
+    ref = [one_hot_encode(s, allow_n=True, dtype=np.float64) for s in seqs for _ in "ACGT"]
+    alt = [one_hot_encode(s[:c] + b + s[c + 1:], allow_n=True, dtype=np.float64)
+           for s in seqs for b in "ACGT"]
+    got = mutation_impact(model, np.stack(ref), np.stack(alt), batch_size=16).reshape(-1, 4)
+    assert (model._sv_index() is not None) == (path == "index")
+    expected = _read_lsgkm_explain(oracle)[:, :, 0]
+    np.testing.assert_allclose(got, expected, rtol=2e-5, atol=5e-6 * np.abs(expected).max())
+
+
+def test_importance_credits_n_to_a():
+    """N packs as A, so its importance goes to A and the total is score - bias."""
+    model = _make_model(20, 30, "gkm_esttrunc", {"L": 6, "k": 4, "d": 2})
+    s = list(_make_seqs(1, 30, seed=3)[0])
+    s[10:14] = "NNNN"
+    x = one_hot_encode("".join(s), allow_n=True)[None]
+    imp = gkmexplain(model, x, mode="importance")
+    assert np.abs(imp[0, 0, 10:14]).sum() > 0 and np.all(imp[0, 1:, 10:14] == 0)
+    np.testing.assert_allclose(imp.sum(), model(x)[0, 0] - model.bias, rtol=1e-9)
+
+
+@pytest.mark.parametrize("name", ["t0_100", "t0_85", "t1_100", "t1_85"])
+def test_fixture_models_match_gkmpredict(name):
+    """The -t 0/-t 1 fixture models' scores equal gkmpredict's."""
+    from gkmsvm.fasta import read_fasta
+    from gkmsvm.importers.lsgkm import load_lsgkm_model
+
+    model_file, fasta, prefix = _LSGKM_EXPLAIN_SETS[name]
+    pred = _FIXTURES / f"{prefix}.pred.txt"
+    if not pred.exists():
+        pytest.skip("gkmpredict fixtures not generated")
+    model = load_lsgkm_model(_FIXTURES / model_file)
+    records = read_fasta(str(_FIXTURES / fasta))
+    x = np.stack([one_hot_encode(s, allow_n=True, dtype=np.float64) for _, s in records])
+    with open(pred) as f:
+        expected = dict(line.split()[:2] for line in f)
+    expected = np.array([float(expected[name]) for name, _ in records])
+    np.testing.assert_allclose(model(x).ravel(), expected, rtol=2e-5, atol=1e-5)

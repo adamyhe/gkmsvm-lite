@@ -199,3 +199,17 @@ def test_self_kernel_all_pairs(l, k, d, include_rc):
     mism = np.unpackbits(bits.view(np.uint8), axis=-1).reshape(*bits.shape, 32).sum(-1)
     expected = kernel._mismatch_table[mism].sum(axis=(1, 2))
     np.testing.assert_allclose(kernel.raw_diag_packed(bx, brc), expected, rtol=1e-13)
+
+
+def test_d_truncates_like_lsgkm():
+    """d drops pairs with more than d mismatches; without d every pair counts
+    (-t 0 models saved before d applied to -t 0 keep their kernel)."""
+    from gkmsvm.svm import GkmSVM
+
+    full = DirectGkmKernel(11, 7)
+    trunc = DirectGkmKernel(11, 7, d=3)
+    np.testing.assert_array_equal(full._mismatch_table[:5], [330, 120, 36, 8, 1])
+    np.testing.assert_array_equal(trunc._mismatch_table[:5], [330, 120, 36, 8, 0])
+    x = one_hot_encode("ACGT" * 8)[None]
+    assert GkmSVM(x, np.ones(1), 0.0, "gkm_cnt", {"L": 11, "k": 7}).kernel.d is None
+    assert GkmSVM(x, np.ones(1), 0.0, "gkm_cnt", {"L": 11, "k": 7, "d": 3}).kernel.d == 3

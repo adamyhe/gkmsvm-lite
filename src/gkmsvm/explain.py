@@ -240,7 +240,7 @@ void explain_lmer(
 
 _cupy_explain_lmer_kernel = None
 # Past lmer_index.MAX_NEIGHBORS, the l-mer path is taken when the SVs have at
-# least this many windows per neighbor: -t 0 l=11 k=7 (143,980 neighbors, 300 bp
+# least this many windows per neighbor: -t 0 l=11 k=7 without d (143,980 neighbors, 300 bp
 # SVs) breaks even near 1,000 SVs on CPU (Apple M4, Xeon) and 2,000 on a Titan
 # Xp, and is 3.6-4.7x faster at 10,000 (benchmarks/dev/explain_lmer_gpu.py)
 _EXPLAIN_SV_WINDOWS_PER_NEIGHBOR = 6
@@ -554,9 +554,11 @@ def gkmexplain(
                 bases at every position.  Use for TF-MoDISco (both
                 projected and hypothetical contribution inputs).
             ``"perturbation"`` (2) — discrete kernel-value delta for
-                each possible single-base mutation (lsgkm C mode 3,
-                ``perturbation_eff=1``).  Use for variant effect
-                prediction via ``score_variants(method="gkmexplain")``.
+                each possible single-base mutation (lsgkm C mode 4:
+                ``perturbation_eff=1`` over every pair it changes).  Use
+                for per-position mutation maps; variant scores
+                (``score_variants(method="gkmexplain")``) come from
+                ``mutation_impact()``.
         batch_size: Process inputs in batches of this size (default 50).
         verbose: Show tqdm progress bar over input batches.
 
@@ -603,7 +605,7 @@ def gkmexplain(
             model, x, mode="hypothetical",
             batch_size=batch_size, verbose=verbose,
         )
-        return hyp * model._match_device(x)
+        return hyp * _n_as_a(model._match_device(x))
 
     is_perturbation = resolved == "perturbation"
 
@@ -622,7 +624,8 @@ def gkmexplain(
     xp = get_array_module(x)
     B, _, seqlen = x.shape
     l = base.l
-    d = getattr(base, "d", l)
+    d = getattr(base, "d", None)
+    d = l if d is None else d  # -t 0 without d counts every pair
     if is_perturbation:
         table_a, table_b = _build_perturbation_tables(base._mismatch_table, l, d)
     else:
@@ -686,6 +689,15 @@ def gkmexplain(
                              min_matches, is_perturbation, wx, wy)
 
     return result
+
+
+def _n_as_a(x):
+    """One-hot x with N (all-zero) positions set to A: N packs as A, so its
+    windows score as A and its importance goes there, as in lsgkm (and the
+    importance then sums to score - bias)."""
+    xp = get_array_module(x)
+    n = (x.sum(axis=1, keepdims=True) == 0).astype(x.dtype)
+    return xp.concatenate([x[:, :1] + n, x[:, 1:]], axis=1)
 
 
 def _window_wts(base, W):

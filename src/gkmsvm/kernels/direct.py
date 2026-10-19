@@ -499,14 +499,22 @@ class DirectGkmKernel(PackedGkmKernel):
     For window length l and k informative positions, two windows differing
     in m positions share C(l-m, k) gapped k-mer features. The kernel sums
     these shared features over all pairs of windows from the two sequences.
+
+    d: pairs with more than d mismatches count 0, as in LS-GKM, whose
+    search visits only pairs within d mismatches for every kernel type
+    (default 3, which drops m = 4 at l = 11, k = 7). None counts every
+    pair (the full gapped k-mer count).
     """
 
     def __init__(
-        self, l: int, k: int, *, normalize: bool = True, include_rc: bool = True
+        self, l: int, k: int, *, d: int | None = None, normalize: bool = True,
+        include_rc: bool = True,
     ):
         super().__init__(l, k, normalize=normalize, include_rc=include_rc)
+        self.d = d
         self._mismatch_table = np.array(
-            [comb(l - m, k) if l - m >= k else 0 for m in range(l + 1)],
+            [comb(l - m, k) if l - m >= k and (d is None or m <= d) else 0
+             for m in range(l + 1)],
             dtype=np.float64,
         )
         self._min_matches = self._get_min_matches()

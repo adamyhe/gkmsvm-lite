@@ -8,7 +8,7 @@ Ship an LS-GKM model importer and predictor before building training. Match `gkm
 
 ## Kernel modes are distinct
 
-`-t 0` (direct gapped k-mer / `gkm_cnt`) and `-t 2` (truncated estimated l-mer / `gkm_esttrunc`, the LS-GKM default) use different math. The binomial coefficient table `C(l-m, k)` for `-t 0` does NOT apply to `-t 2`. The `-t 2` weight table is ported from `calc_gkm_kernel_lmerest_wt` in `libsvm_gkm.c`.
+`-t 0` (direct gapped k-mer / `gkm_cnt`) and `-t 2` (truncated estimated l-mer / `gkm_esttrunc`, the LS-GKM default) use different math. The binomial coefficient table `C(l-m, k)` for `-t 0` does NOT apply to `-t 2`. As in LS-GKM, `-t 0` counts only window pairs within `d` mismatches (default 3). The `-t 2` weight table is ported from `calc_gkm_kernel_lmerest_wt` in `libsvm_gkm.c`.
 
 `-t 1` (`gkm_estfull`) is supported via `EstTruncGkmKernel(truncate=False)`.
 

@@ -41,7 +41,7 @@ def _normalized_dot(raw, diag_x, diag_sv, norm, coef, gamma):
     return out
 
 # Kernel modes:
-#   -t 0  gkm_cnt       / direct          Exact gapped k-mer count
+#   -t 0  gkm_cnt       / direct          Gapped k-mer count (pairs within d mismatches)
 #   -t 1  gkm_estfull   / estimated_full  Estimated l-mer kernel, full
 #   -t 2  gkm_esttrunc  / estimated       Estimated l-mer kernel, truncated (default)
 #   -t 3  gkmrbf        / rbf             RBF on estimated kernel
@@ -49,8 +49,10 @@ def _normalized_dot(raw, diag_x, diag_sv, norm, coef, gamma):
 #   -t 5  wgkmrbf       / weighted_rbf    Center-weighted RBF
 
 KERNEL_BUILDERS = {
+    # No d: every pair counts (models saved before d applied to -t 0)
     "gkm_cnt": lambda p: DirectGkmKernel(
-        l=p["L"], k=p["k"], normalize=True, include_rc=p.get("include_rc", True)
+        l=p["L"], k=p["k"], d=p.get("d"), normalize=True,
+        include_rc=p.get("include_rc", True)
     ),
     "gkm_esttrunc": lambda p: EstTruncGkmKernel(
         l=p["L"],
