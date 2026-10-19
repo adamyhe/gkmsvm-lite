@@ -109,6 +109,7 @@ src/gkmsvm/
 - `score(ALT) - score(REF)` differs from deltaSVM's k-mer-weight linear approximation.
 - Original gkmSVM (`.gkmmodel`) uses opposite sign convention for bias vs LS-GKM. Use `load_classic_model()` not `load_lsgkm_model()`.
 - `-t 4`/`-t 5` (wgkm/wgkmrbf) are the `-t 2` table (with `d`) times integer window weights from the window's distance to the sequence center: `min(M, floor(M 2^(-|W/2 - i|/H) + 1))` (`weighted._window_weights`, LS-GKM's `gkmkernel_new_object`; M 1-255 and H default to LS-GKM's 50). Not per-position weights inside the l-mer (an earlier version did that and disagreed with gkmpredict). An RC window carries its forward window's weight, so with an even window count the kernel isn't exactly RC-invariant. Oracle: `tests/fixtures/lsgkm_wgkm_*` (`benchmarks/dev/lsgkm_wgkm_fixtures.py`).
+- Packed kernels take l <= 15 (`packed.MAX_L`): a uint32 holds 16 bases, and at l = 16 the all-T l-mer equals `PAD_WINDOW`. LS-GKM allows l <= 12.
 - LS-GKM C is GPL v3 — cannot wrap or link against it (gkmsvm-lite is MIT).
 - MLX computes in float32 (Metal has no float64), so its scores differ from CPU at the float32 level; MLX Gram tiles are normalized on the host in float64.
 - Beer lab `deltasvm.pl` drops the first weight-file line as a bias header; with gkmpredict output on `nrkmers.py` l-mers that gives AAAAAAAAAA/TTTTTTTTTT raw score 0 (bias included, so -bias in a `to_deltasvm` table). Published deltaSVM scores from that script (e.g. the GkmExplain paper) include this; `dsqtl_auprc.deltasvm_pl()` reproduces it.

@@ -32,8 +32,9 @@ _MASKED_MIN_ROWS = 16
 # (against itself it would score as a full match, and masked to an l-mer's
 # bits it equals the all-T l-mer).
 PAD_WINDOW = np.uint32(0xFFFFFFFF)
-# PAD_WINDOW is no l-mer only below 16 bases
-MAX_PADDED_L = 15
+# Longest l: a uint32 packs 16 bases, and at 16 the all-T l-mer is PAD_WINDOW
+# (LS-GKM allows l <= 12)
+MAX_L = 15
 
 
 def _rc_windows(packed, l):
@@ -93,6 +94,11 @@ class PackedGkmKernel(GkmKernel):
     # brute-force loop (e.g. as a test oracle).
     use_masked = True
 
+    def __init__(self, l: int, k: int, **kwargs):
+        if l > MAX_L:
+            raise ValueError(f"l must be <= {MAX_L}, got {l}")
+        super().__init__(l, k, **kwargs)
+
     def _join_plan(self):
         """Mask plan for kernels/masked.py, or None."""
 
@@ -151,10 +157,6 @@ class PackedGkmKernel(GkmKernel):
             if lengths.shape != (B,) or (lengths > L).any() or (lengths < 0).any():
                 raise ValueError(f"lengths must be [{B}] values in 0..{L}")
             if (lengths < L).any():
-                if self.l > MAX_PADDED_L:
-                    raise ValueError(
-                        f"sequences of different lengths need l <= {MAX_PADDED_L}"
-                    )
                 n = xp.asarray(np.clip(lengths - self.l + 1, 0, None))
                 past = xp.arange(W)[None, :] >= n[:, None]
                 packed = xp.where(past, PAD_WINDOW, packed).astype(xp.uint32)
