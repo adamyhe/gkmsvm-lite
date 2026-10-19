@@ -14,7 +14,7 @@ The main pipeline works on **fixed-length windows**, as the ENCODE gkm-SVM and D
 
 - Importing and scoring LS-GKM models whose SVs differ in length works by default (it can't be avoided: the SVs are the model).
 - Mixed-length queries and training are opt-in: `--variable-length` in the CLI, `lengths=` or a list of sequences in Python.
-- Priorities follow from this. CPU kernels for padded SVs and queries, the importers and serialization come first; GkmExplain and ISM on models with mixed-length SVs (queries still fixed) next. The CUDA/Metal kernels for padded input followed. Mixed-length queries for ISM/GkmExplain and mixed-length training come last, as demand shows.
+- Priorities follow from this. CPU kernels for padded SVs and queries, the importers and serialization come first; GkmExplain and ISM on models with mixed-length SVs (queries still fixed) next. The CUDA/Metal kernels for padded input followed, then mixed-length queries for ISM/GkmExplain and mixed-length training.
 
 ## Problem (compatibility)
 
@@ -114,6 +114,6 @@ Using the Beer-lab and kundajelab builds, as for the existing fixtures (`benchma
 3. **Fixed-length pipeline:** `extract_loci` with summits, `center_crop`, `--bed`/`--genome`/`--length`/`--variable-length` in the CLI, `length` in training.
 4. **Interpretation with mixed-length SVs:** ISM, GkmExplain (all paths) and mutation impact for imported models, queries fixed; gkmexplain fixtures. Done: they match the kundajelab fork's gkmexplain on gkmtrain-built mixed-length models.
 5. **CUDA and Metal:** the brute-force, self-kernel, masked-join (index build and join) and GkmExplain kernels skip PAD; weighted joins, l-mer index queries and GkmExplain take per-row weights. Every path on padded input equals the CPU (`test_padded_kernels_on_device`, `test_mixed_lengths_on_device`).
-6. **Later, as needed:** mixed-length queries for ISM/GkmExplain, mixed-length training (Gram, SMO, Nyström).
+6. **Mixed-length queries and training:** ISM, GkmExplain, mutation impact and variant scores (indels allowed), and DeltaSVM, on queries of different lengths; `train_gkmsvm`/`train_gkmsvr` (Gram, SMO columns, Nyström) on them. Done: trained models have gkmtrain's support vectors on its mixed-length training set, and attributions match the kundajelab fork's gkmexplain (modes 0/1/4/5) on 31-151 bp queries for every fixture model. Packed kernels now take l <= 15, since at l = 16 the all-T l-mer is PAD.
 
 Each stage is one commit on one branch.

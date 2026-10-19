@@ -213,22 +213,41 @@ def _block_delta(f, nf, a_s, a_e, c, nc, c_s, c_e, table):
 def _mutant_diag_numba(fwd, rc, new, new_rc, diag, table, l):
     """K_raw(mutant, mutant) [4, L, B]: the reference's plus the pairs touching a
     changed window (see PackedGkmKernel.raw_diag_mutants; rc has 0 columns
-    without RC)."""
+    without RC). A padded row is its first n windows (its RC row's last n);
+    a position past them changes nothing."""
     B, W = fwd.shape
     L = new.shape[1]
     has_rc = rc.shape[1] > 0
+    counts = _counts(fwd)
     out = np.empty((4, L, B))
     for item in prange(L * B):
         p, b = item // B, item % B
-        a_s, a_e = max(0, p - l + 1), min(p + 1, W)
+        n = counts[b]
+        a_s, a_e = max(0, p - l + 1), min(p + 1, n)
+        if a_s >= a_e:
+            for v in range(4):
+                out[v, p, b] = diag[b]
+            continue
+        f = fwd[b, :n]
+        # RC windows r_s..r_e change; the row's own are W-n.. (new_rc from r_s)
         q = L - 1 - p
         r_s, r_e = max(0, q - l + 1), min(q + 1, W)
+        o = W - n
+        c_s = max(r_s, o)
         for v in range(4):
             nf = new[v, p, b]
-            d = _block_delta(fwd[b], nf, a_s, a_e, fwd[b], nf, a_s, a_e, table)
+            d = _block_delta(f, nf, a_s, a_e, f, nf, a_s, a_e, table)
             if has_rc:
                 d += _block_delta(
-                    fwd[b], nf, a_s, a_e, rc[b], new_rc[v, p, b], r_s, r_e, table
+                    f,
+                    nf,
+                    a_s,
+                    a_e,
+                    rc[b, o:],
+                    new_rc[v, p, b, c_s - r_s :],
+                    c_s - o,
+                    r_e - o,
+                    table,
                 )
             out[v, p, b] = diag[b] + d
     return out
@@ -650,12 +669,6 @@ class DirectGkmKernel(PackedGkmKernel):
     def raw_diag_mutants(self, bx, bx_rc, new, new_rc, diag):
         """See PackedGkmKernel.raw_diag_mutants; on CPU only pairs touching a
         changed window are visited (about 4 l W per mutant instead of W^2)."""
-        from gkmsvm.kernels.packed import is_padded
-
-        if is_padded(bx):
-            raise NotImplementedError(
-                "ISM on sequences of different lengths: docs/design/variable-length.md, stage 6"
-            )
         if device_of(bx) != "cpu":
             return super().raw_diag_mutants(bx, bx_rc, new, new_rc, diag)
         B = bx.shape[0]

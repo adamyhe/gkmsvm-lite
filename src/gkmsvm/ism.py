@@ -14,13 +14,14 @@ import numpy as np
 from gkmsvm.backend import float_dtype, get_array_module, is_mlx, to_cpu
 from gkmsvm.kernels.packed import PAD_WINDOW
 from gkmsvm.kernels.rbf import RbfKernel
-from gkmsvm.svm import GkmSVM
+from gkmsvm.svm import GkmSVM, _per_position, _short_rows, as_batch
 
 
 def ism(
     model: GkmSVM,
-    x: np.ndarray,
+    x,
     *,
+    lengths=None,
     batch_size: int | None = None,
     verbose: bool = False,
 ) -> np.ndarray:
@@ -28,17 +29,26 @@ def ism(
 
     Args:
         model: A GkmSVM model.
-        x: [B, 4, L] one-hot encoded reference sequences.
+        x: [B, 4, L] one-hot encoded reference sequences, or a list of
+            [4, L_i] arrays or DNA strings of different lengths.
+        lengths: [B] lengths of x's rows when they differ (x padded to the
+            longest).
         batch_size: Process inputs in batches of this size.  ``None``
             means process all at once (when ``verbose=False``) or
             one at a time (when ``verbose=True``).
         verbose: Show tqdm progress bar over input batches.
 
     Returns:
-        [B, 4, L] score deltas.
+        [B, 4, L] score deltas; 0 past each sequence's length, NaN for
+        sequences shorter than l (with a warning).
     """
+    x, lengths = as_batch(x, lengths)
     x = model._match_device(x)
+    short = _short_rows(lengths, model.kernel.base.l, "ISM deltas")
     fn = _ism_packed if model._sv_packed() is not None else _ism_mutants
+
+    def rows(s, e):
+        return fn(model, x[s:e], None if lengths is None else lengths[s:e])
 
     bs = batch_size if batch_size is not None else (1 if verbose else None)
     if bs is not None and x.shape[0] > bs:
@@ -48,9 +58,10 @@ def ism(
         chunks = range(0, x.shape[0], bs)
         if verbose:
             chunks = tqdm(chunks, desc="ISM", total=(x.shape[0] + bs - 1) // bs)
-        return xp.concatenate([fn(model, x[s : s + bs]) for s in chunks], axis=0)
-
-    return fn(model, x)
+        out = xp.concatenate([rows(s, s + bs) for s in chunks], axis=0)
+    else:
+        out = rows(0, x.shape[0])
+    return _per_position(out, lengths, short)
 
 
 # -----------------------------------------------------------------------
@@ -58,7 +69,7 @@ def ism(
 # -----------------------------------------------------------------------
 
 
-def _ism_packed(model, x):
+def _ism_packed(model, x, lengths=None):
     """ISM from the base kernel's packed windows (any kernel whose SVs pack).
 
     Kernels with an l-mer table add table weights over the windows covering
@@ -87,7 +98,15 @@ def _ism_packed(model, x):
         fn = _ism_kernel
         rows = min(rows, model._MAX_SCORE_BYTES // (6 * L * 8 * S))
     rows = max(1, rows)
-    parts = [fn(model, x[s : s + rows], table) for s in range(0, B, rows)]
+    parts = [
+        fn(
+            model,
+            x[s : s + rows],
+            table,
+            None if lengths is None else lengths[s : s + rows],
+        )
+        for s in range(0, B, rows)
+    ]
     out = parts[0] if len(parts) == 1 else xp.concatenate(parts, axis=0)
     return out.astype(float_dtype(out))
 
@@ -96,31 +115,28 @@ def _ism_packed(model, x):
 _BLOCK_BYTES = 256 * 2**20
 
 
-def _ism_table(model, x, table):
+def _ism_table(model, x, table, lengths=None):
     """f(mutant) - f(x) from the l-mer table: [B, 4, L]."""
     xp = get_array_module(x)
     base = model.kernel
-    bx, bx_rc = base.pack_both(x)
+    bx, bx_rc = base.pack_both(x, lengths)
     old, new, diag_ref, mut_diag = _mutants(base, x, bx, bx_rc)
     dev = (lambda a: a) if xp is np else xp.asarray
     # Padding (identical in old and new) reads entry 0, which cancels in new - old
     old = dev(np.where(old == PAD_WINDOW, 0, old))
     new = dev(np.where(new == PAD_WINDOW, 0, new))
     L = x.shape[2]
-    slot_wt = _slot_weights(base.base, L)
+    slot_wt = _slot_weights(base.base, L, lengths)
+    ref = model._table_raw(bx, table)  # [B]
     if slot_wt is None:
-        ref = table[bx].sum(axis=1)  # [B]
         k_new = ref + (
             table[new].sum(axis=3) - table[old].sum(axis=2)[None]
         )  # [4, L, B]
     else:
-        ft = np.float32 if is_mlx(x) else np.float64
-        wx = dev(base.base.window_weights(L - base.l + 1).astype(ft))
-        slot_wt = dev(slot_wt.astype(ft))
-        ref = (table[bx] * wx).sum(axis=1)
+        slot_wt = dev(slot_wt.astype(np.float32 if is_mlx(x) else np.float64))
         k_new = ref + (
-            (table[new] * slot_wt[:, None]).sum(axis=3)
-            - (table[old] * slot_wt[:, None]).sum(axis=2)[None]
+            (table[new] * slot_wt).sum(axis=3)
+            - (table[old] * slot_wt).sum(axis=2)[None]
         )
     if base.normalize:
         k_new = k_new / xp.sqrt(xp.clip(mut_diag.astype(ref.dtype), 1e-10, None))
@@ -128,7 +144,7 @@ def _ism_table(model, x, table):
     return (k_new - ref).transpose(2, 0, 1)
 
 
-def _ism_index(model, x, _table=None):
+def _ism_index(model, x, _table=None, lengths=None):
     """f(mutant) - f(x) on CPU through the l-mer index: [B, 4, L].
 
     One fused pass per (position, sequence) adds the changed windows' hits to
@@ -137,7 +153,7 @@ def _ism_index(model, x, _table=None):
     kernel = model.kernel
     base = kernel.base
     index = model._sv_index()
-    bx, bx_rc = base.pack_both(x)
+    bx, bx_rc = base.pack_both(x, lengths)
     old, new, diag_ref, mut_diag = _mutants(base, x, bx, bx_rc)
     inv_dx, inv_ds = model._inv_norms(diag_ref, x.shape[0])
     inv_dmut = (
@@ -159,12 +175,12 @@ def _ism_index(model, x, _table=None):
         inv_ds,
         coef,
         gamma,
-        _slot_weights(base, x.shape[2]),
+        _slot_weights(base, x.shape[2], lengths),
     )
     return out.transpose(2, 0, 1)
 
 
-def _ism_kernel(model, x, _table=None):
+def _ism_kernel(model, x, _table=None, lengths=None):
     """f(mutant) - f(x) from per-SV kernel values: [B, 4, L]."""
     xp = get_array_module(x)
     B, _, L = x.shape
@@ -172,7 +188,7 @@ def _ism_kernel(model, x, _table=None):
     base = kernel.base
     S = model.num_support_vectors
     coefs = model.coefficients
-    bx, bx_rc = base.pack_both(x)
+    bx, bx_rc = base.pack_both(x, lengths)
     old, new, diag_ref, mut_diag = _mutants(base, x, bx, bx_rc)
     dev = (lambda a: a) if xp is np else xp.asarray
     ref_raw = model._sv_raw(bx)  # [B, S]
@@ -185,7 +201,7 @@ def _ism_kernel(model, x, _table=None):
         ref_k = ref_raw
     ref_score = (kernel.finish(ref_k) * coefs).sum(axis=1)  # [B]
     l = base.l
-    slot_wt = _slot_weights(base, L)
+    slot_wt = _slot_weights(base, L, lengths)
     # Weighted windows go in one per row (a lone window weighs window_weights(1)),
     # then sum with their positions' weights
     per_row = 1 if slot_wt is None else l
@@ -202,17 +218,17 @@ def _ism_kernel(model, x, _table=None):
                 4, n, B, S
             )
         else:
-            wt = slot_wt[p0:p1] / float(base.window_weights(1)[0])  # [n, l]
+            wt = slot_wt[p0:p1] / float(base.window_weights(1)[0])  # [n, 1 or B, l]
             wt = dev(wt.astype(np.float32 if is_mlx(x) else np.float64))
             old_pw = (
                 model._sv_raw(dev(old[p0:p1].reshape(n * B * l, 1))).reshape(n, B, l, S)
-                * wt[:, None, :, None]
+                * wt[..., None]
             ).sum(axis=2)
             new_pw = (
                 model._sv_raw(dev(new[:, p0:p1].reshape(4 * n * B * l, 1))).reshape(
                     4, n, B, l, S
                 )
-                * wt[None, :, None, :, None]
+                * wt[None, ..., None]
             ).sum(axis=3)
         k_new = ref_raw + (new_pw - old_pw[None])  # [4, n, B, S]
         if base.normalize:
@@ -246,18 +262,25 @@ def _mutants(base, x, bx, bx_rc):
     return old, new, diag, base.raw_diag_mutants(bx, bx_rc, new, new_rc, diag)
 
 
-def _slot_weights(base, L):
-    """[L, l] float64 window weights of the windows covering each position, as
-    _packed_mutations lays them out (0 for padding), or None without window
-    weights."""
-    W = L - base.l + 1
-    wx = base.window_weights(W)
-    if wx is None:
+def _slot_weights(base, L, lengths=None):
+    """[L, R, l] float64 window weights of the windows covering each position,
+    as _packed_mutations lays them out (0 for padding), R = 1 when every
+    sequence is L long, else one per sequence (from its own length); None
+    without window weights."""
+    l = base.l
+    if base.window_weights(L - l + 1) is None:
         return None
-    out = np.zeros((L, base.l))
-    for p in range(L):
-        a_s, a_e = max(0, p - base.l + 1), min(p + 1, W)
-        out[p, : a_e - a_s] = wx[a_s:a_e]
+    lengths = np.array([L]) if lengths is None else np.asarray(lengths)
+    out = np.zeros((L, len(lengths), l))
+    for n in np.unique(lengths):
+        W = int(n) - l + 1
+        if W < 1:
+            continue
+        wx = base.window_weights(W)
+        rows = lengths == n
+        for p in range(int(n)):
+            a_s, a_e = max(0, p - l + 1), min(p + 1, W)
+            out[p, rows, : a_e - a_s] = wx[a_s:a_e]
     return out
 
 
@@ -266,7 +289,8 @@ def _packed_mutations(bx, L, W, l):
 
     Returns old [L, B, l] and new [4, L, B, l] uint32: row (p, b) holds the
     up-to-l windows of sequence b that contain position p, padded with
-    PAD_WINDOW (identical in old and new, so padding cancels in new - old).
+    PAD_WINDOW (identical in old and new, so padding cancels in new - old;
+    PAD past a shorter sequence's windows stays PAD).
     """
     B = bx.shape[0]
     old = np.full((L, B, l), PAD_WINDOW, dtype=np.uint32)
@@ -277,8 +301,11 @@ def _packed_mutations(bx, L, W, l):
         old[p, :, : a_e - a_s] = win
         shift = (2 * (p - np.arange(a_s, a_e))).astype(np.uint32)
         cleared = win & ~(np.uint32(3) << shift)
+        pad = win == PAD_WINDOW
         for v in range(4):
-            new[v, p, :, : a_e - a_s] = cleared | (np.uint32(v) << shift)
+            new[v, p, :, : a_e - a_s] = np.where(
+                pad, PAD_WINDOW, cleared | (np.uint32(v) << shift)
+            )
     return old, new
 
 
@@ -290,7 +317,7 @@ def _packed_mutations(bx, L, W, l):
 _MUTANT_BATCH = 1024
 
 
-def _ism_mutants(model, x):
+def _ism_mutants(model, x, lengths=None):
     """ISM by scoring all 4L single-base mutants through the model."""
     xp = get_array_module(x)
     B, C, L = x.shape
@@ -300,7 +327,16 @@ def _ism_mutants(model, x):
     mut[:, :, pos, :, pos] = 0
     for v in range(4):
         mut[:, v, pos, v, pos] = 1
-    scores = to_cpu(model(mut.reshape(B * 4 * L, C, L), batch_size=_MUTANT_BATCH))
-    delta = scores.reshape(B, 4, L) - to_cpu(model(x_np)).reshape(B, 1, 1)
+    mut_lengths = None if lengths is None else np.repeat(lengths, 4 * L)
+    scores = to_cpu(
+        model(
+            mut.reshape(B * 4 * L, C, L),
+            lengths=mut_lengths,
+            batch_size=_MUTANT_BATCH,
+        )
+    )
+    delta = scores.reshape(B, 4, L) - to_cpu(model(x_np, lengths=lengths)).reshape(
+        B, 1, 1
+    )
     delta[x_np.astype(bool)] = 0  # the reference base itself
     return xp.asarray(delta.astype(np.float32 if is_mlx(x) else np.float64))

@@ -241,8 +241,8 @@ def _query_mutants_cpu(
     [L, B, l] and new [4, L, B, l] hold the windows covering position p. A base
     with the reference's windows and norm (the reference base) gets 0; an N
     replaced by A keeps the forward windows (N packs as A) but not the norm.
-    slot_wt [L, l]: the window weights of those windows (0 for padding; [L, 0]
-    when unweighted).
+    slot_wt [L, 1 or B, l]: the window weights of those windows (0 for padding;
+    [L, 1, 0] when unweighted).
     """
     L, B = old.shape[0], old.shape[1]
     S = inv_ds.shape[0]
@@ -254,7 +254,7 @@ def _query_mutants_cpu(
         tmp = np.empty(S)
         for item in range(task, L * B, n_tasks):
             p, b = item // B, item % B
-            rowwt = slot_wt[p]
+            rowwt = slot_wt[p, min(np.int64(b), slot_wt.shape[1] - 1)]
             _add_hits(
                 d_old,
                 old[p, b],
@@ -474,8 +474,9 @@ class LmerIndex:
     ):
         """ISM deltas [4, L, B] on CPU (see _query_mutants_cpu), without [rows, S] blocks.
 
-        slot_wt [L, l]: with window weights, those of the windows in old/new
-        (window sets, not sequences, so their weights can't follow from length).
+        slot_wt [L, 1 or B, l]: with window weights, those of the windows in
+        old/new (window sets, not sequences, so their weights can't follow
+        from length; ism._slot_weights).
         """
         import numba
 
@@ -497,7 +498,7 @@ class LmerIndex:
             self.masks,
             self.weights,
             self.n_lmers,
-            np.zeros((L, 0)) if slot_wt is None else f64(slot_wt),
+            np.zeros((L, 1, 0)) if slot_wt is None else f64(slot_wt),
             f64(inv_dx),
             f64(inv_dmut),
             f64(inv_ds),

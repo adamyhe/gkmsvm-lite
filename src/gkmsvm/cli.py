@@ -52,7 +52,7 @@ def _add_input_args(
         parser.add_argument(
             "--variable-length",
             action="store_true",
-            help="Score FASTA records at their own lengths, as LS-GKM does "
+            help="Use FASTA records at their own lengths, as LS-GKM does "
             "(compatibility), instead of cropping.",
         )
     parser.add_argument(
@@ -134,9 +134,14 @@ def _load_inputs(args: argparse.Namespace, path: str, default_length: int | None
                 else ""
             )
             if hasattr(args, "variable_length"):
-                hint += ", or score records at their own lengths with --variable-length"
+                hint += ", or use records at their own lengths with --variable-length"
             _fail(f"{path}: {e}{hint}")
     return names, np.stack([encode(s) for s in seqs]), None, None
+
+
+def _as_list(X, lengths):
+    """[4, L_i] arrays of X's rows at their lengths (X itself when uniform)."""
+    return X if lengths is None else [x[:, :n] for x, n in zip(X, lengths)]
 
 
 def _add_kernel_args(parser: argparse.ArgumentParser) -> None:
@@ -221,17 +226,17 @@ def cmd_train(args: argparse.Namespace) -> None:
     from gkmsvm.train import train_gkmsvm
 
     length = args.length or TRAIN_LENGTH
-    _, pos, _, _ = _load_inputs(args, args.positives, length)
-    _, neg, _, _ = _load_inputs(args, args.negatives, length)
-    if pos.shape[2] != neg.shape[2]:
+    _, pos, pos_len, _ = _load_inputs(args, args.positives, length)
+    _, neg, neg_len, _ = _load_inputs(args, args.negatives, length)
+    if not args.variable_length and pos.shape[2] != neg.shape[2]:
         _fail(
             f"positives are {pos.shape[2]} bp and negatives {neg.shape[2]} bp; give "
             "--length to crop both"
         )
 
     model = train_gkmsvm(
-        pos,
-        neg,
+        _as_list(pos, pos_len),
+        _as_list(neg, neg_len),
         kernel_type=args.kernel_type,
         l=args.l,
         k=args.k,
@@ -253,7 +258,7 @@ def cmd_train(args: argparse.Namespace) -> None:
 def cmd_trainsvr(args: argparse.Namespace) -> None:
     from gkmsvm.train import train_gkmsvr
 
-    _, X, _, mask = _load_inputs(args, args.input, args.length or TRAIN_LENGTH)
+    _, X, lengths, mask = _load_inputs(args, args.input, args.length or TRAIN_LENGTH)
     labels = np.loadtxt(Path(args.labels), dtype=np.float64)
     n_in = len(mask) if mask is not None else X.shape[0]
     if labels.shape[0] != n_in:
@@ -262,7 +267,7 @@ def cmd_trainsvr(args: argparse.Namespace) -> None:
         labels = labels[mask]  # labels of the loci kept
 
     model = train_gkmsvr(
-        X,
+        _as_list(X, lengths),
         labels,
         kernel_type=args.kernel_type,
         l=args.l,
@@ -287,15 +292,17 @@ def cmd_ism(args: argparse.Namespace) -> None:
     from gkmsvm.ism import ism
 
     model = _load_model(args.model, device=args.device)
-    names, X, _, _ = _load_inputs(args, args.input, _model_length(model))
+    names, X, lengths, _ = _load_inputs(args, args.input, _model_length(model))
     names = np.array(names)
     one_hot = X.copy()
 
     X = model._match_device(X)
-    result = ism(model, X, verbose=args.verbose)
+    result = ism(model, X, lengths=lengths, verbose=args.verbose)
     result = to_cpu(result)
 
-    np.savez(args.output, scores=result, one_hot=one_hot, names=names)
+    # With --variable-length, rows are padded past their lengths
+    extra = {} if lengths is None else {"lengths": lengths}
+    np.savez(args.output, scores=result, one_hot=one_hot, names=names, **extra)
     print(
         f"Wrote ISM scores {result.shape} to {args.output}",
         file=sys.stderr,
@@ -307,19 +314,23 @@ def cmd_explain(args: argparse.Namespace) -> None:
     from gkmsvm.explain import gkmexplain
 
     model = _load_model(args.model, device=args.device)
-    _, X, _, _ = _load_inputs(args, args.input, _model_length(model))
+    _, X, lengths, _ = _load_inputs(args, args.input, _model_length(model))
     one_hot = X.astype(np.float32)
 
     X = model._match_device(X)
-    hyp = to_cpu(gkmexplain(model, X, mode="hypothetical", verbose=args.verbose))
+    hyp = to_cpu(
+        gkmexplain(model, X, mode="hypothetical", lengths=lengths, verbose=args.verbose)
+    )
 
     # Two files: sequences and attributions, each [B, 4, L] as arr_0.
     # Directly usable with: modisco motifs -s seqs.npz -a attr.npz ...
+    # (with --variable-length, rows are zero past their lengths, also saved)
     seq_path = args.sequences_output
     attr_path = args.output
 
-    np.savez(attr_path, hyp.astype(np.float32))
-    np.savez(seq_path, one_hot)
+    extra = {} if lengths is None else {"lengths": lengths}
+    np.savez(attr_path, hyp.astype(np.float32), **extra)
+    np.savez(seq_path, one_hot, **extra)
 
     print(
         f"Wrote attributions {hyp.shape} to {attr_path}",
@@ -329,6 +340,12 @@ def cmd_explain(args: argparse.Namespace) -> None:
         f"Wrote sequences {one_hot.shape} to {seq_path}",
         file=sys.stderr,
     )
+    if lengths is not None:
+        print(
+            "Records differ in length: rows are zero past their lengths (saved as "
+            "'lengths'); TF-MoDISco expects one length (crop with --length)",
+            file=sys.stderr,
+        )
     print(
         f"Run: modisco motifs -s {seq_path} -a {attr_path} "
         f"-n 2000 -o modisco_results.h5",
@@ -346,12 +363,12 @@ def cmd_deltasvm(args: argparse.Namespace) -> None:
         device=args.device,
     )
 
-    names, X, _, _ = _load_inputs(args, args.input, None)
+    names, X, lengths, _ = _load_inputs(args, args.input, None)
     X = dsvm._match_device(X)
 
     from gkmsvm.backend import to_cpu
 
-    scores = to_cpu(dsvm(X, verbose=args.verbose).flatten())
+    scores = to_cpu(dsvm(X, lengths=lengths, verbose=args.verbose).flatten())
     _write_tsv(args.output, ("name", "score"), names, scores)
 
 
@@ -396,21 +413,23 @@ def cmd_score_variants(args: argparse.Namespace) -> None:
 
     model = _load_model(args.model, device=args.device)
 
-    ref_names, X_ref, _, _ = _load_inputs(args, args.ref, _model_length(model))
-    _, X_alt, _, _ = _load_inputs(args, args.alt, _model_length(model))
-    if X_ref.shape != X_alt.shape:
+    ref_names, X_ref, ref_len, _ = _load_inputs(args, args.ref, _model_length(model))
+    _, X_alt, alt_len, _ = _load_inputs(args, args.alt, _model_length(model))
+    if X_ref.shape[0] != X_alt.shape[0] or (
+        not args.variable_length and X_ref.shape != X_alt.shape
+    ):
         _fail(
             f"{X_ref.shape[0]} ref sequences of {X_ref.shape[2]} bp but "
             f"{X_alt.shape[0]} alt sequences of {X_alt.shape[2]} bp"
         )
 
-    X_ref = model._match_device(X_ref)
-    X_alt = model._match_device(X_alt)
     deltas = to_cpu(
         model.score_variants(
             X_ref,
             X_alt,
             method=args.method,
+            ref_lengths=ref_len,
+            alt_lengths=alt_len,
             verbose=args.verbose,
         )
     ).ravel()
@@ -510,7 +529,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_kernel_args(p)
     _add_device_arg(p)
-    _add_input_args(p, length_default="300 (when records differ in length)")
+    _add_input_args(
+        p, length_default="300 (when records differ in length)", variable_length=True
+    )
 
     # ── trainsvr ─────────────────────────────────────────────────────
     p = sub.add_parser("trainsvr", help="Train a gkm-SVR regressor.")
@@ -536,7 +557,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_kernel_args(p)
     _add_device_arg(p)
-    _add_input_args(p, length_default="300 (when records differ in length)")
+    _add_input_args(
+        p, length_default="300 (when records differ in length)", variable_length=True
+    )
 
     # ── ism ──────────────────────────────────────────────────────────
     p = sub.add_parser("ism", help="In-silico mutagenesis.")
@@ -552,7 +575,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_device_arg(p)
     _add_input_args(
-        p, length_default="the model's SV length (when records differ in length)"
+        p,
+        length_default="the model's SV length (when records differ in length)",
+        variable_length=True,
     )
 
     # ── explain ──────────────────────────────────────────────────────
@@ -583,7 +608,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_device_arg(p)
     _add_input_args(
-        p, length_default="the model's SV length (when records differ in length)"
+        p,
+        length_default="the model's SV length (when records differ in length)",
+        variable_length=True,
     )
 
     # ── deltasvm ─────────────────────────────────────────────────────
@@ -600,7 +627,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-rc", action="store_true", help="Disable reverse complement.")
     _add_device_arg(p)
     _add_input_args(
-        p, length_default="none: records must share a length, or give --length"
+        p,
+        length_default="none: records must share a length, or give --length",
+        variable_length=True,
     )
 
     # ── to-deltasvm ──────────────────────────────────────────────────
@@ -641,6 +670,7 @@ def build_parser() -> argparse.ArgumentParser:
         p,
         length_default="the model's SV length (when records differ in length)",
         genome=False,
+        variable_length=True,
     )
 
     # ── import ───────────────────────────────────────────────────────

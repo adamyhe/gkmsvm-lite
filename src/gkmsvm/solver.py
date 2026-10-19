@@ -17,18 +17,20 @@ class KernelColumnCache:
     cache. When the l-mer index applies (kernels/lmer_index.py), it indexes
     all training sequences once, so one column costs one query row; else
     columns go through raw_packed, which needs batches to amortize the
-    masked join.
+    masked join. lengths: each sequence's length when they differ (X padded).
     """
 
-    def __init__(self, kernel: GkmKernel, X: np.ndarray):
+    def __init__(self, kernel: GkmKernel, X: np.ndarray, lengths=None):
         self._kernel = kernel
         self._xp = get_array_module(X)
         self._N = X.shape[0]
         self._mlx = is_mlx(X)
         base = kernel.base
         self._use_fast = isinstance(base, PackedGkmKernel)
+        if lengths is not None and not self._use_fast:
+            raise ValueError("sequences of different lengths need a packed kernel")
         if self._use_fast:
-            self._packed, self._packed_rc = base.pack_both(X)
+            self._packed, self._packed_rc = base.pack_both(X, lengths)
             self._X = None
             diag = base.raw_diag_packed(self._packed, self._packed_rc).astype(
                 float_dtype(X)
@@ -105,6 +107,7 @@ def smo_solve(
     max_iter: int = 10_000_000,
     cache_size: int | None = None,
     verbose: bool = False,
+    lengths=None,
 ) -> tuple[np.ndarray, float]:
     """Column-cached SMO solver for C-SVM.
 
@@ -124,6 +127,7 @@ def smo_solve(
         cache_size: Number of kernel columns to cache; None sizes it from
             available RAM (all N columns when they fit in a quarter of it).
         verbose: Print progress.
+        lengths: [N] sequence lengths when they differ (X padded to the longest).
 
     Returns:
         coefficients: [N] signed dual coefficients (alpha_i * y_i).
@@ -138,7 +142,7 @@ def smo_solve(
         )
     if cache_size is None:
         cache_size = auto_cache_columns(X.shape[0])
-    return _smo_csolver(kernel, X, y, C, tol, max_iter, cache_size, verbose)
+    return _smo_csolver(kernel, X, y, C, tol, max_iter, cache_size, verbose, lengths)
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +225,7 @@ def _prefetch_candidates(state, y, C, k, fresh):
     return list(dict.fromkeys(out))[:k]
 
 
-def _smo_csolver(kernel, X, y, C, tol, max_iter, cache_size, verbose):
+def _smo_csolver(kernel, X, y, C, tol, max_iter, cache_size, verbose, lengths=None):
     """WSS3 SMO using the C solver with kernel column callback.
 
     The C solver handles the optimization loop (WSS3, shrinking, gradient
@@ -234,7 +238,7 @@ def _smo_csolver(kernel, X, y, C, tol, max_iter, cache_size, verbose):
     mlx_input = is_mlx(X)
 
     # Columns live in the C solver's cache; this object only computes them
-    cache = KernelColumnCache(kernel, X)
+    cache = KernelColumnCache(kernel, X, lengths)
 
     y_np = (
         to_cpu(y).astype(np.float64)

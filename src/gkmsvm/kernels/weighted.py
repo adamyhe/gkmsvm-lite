@@ -22,7 +22,6 @@ import numpy as np
 from numba import njit, prange
 
 from gkmsvm.backend import to_cpu
-from gkmsvm.kernels.packed import is_padded
 from gkmsvm.kernels.direct import _counts, _packed_mismatches, _rc_window, _spans
 from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
 from gkmsvm.kernels.rbf import RbfKernel
@@ -145,34 +144,45 @@ def _weighted_block_delta(f, nf, a_s, a_e, wf, c, nc, c_s, c_e, wc, table):
 @njit(parallel=True, cache=True, fastmath=True)
 def _mutant_diag_weighted_numba(fwd, rc, new, new_rc, diag, w, table, l):
     """K_raw(mutant, mutant) [4, L, B]: the reference's plus the pairs touching a
-    changed window (rc has 0 columns without RC; its window j weighs w[W-1-j])."""
+    changed window (rc has 0 columns without RC). w: [B or 1, W] forward
+    weights (row_weights); a padded row is its first n windows, its RC row's
+    last n, whose window j weighs the forward window n-1-j's weight."""
     B, W = fwd.shape
     L = new.shape[1]
     has_rc = rc.shape[1] > 0
-    w_rc = w[::-1].copy()
+    counts = _counts(fwd)
     out = np.empty((4, L, B))
     for item in prange(L * B):
         p, b = item // B, item % B
-        a_s, a_e = max(0, p - l + 1), min(p + 1, W)
+        n = counts[b]
+        a_s, a_e = max(0, p - l + 1), min(p + 1, n)
+        if a_s >= a_e:
+            for v in range(4):
+                out[v, p, b] = diag[b]
+            continue
+        f = fwd[b, :n]
+        wb = w[min(np.int64(b), w.shape[0] - 1), :n]
+        wb_rc = wb[::-1].copy()
+        # RC windows r_s..r_e change; the row's own are W-n.. (new_rc from r_s)
         q = L - 1 - p
         r_s, r_e = max(0, q - l + 1), min(q + 1, W)
+        o = W - n
+        c_s = max(r_s, o)
         for v in range(4):
             nf = new[v, p, b]
-            d = _weighted_block_delta(
-                fwd[b], nf, a_s, a_e, w, fwd[b], nf, a_s, a_e, w, table
-            )
+            d = _weighted_block_delta(f, nf, a_s, a_e, wb, f, nf, a_s, a_e, wb, table)
             if has_rc:
                 d += _weighted_block_delta(
-                    fwd[b],
+                    f,
                     nf,
                     a_s,
                     a_e,
-                    w,
-                    rc[b],
-                    new_rc[v, p, b],
-                    r_s,
-                    r_e,
-                    w_rc,
+                    wb,
+                    rc[b, o:],
+                    new_rc[v, p, b, c_s - r_s :],
+                    c_s - o,
+                    r_e - o,
+                    wb_rc,
                     table,
                 )
             out[v, p, b] = diag[b] + d
@@ -261,11 +271,7 @@ class CenterWeightedGkmKernel(EstTruncGkmKernel):
         """See PackedGkmKernel.raw_diag_mutants; on CPU, only pairs touching a
         changed window; the result is on bx's device."""
         fwd = np.ascontiguousarray(to_cpu(bx))
-        if is_padded(fwd):
-            raise NotImplementedError(
-                "ISM on sequences of different lengths: docs/design/variable-length.md, stage 6"
-            )
-        B, W = fwd.shape
+        B = fwd.shape[0]
         rc = (
             np.zeros((B, 0), np.uint32)
             if bx_rc is None
@@ -279,7 +285,7 @@ class CenterWeightedGkmKernel(EstTruncGkmKernel):
                 np.ascontiguousarray(new),
                 np.ascontiguousarray(new_rc),
                 np.asarray(to_cpu(diag), dtype=np.float64),
-                self.window_weights(W).astype(np.float64),
+                self.row_weights(fwd).astype(np.float64),
                 self._mismatch_table,
                 self.l,
             ),

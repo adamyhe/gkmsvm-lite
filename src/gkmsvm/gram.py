@@ -17,6 +17,8 @@ def compute_gram(
     chunk_size: int = 1000,
     verbose: bool = False,
     out: np.ndarray | None = None,
+    lengths=None,
+    y_lengths=None,
 ) -> np.ndarray:
     """Compute kernel matrix K(X, Y) with tiled chunking.
 
@@ -35,6 +37,8 @@ def compute_gram(
         chunk_size: Tile size for row and column chunking.
         verbose: Show tqdm progress bar over tiles.
         out: Optional [N, M] output array to write into (avoids allocation).
+        lengths, y_lengths: [N], [M] sequence lengths of X and Y when they
+            differ (the arrays padded to their longest).
 
     Returns:
         [N, M] or [N, N] kernel matrix.
@@ -51,6 +55,8 @@ def compute_gram(
     # then finish() applies the RBF), unless it can't pack these inputs
     base = kernel.base
     packed = isinstance(base, PackedGkmKernel)
+    if not packed and (lengths is not None or y_lengths is not None):
+        raise ValueError("sequences of different lengths need a packed kernel")
 
     # The masked join builds an index of the column sequences on every call,
     # so compute whole column panels (all rows, or all rows up to the
@@ -70,8 +76,8 @@ def compute_gram(
         tiles = tqdm(tiles, desc="Gram matrix")
 
     if packed:
-        bx, bx_rc = base.pack_both(X)
-        by, by_rc = (bx, bx_rc) if symmetric else base.pack_both(Y)
+        bx, bx_rc = base.pack_both(X, lengths)
+        by, by_rc = (bx, bx_rc) if symmetric else base.pack_both(Y, y_lengths)
         # MLX tiles are normalized on the host in float64 (Metal has no float64)
         txp = np if xp is not np and is_mlx(X) else xp
 

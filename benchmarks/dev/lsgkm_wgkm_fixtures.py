@@ -29,10 +29,13 @@ models of the mode 5 fixtures:
 
 With --ragged, instead trains on sequences of different lengths (60-140
 bp, N stretches) and scores a 30-200 bp test set with one sequence shorter
-than l (docs/design/variable-length.md):
+than l (docs/design/variable-length.md); it also writes the training sets and
+a query set of odd lengths from 31 to 151 bp, which --explain-bin explains
+with every fixture model in modes 0, 1, 4 and 5:
 
   lsgkm_ragged_{t2,t4,t5}.model.txt.gz, lsgkm_ragged_test.fa,
-  lsgkm_ragged_{t2,t4,t5}_test.pred.txt
+  lsgkm_ragged_{t2,t4,t5}_test.pred.txt, lsgkm_ragged_{pos,neg}.fa,
+  lsgkm_ragged_query.fa, lsgkm_{wgkm_t0,...,ragged_t5}_query.explain*.txt.gz
 
 Usage (a host with LS-GKM in the "lsgkm" conda env):
   python benchmarks/dev/lsgkm_wgkm_fixtures.py [--explain-bin ~/lsgkm-kundaje/bin]
@@ -228,13 +231,19 @@ def ragged_fixtures(train, predict, workdir):
     neg = [random_seq(rng, rng.randint(60, 140)) for _ in range(100)]
     pos = [add_n(rng, s) if i % 5 == 0 else s for i, s in enumerate(pos)]
     neg = [add_n(rng, s) if i % 5 == 0 else s for i, s in enumerate(neg)]
-    write_seqs(workdir / "pos.fa", pos, "p")
-    write_seqs(workdir / "neg.fa", neg, "n")
+    write_seqs(FIXTURES / "lsgkm_ragged_pos.fa", pos, "p")
+    write_seqs(FIXTURES / "lsgkm_ragged_neg.fa", neg, "n")
     test = [random_seq(rng, rng.randint(30, 200)) for _ in range(24)]
     test[:6] = [s[:10] + MOTIF + s[20:] for s in test[:6]]
     test += [add_n(rng, s) for s in test[:6]] + ["ACGTA"]  # shorter than l: NaN
     fa = FIXTURES / "lsgkm_ragged_test.fa"
     write_seqs(fa, test, "t")
+    # Queries for gkmexplain, odd lengths (mode 5 explains position (L-1)/2)
+    qrng = random.Random(2)
+    query = [random_seq(qrng, 2 * qrng.randint(15, 75) + 1) for _ in range(16)]
+    query[:5] = [s[:8] + MOTIF + s[8 + len(MOTIF) :] for s in query[:5]]
+    query += [add_n(qrng, s) for s in query[:6]]
+    write_seqs(FIXTURES / "lsgkm_ragged_query.fa", query, "q")
     for name, opts in RAGGED_MODELS.items():
         prefix = workdir / f"ragged_{name}"
         run(
@@ -243,8 +252,8 @@ def ragged_fixtures(train, predict, workdir):
                 *opts,
                 "-c",
                 "1.0",
-                str(workdir / "pos.fa"),
-                str(workdir / "neg.fa"),
+                str(FIXTURES / "lsgkm_ragged_pos.fa"),
+                str(FIXTURES / "lsgkm_ragged_neg.fa"),
                 str(prefix),
             ]
         )
@@ -319,6 +328,17 @@ def run_explain(explain):
                     modes,
                 )
             )
+    # Queries of different lengths, every model
+    query = FIXTURES / "lsgkm_ragged_query.fa"
+    if query.exists():
+        models = [f"lsgkm_wgkm_{name}" for name in MODELS]
+        models += [f"lsgkm_mode5_{kind}" for kind in ("est", "rbf")]
+        models += [f"lsgkm_ragged_{name}" for name in RAGGED_MODELS]
+        for name in models:
+            if (FIXTURES / f"{name}.model.txt.gz").exists():
+                jobs.append(
+                    (f"{name}.model.txt.gz", query, f"{name}_query", EXPLAIN_MODES)
+                )
     for model_gz, fa, prefix, modes in jobs:
         # Plain text, without the "norc 0" line the fork rejects (RC on is its default)
         model = workdir / model_gz.removesuffix(".gz")

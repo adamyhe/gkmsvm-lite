@@ -14,7 +14,7 @@ from gkmsvm.backend import (
     to_mlx,
 )
 from gkmsvm.codec import one_hot_encode
-from gkmsvm.svm import KERNEL_BUILDERS, GkmSVM, resolve_kernel_type
+from gkmsvm.svm import KERNEL_BUILDERS, GkmSVM, as_batch, resolve_kernel_type
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -49,8 +49,11 @@ def train_gkmsvm(
     """Train a gapped k-mer SVM classifier on positive and negative sequences.
 
     Args:
-        pos_seqs: Positive sequences — list of DNA strings or [N+, 4, L] array.
-        neg_seqs: Negative sequences — list of DNA strings or [N-, 4, L] array.
+        pos_seqs: Positive sequences — list of DNA strings or [4, L] arrays,
+            or an [N+, 4, L] array. Lengths may differ (LS-GKM trains on raw
+            peaks that way); the main pipeline uses fixed windows
+            (docs/design/variable-length.md).
+        neg_seqs: Negative sequences, as pos_seqs.
         kernel_type: Kernel mode — alias, internal name, or -t integer.
         l: L-mer window length.
         k: Number of informative positions.
@@ -87,10 +90,12 @@ def train_gkmsvm(
     Returns:
         A trained GkmSVM model.
     """
-    X_pos = _to_onehot(pos_seqs, allow_other_bases)
-    X_neg = _to_onehot(neg_seqs, allow_other_bases)
-    X = _move_to_device(np.concatenate([X_pos, X_neg], axis=0), device, verbose)
-    y = np.array([1] * X_pos.shape[0] + [-1] * X_neg.shape[0])
+    pos = _to_onehot(pos_seqs, allow_other_bases)
+    neg = _to_onehot(neg_seqs, allow_other_bases)
+    X, lengths = _concat([pos, neg])
+    _check_lengths(X, lengths, l)
+    X = _move_to_device(X, device, verbose)
+    y = np.array([1] * pos[0].shape[0] + [-1] * neg[0].shape[0])
     if solver not in ("auto", "libsvm", "nystrom", "smo"):
         raise ValueError(
             f"Unknown solver {solver!r}. Use 'auto', 'libsvm', 'nystrom', or 'smo'."
@@ -127,6 +132,7 @@ def train_gkmsvm(
         sv_chunk_size=sv_chunk_size,
         verbose=verbose,
         smo_args={"cache_size": cache_size, "tol": tol, "max_iter": max_iter},
+        lengths=lengths,
     )
 
 
@@ -158,7 +164,8 @@ def train_gkmsvr(
     k-mer kernel with sklearn's epsilon-SVR solver.
 
     Args:
-        sequences: DNA sequences — list of strings or [N, 4, L] array.
+        sequences: DNA sequences — list of strings or [4, L] arrays (lengths
+            may differ, as in train_gkmsvm), or an [N, 4, L] array.
         labels: [N] continuous target values (list or array).
         kernel_type: Kernel mode — alias, internal name, or -t integer.
         l: L-mer window length.
@@ -190,7 +197,9 @@ def train_gkmsvr(
         raise ValueError(
             f"solver must be 'auto', 'libsvm' or 'nystrom' for SVR, got {solver!r}"
         )
-    X = _move_to_device(_to_onehot(sequences, allow_other_bases), device, verbose)
+    X, lengths = _to_onehot(sequences, allow_other_bases)
+    _check_lengths(X, lengths, l)
+    X = _move_to_device(X, device, verbose)
     y = np.asarray(labels, dtype=np.float64)
     if y.shape[0] != X.shape[0]:
         raise ValueError(
@@ -215,6 +224,7 @@ def train_gkmsvr(
         gram_chunk_size=gram_chunk_size,
         sv_chunk_size=sv_chunk_size,
         verbose=verbose,
+        lengths=lengths,
     )
 
 
@@ -303,8 +313,10 @@ def _fit(
     verbose,
     epsilon=None,
     smo_args=None,
+    lengths=None,
 ) -> GkmSVM:
-    """Train with `solver` ("libsvm", "nystrom" or "smo") and build the model."""
+    """Train with `solver` ("libsvm", "nystrom" or "smo") and build the model.
+    lengths: [N] sequence lengths when they differ (X padded to the longest)."""
     kernel, kernel_type, kernel_params = _build_kernel(
         kernel_type,
         l,
@@ -323,12 +335,16 @@ def _fit(
                 f"Training with SMO solver (N={X.shape[0]}, "
                 f"cache={smo_args['cache_size']})..."
             )
-        coefs, bias = smo_solve(kernel, X, y, C=C, verbose=verbose, **smo_args)
+        coefs, bias = smo_solve(
+            kernel, X, y, C=C, verbose=verbose, lengths=lengths, **smo_args
+        )
         sv_idx = np.flatnonzero(np.abs(coefs) > 1e-10)
         coefs = coefs[sv_idx]
     else:
         if solver == "nystrom":
-            gram = _nystrom_gram(kernel, X, n_components, gram_chunk_size, verbose)
+            gram = _nystrom_gram(
+                kernel, X, n_components, gram_chunk_size, verbose, lengths
+            )
         else:
             from gkmsvm.gram import compute_gram
 
@@ -339,13 +355,22 @@ def _fit(
                     f"Computing {N}x{N} Gram matrix ({N * N:,} kernel evaluations)..."
                 )
             compute_gram(
-                kernel, X, chunk_size=gram_chunk_size, verbose=verbose, out=gram
+                kernel,
+                X,
+                chunk_size=gram_chunk_size,
+                verbose=verbose,
+                out=gram,
+                lengths=lengths,
             )
         clf = _fit_sklearn(gram, y, C, epsilon=epsilon, verbose=verbose)
         del gram
         sv_idx, coefs, bias = clf.support_, clf.dual_coef_[0], float(clf.intercept_[0])
 
     sv_seqs = to_cpu(X)[sv_idx]
+    sv_lengths = None
+    if lengths is not None:
+        sv_lengths = lengths[sv_idx]
+        sv_seqs = sv_seqs[:, :, : int(sv_lengths.max())]
     coefs = np.asarray(coefs, dtype=np.float64)
     if verbose:
         print(
@@ -359,6 +384,7 @@ def _fit(
         kernel_type=kernel_type,
         kernel_params=kernel_params,
         sv_chunk_size=sv_chunk_size,
+        sv_lengths=sv_lengths,
     )
 
 
@@ -376,7 +402,9 @@ def _fit_sklearn(gram, y, C, *, epsilon=None, verbose=False):
     return clf
 
 
-def _nystrom_gram(kernel, X, n_components, chunk_size, verbose) -> np.ndarray:
+def _nystrom_gram(
+    kernel, X, n_components, chunk_size, verbose, lengths=None
+) -> np.ndarray:
     """N x N Nystrom approximation of the Gram matrix from m landmarks.
 
     Computes K_mm (m x m) and K_nm (N x m) exactly, then K ~ K_nm K_mm^+ K_mn,
@@ -402,11 +430,26 @@ def _nystrom_gram(kernel, X, n_components, chunk_size, verbose) -> np.ndarray:
     else:
         X_landmarks = X_cpu[landmark_idx]
 
+    lm_lengths = None if lengths is None else lengths[landmark_idx]
     K_mm = np.empty((m, m), dtype=np.float64)
-    compute_gram(kernel, X_landmarks, chunk_size=chunk_size, verbose=verbose, out=K_mm)
+    compute_gram(
+        kernel,
+        X_landmarks,
+        chunk_size=chunk_size,
+        verbose=verbose,
+        out=K_mm,
+        lengths=lm_lengths,
+    )
     K_nm = np.empty((N, m), dtype=np.float64)
     compute_gram(
-        kernel, X, X_landmarks, chunk_size=chunk_size, verbose=verbose, out=K_nm
+        kernel,
+        X,
+        X_landmarks,
+        chunk_size=chunk_size,
+        verbose=verbose,
+        out=K_nm,
+        lengths=lengths,
+        y_lengths=lm_lengths,
     )
 
     # Features phi = K_nm U L^-1/2 over the well-conditioned eigenpairs of K_mm
@@ -460,22 +503,46 @@ def _gram_fits_on_cpu(N: int) -> bool:
     return gram_bytes < available * 0.75
 
 
-def _to_onehot(seqs, allow_other: bool = False) -> np.ndarray:
-    """Convert sequences to [N, 4, L] one-hot array (DNA strings may hold N,
-    and with allow_other any letter, read as N)."""
+def _to_onehot(seqs, allow_other: bool = False):
+    """(X [N, 4, L] one-hot, lengths [N] or None): DNA strings may hold N, and
+    with allow_other any letter, read as N; lists of different lengths are
+    padded to the longest (svm.as_batch)."""
     if isinstance(seqs, np.ndarray) and seqs.ndim == 3:
-        return seqs
+        return seqs, None
     if isinstance(seqs, (list, tuple)):
         if len(seqs) == 0:
             raise ValueError("Sequence list must be non-empty")
         if isinstance(seqs[0], str):
             # N encodes as all-zero (scored as A, as in LS-GKM)
-            return np.stack(
-                [one_hot_encode(s, allow_n=True, allow_other=allow_other) for s in seqs]
-            )
+            seqs = [
+                one_hot_encode(s, allow_n=True, allow_other=allow_other) for s in seqs
+            ]
         if isinstance(seqs[0], np.ndarray):
-            return np.stack(seqs)
+            return as_batch(list(seqs))
     raise TypeError(
         f"Expected list of DNA strings, list of arrays, or [N, 4, L] array, "
         f"got {type(seqs)}"
     )
+
+
+def _concat(parts):
+    """(X, lengths or None): (X, lengths) parts in one batch, padded to the longest."""
+    L = max(X.shape[2] for X, _ in parts)
+    lengths = np.concatenate(
+        [np.full(X.shape[0], X.shape[2]) if n is None else n for X, n in parts]
+    ).astype(np.int64)
+    X = np.concatenate(
+        [np.pad(X, ((0, 0), (0, 0), (0, L - X.shape[2]))) for X, _ in parts]
+    )
+    return X, None if (lengths == L).all() else lengths
+
+
+def _check_lengths(X, lengths, l):
+    """Training sequences need at least one l-mer each (gkmtrain silently
+    builds a broken model from one without)."""
+    shortest = X.shape[2] if lengths is None else int(lengths.min())
+    if shortest < l:
+        raise ValueError(
+            f"training sequences must be at least l = {l} bp long; the shortest "
+            f"is {shortest}"
+        )

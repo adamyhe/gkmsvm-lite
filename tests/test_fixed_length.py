@@ -220,3 +220,71 @@ def test_train_crops_to_length(tmp_path):
                 "cpu",
             ]
         )
+
+
+def test_variable_length_train_ism_explain_variants(tmp_path):
+    """--variable-length trains on, and runs ism, explain and score-variants
+    on, FASTA records at their own lengths."""
+    from gkmsvm import gkmexplain
+    from gkmsvm.ism import ism
+    from gkmsvm.serialization import load_model
+    from gkmsvm.train import train_gkmsvm
+
+    rng = random.Random(6)
+    sets = [[_rand(rng, rng.randint(30, 60)) for _ in range(20)] for _ in range(2)]
+    pos, neg = tmp_path / "pos.fa", tmp_path / "neg.fa"
+    for path, seqs in zip((pos, neg), sets):
+        path.write_text("".join(f">s{i}\n{s}\n" for i, s in enumerate(seqs)))
+    out = str(tmp_path / "m.npz")
+    args = ["-l", "5", "-k", "3", "-d", "2", "--device", "cpu"]
+    main(
+        ["train", "-p", str(pos), "-n", str(neg), "-o", out, *args, "--variable-length"]
+    )
+    model = load_model(out)
+    assert model.sv_lengths is not None
+    expected = train_gkmsvm(*sets, l=5, k=3, d=2, device="cpu")
+    q = [_rand(rng, n) for n in (12, 40, 77)]
+    np.testing.assert_allclose(
+        np.asarray(model(q)), np.asarray(expected(q)), rtol=1e-6, atol=1e-6
+    )
+
+    fa = tmp_path / "q.fa"
+    fa.write_text("".join(f">q{i}\n{s}\n" for i, s in enumerate(q)))
+    vl = ["--device", "cpu", "--variable-length"]
+    main(["ism", "-m", out, "-i", str(fa), "-o", str(tmp_path / "ism.npz"), *vl])
+    res = np.load(tmp_path / "ism.npz")
+    np.testing.assert_array_equal(res["lengths"], [12, 40, 77])
+    np.testing.assert_allclose(res["scores"], np.asarray(ism(model, q)), atol=1e-12)
+
+    attr, seqs = tmp_path / "attr.npz", tmp_path / "seqs.npz"
+    main(["explain", "-m", out, "-i", str(fa), "-o", str(attr), "-s", str(seqs), *vl])
+    np.testing.assert_allclose(
+        np.load(attr)["arr_0"],
+        np.asarray(gkmexplain(model, q, mode="hypothetical")),
+        rtol=1e-6,
+        atol=1e-7,
+    )
+
+    alt = tmp_path / "alt.fa"
+    alts = [s[:4] + s[6:] for s in q]  # deletions
+    alt.write_text("".join(f">q{i}\n{s}\n" for i, s in enumerate(alts)))
+    tsv = tmp_path / "v.tsv"
+    main(
+        [
+            "score-variants",
+            "-m",
+            out,
+            "--ref",
+            str(fa),
+            "--alt",
+            str(alt),
+            "-o",
+            str(tsv),
+            *vl,
+        ]
+    )
+    np.testing.assert_allclose(
+        list(_scores(tsv).values()),
+        np.asarray(model(alts)).ravel() - np.asarray(model(q)).ravel(),
+        atol=1e-6,
+    )

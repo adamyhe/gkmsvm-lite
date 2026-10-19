@@ -198,7 +198,41 @@ def as_batch(x, lengths=None):
     return x, lengths
 
 
-def _short_rows(lengths, l):
+def _allele_arrays(ref, alt, ref_lengths=None, alt_lengths=None):
+    """(ref, alt, ref_lengths, alt_lengths): both as batches (svm.as_batch) of
+    one length L, padded on the host when they differ; lengths None when
+    every row is L long."""
+    ref, ref_lengths = as_batch(ref, ref_lengths)
+    alt, alt_lengths = as_batch(alt, alt_lengths)
+    if ref.shape[0] != alt.shape[0]:
+        raise ValueError(
+            f"ref and alt hold {ref.shape[0]} and {alt.shape[0]} sequences"
+        )
+    L = max(ref.shape[2], alt.shape[2])
+
+    def widen(x, n):
+        if x.shape[2] == L:
+            return x, n
+        n = np.full(x.shape[0], x.shape[2], dtype=np.int64) if n is None else n
+        x = to_cpu(x)
+        return np.pad(x, ((0, 0), (0, 0), (0, L - x.shape[2]))), n
+
+    ref, ref_lengths = widen(ref, ref_lengths)
+    alt, alt_lengths = widen(alt, alt_lengths)
+    return ref, alt, ref_lengths, alt_lengths
+
+
+def _joint_lengths(L, *parts):
+    """Lengths of rows from several batches of one length L (each part a
+    (rows, lengths or None) pair), or None when every row is L long."""
+    if all(n is None for _, n in parts):
+        return None
+    return np.concatenate(
+        [np.full(rows, L, dtype=np.int64) if n is None else n for rows, n in parts]
+    )
+
+
+def _short_rows(lengths, l, what="scores"):
     """[B] bool, rows shorter than l (no windows), or None when there are none."""
     if lengths is None:
         return None
@@ -208,19 +242,30 @@ def _short_rows(lengths, l):
     import warnings
 
     warnings.warn(
-        f"{int(short.sum())} sequences are shorter than l = {l}: their scores are NaN",
+        f"{int(short.sum())} sequences are shorter than l = {l}: their {what} are NaN",
         stacklevel=3,
     )
     return short
 
 
 def _nan_rows(out, short):
-    """out with the rows in short set to NaN (on out's device)."""
+    """out [B, ...] with the rows in short set to NaN (on out's device)."""
     if short is None:
         return out
     xp = get_array_module(out)
-    mask = xp.asarray(short)[:, None]
-    return xp.where(mask, xp.nan, out)
+    mask = xp.asarray(short.reshape(-1, *[1] * (out.ndim - 1)))
+    return xp.where(mask, float("nan"), out)
+
+
+def _per_position(out, lengths, short):
+    """Per-position results out [B, 4, L] with positions past each row's length
+    0 and rows in short NaN (on out's device)."""
+    if lengths is None:
+        return out
+    xp = get_array_module(out)
+    inside = np.arange(out.shape[2])[None, None, :] < lengths[:, None, None]
+    out = xp.where(xp.asarray(inside), out, 0.0).astype(out.dtype)
+    return _nan_rows(out, short)
 
 
 class GkmSVM(DeviceModel):
@@ -592,25 +637,26 @@ class GkmSVM(DeviceModel):
             self._lmer_table_dev = xp.asarray(table)
         return self._lmer_table_dev
 
+    def _table_raw(self, packed, table):
+        """[R] sum of table weights over packed rows' windows, times their
+        window weights (PAD adds 0)."""
+        xp = get_array_module(packed)
+        wx = self.kernel.row_weights(packed)  # 0 on PAD
+        pad = packed == PAD_WINDOW if is_padded(packed) else None
+        vals = table[packed] if pad is None else table[xp.where(pad, 0, packed)]
+        if wx is not None:
+            return (vals * xp.asarray(wx)).sum(axis=1)
+        if pad is not None:
+            return xp.where(pad, 0.0, vals).sum(axis=1)
+        return vals.sum(axis=1)
+
     def _score_lmer_table(self, x, table, lengths=None):
         """f(x) = sum of table weights over x's windows (times their window
         weights) / sqrt(K(x, x)) + b."""
         xp = get_array_module(x)
         kernel = self.kernel
         packed, packed_rc = kernel.pack_both(x, lengths)
-        wx = kernel.row_weights(packed)  # 0 on PAD
-        pad = None
-        if lengths is not None and is_padded(packed):
-            pad = packed == PAD_WINDOW
-            vals = table[xp.where(pad, 0, packed)]
-        else:
-            vals = table[packed]
-        if wx is not None:
-            raw = (vals * xp.asarray(wx)).sum(axis=1)
-        elif pad is not None:
-            raw = xp.where(pad, 0.0, vals).sum(axis=1)
-        else:
-            raw = vals.sum(axis=1)
+        raw = self._table_raw(packed, table)
         if kernel.normalize:
             diag_x = kernel.raw_diag_packed(packed, packed_rc).astype(raw.dtype)
             raw = raw / xp.sqrt(xp.clip(diag_x, 1e-10, None))
@@ -634,35 +680,48 @@ class GkmSVM(DeviceModel):
 
     def score_variants(
         self,
-        ref: np.ndarray,
-        alt: np.ndarray,
+        ref,
+        alt,
         *,
         method: str = "kernel",
+        ref_lengths=None,
+        alt_lengths=None,
         batch_size: int | None = None,
         verbose: bool = False,
     ) -> np.ndarray:
         """Variant effect scores.
 
         Args:
-            ref: [B, 4, L] reference sequences.
-            alt: [B, 4, L] alternate sequences.
+            ref: [B, 4, L] reference sequences, or a list of [4, L_i] arrays
+                or DNA strings of different lengths.
+            alt: [B, 4, L'] alternate sequences, as ref (an indel changes
+                the length).
             method: Scoring strategy.
                 "kernel" — score(alt) - score(ref) via full kernel (default).
                 "gkmexplain" — GkmExplain mutation impact score
                     (Shrikumar et al. 2019, lsgkm ``gkmexplain -m 5``).
                     See :func:`gkmsvm.explain.mutation_impact`.
+            ref_lengths, alt_lengths: [B] lengths of the rows of padded ref
+                and alt arrays when they differ.
             batch_size: Process inputs in batches of this size.  ``None``
                 means process all at once.
             verbose: Show tqdm progress bar.
 
         Returns:
-            [B, 1] score differences.
+            [B, 1] score differences (NaN when an allele is shorter than l).
         """
         if method == "kernel":
+            ref, alt, ref_lengths, alt_lengths = _allele_arrays(
+                ref, alt, ref_lengths, alt_lengths
+            )
             # Both alleles in the same calls share the per-call SV cost
             n = ref.shape[0]
+            alt, ref = self._match_device(alt), self._match_device(ref)
             scores = self(
                 get_array_module(ref).concatenate([alt, ref]),
+                lengths=_joint_lengths(
+                    ref.shape[2], (n, alt_lengths), (n, ref_lengths)
+                ),
                 batch_size=batch_size,
                 verbose=verbose,
             )
@@ -675,6 +734,8 @@ class GkmSVM(DeviceModel):
                 self,
                 ref,
                 alt,
+                ref_lengths=ref_lengths,
+                alt_lengths=alt_lengths,
                 batch_size=batch_size,
                 verbose=verbose,
             )

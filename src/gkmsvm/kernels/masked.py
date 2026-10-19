@@ -152,7 +152,7 @@ def _join_rows(bx, runs, offsets, colseq, coef, result, wx, colwt):
 
     Each query sequence's row is owned by one thread, so there are no races.
     """
-    B, Wx = bx.shape
+    B = bx.shape[0]
     M = runs.shape[0]
     weighted = colwt.shape[1] > 0
     sx = _spans(bx)  # each row's non-PAD windows
@@ -180,7 +180,7 @@ def _join_rows_upper(bx, runs, offsets, colseq, coef, result, row_min, wx, colwt
     sort gives when the indexed rows are one block of column sequences in
     order. Scans each bucket backwards and stops below row_min[b].
     """
-    B, Wx = bx.shape
+    B = bx.shape[0]
     M = runs.shape[0]
     weighted = colwt.shape[1] > 0
     sx = _spans(bx)  # each row's non-PAD windows
