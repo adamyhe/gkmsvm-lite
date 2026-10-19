@@ -243,3 +243,21 @@ class TestTrainGkmsvm:
             device="auto",
         )
         assert model.num_support_vectors > 0
+
+
+def test_train_strings_with_n_equal_onehot():
+    """DNA strings with N train the same model as their one-hot arrays (N all-zero)."""
+    import random
+
+    from gkmsvm.codec import one_hot_encode
+
+    rng = random.Random(4)
+    pos = ["".join(rng.choice("ACGT") for _ in range(40)) for _ in range(30)]
+    neg = ["".join(rng.choice("ACGT") for _ in range(40)) for _ in range(30)]
+    pos[::3] = [s[:12] + "NNNNN" + s[17:] for s in pos[::3]]
+    kw = dict(kernel_type="estimated", l=6, k=4, d=2, device="cpu")
+    a = train_gkmsvm(pos, neg, **kw)
+    enc = lambda seqs: np.stack([one_hot_encode(s, allow_n=True) for s in seqs])  # noqa: E731
+    b = train_gkmsvm(enc(pos), enc(neg), **kw)
+    np.testing.assert_allclose(a.coefficients, b.coefficients, rtol=1e-10, atol=1e-12)
+    assert a.bias == pytest.approx(b.bias)

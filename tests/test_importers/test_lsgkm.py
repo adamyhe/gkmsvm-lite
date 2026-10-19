@@ -226,3 +226,27 @@ class TestLoadModelErrors:
         """))
         with pytest.raises(ValueError, match="same length"):
             load_lsgkm_model(p)
+
+
+def test_svs_with_other_letters_load_as_n(tmp_path):
+    """LS-GKM reads non-ACGT SV letters as A when it fits the model, so they load
+    as N (with a warning) instead of failing."""
+    import warnings
+    from pathlib import Path
+
+    src = Path(__file__).parent.parent / "fixtures" / "lsgkm_wgkm_t1.model.txt.gz"
+    lines = gzip.open(src, "rt").read().splitlines()
+    sv_start = lines.index("SV") + 1
+    coef, seq = lines[sv_start].split()
+    lines[sv_start] = f"{coef} {seq[:5]}RY{seq[7:]}"
+    path = tmp_path / "m.model.txt"
+    path.write_text("\n".join(lines) + "\n")
+    with pytest.warns(UserWarning, match="other than ACGTN"):
+        model = load_lsgkm_model(path)
+    n_version = tmp_path / "n.model.txt"
+    lines[sv_start] = f"{coef} {seq[:5]}NN{seq[7:]}"
+    n_version.write_text("\n".join(lines) + "\n")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        ref = load_lsgkm_model(n_version)
+    np.testing.assert_array_equal(model.support_sequences, ref.support_sequences)

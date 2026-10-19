@@ -43,6 +43,7 @@ def train_gkmsvm(
     sv_chunk_size: int | None = None,
     gram_chunk_size: int = 1000,
     device: str = "auto",
+    allow_other_bases: bool = False,
     verbose: bool = False,
 ) -> GkmSVM:
     """Train a gapped k-mer SVM classifier on positive and negative sequences.
@@ -79,13 +80,15 @@ def train_gkmsvm(
         device: Where to train: ``"auto"`` (CUDA, else MLX, if available),
             ``"cuda"``, ``"mlx"``, or ``"cpu"``. The returned model is on
             CPU; move it with ``model.cuda()`` or ``model.mlx()``.
+        allow_other_bases: Read letters other than ACGTN in DNA strings as N
+            (scored as A, as LS-GKM reads them) instead of raising.
         verbose: Show progress.
 
     Returns:
         A trained GkmSVM model.
     """
-    X_pos = _to_onehot(pos_seqs)
-    X_neg = _to_onehot(neg_seqs)
+    X_pos = _to_onehot(pos_seqs, allow_other_bases)
+    X_neg = _to_onehot(neg_seqs, allow_other_bases)
     X = _move_to_device(np.concatenate([X_pos, X_neg], axis=0), device, verbose)
     y = np.array([1] * X_pos.shape[0] + [-1] * X_neg.shape[0])
     if solver not in ("auto", "libsvm", "nystrom", "smo"):
@@ -131,6 +134,7 @@ def train_gkmsvr(
     sv_chunk_size: int | None = None,
     gram_chunk_size: int = 1000,
     device: str = "auto",
+    allow_other_bases: bool = False,
     verbose: bool = False,
 ) -> GkmSVM:
     """Train a gapped k-mer SVR (epsilon-SVR) for regression.
@@ -160,6 +164,8 @@ def train_gkmsvr(
         device: Where to train: ``"auto"`` (CUDA, else MLX, if available),
             ``"cuda"``, ``"mlx"``, or ``"cpu"``. The returned model is on
             CPU; move it with ``model.cuda()`` or ``model.mlx()``.
+        allow_other_bases: Read letters other than ACGTN in DNA strings as N
+            (scored as A, as LS-GKM reads them) instead of raising.
         verbose: Show progress.
 
     Returns:
@@ -169,7 +175,7 @@ def train_gkmsvr(
         raise ValueError(
             f"solver must be 'auto', 'libsvm' or 'nystrom' for SVR, got {solver!r}"
         )
-    X = _move_to_device(_to_onehot(sequences), device, verbose)
+    X = _move_to_device(_to_onehot(sequences, allow_other_bases), device, verbose)
     y = np.asarray(labels, dtype=np.float64)
     if y.shape[0] != X.shape[0]:
         raise ValueError(
@@ -388,15 +394,18 @@ def _gram_fits_on_cpu(N: int) -> bool:
     return gram_bytes < available * 0.75
 
 
-def _to_onehot(seqs) -> np.ndarray:
-    """Convert sequences to [N, 4, L] one-hot array."""
+def _to_onehot(seqs, allow_other: bool = False) -> np.ndarray:
+    """Convert sequences to [N, 4, L] one-hot array (DNA strings may hold N,
+    and with allow_other any letter, read as N)."""
     if isinstance(seqs, np.ndarray) and seqs.ndim == 3:
         return seqs
     if isinstance(seqs, (list, tuple)):
         if len(seqs) == 0:
             raise ValueError("Sequence list must be non-empty")
         if isinstance(seqs[0], str):
-            return np.stack([one_hot_encode(s) for s in seqs])
+            # N encodes as all-zero (scored as A, as in LS-GKM)
+            return np.stack([one_hot_encode(s, allow_n=True, allow_other=allow_other)
+                             for s in seqs])
         if isinstance(seqs[0], np.ndarray):
             return np.stack(seqs)
     raise TypeError(

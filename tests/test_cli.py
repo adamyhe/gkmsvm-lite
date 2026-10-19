@@ -248,3 +248,59 @@ class TestNoCommand:
     def test_no_command_exits(self):
         with pytest.raises(SystemExit):
             main([])
+
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+@pytest.mark.parametrize("name", ["t1", "t4"])
+def test_predict_with_n_matches_gkmpredict(name, tmp_path):
+    """FASTA with N stretches: scores equal LS-GKM gkmpredict (N read as A)."""
+    model = FIXTURES / f"lsgkm_wgkm_{name}.model.txt.gz"
+    fasta = FIXTURES / "lsgkm_wgkm_test100.fa"
+    assert "N" in fasta.read_text()
+    out = tmp_path / "scores.tsv"
+    main(["predict", "-m", str(model), "-i", str(fasta), "-o", str(out), "--device", "cpu"])
+    got = dict(line.split("\t") for line in out.read_text().splitlines()[1:])
+    with open(FIXTURES / f"lsgkm_wgkm_{name}_test100.pred.txt") as f:
+        expected = dict(line.split()[:2] for line in f)
+    assert got.keys() == expected.keys()
+    np.testing.assert_allclose([float(got[k]) for k in expected],
+                               [float(v) for v in expected.values()], rtol=2e-5, atol=1e-5)
+
+
+def test_train_with_n(tmp_fasta, tmp_path):
+    """Training FASTAs may contain N."""
+    pos, neg = tmp_path / "pos.fa", tmp_path / "neg.fa"
+    rng = random.Random(3)
+    for path in (pos, neg):
+        seqs = ["".join(rng.choice("ACGT") for _ in range(30)) for _ in range(20)]
+        seqs[::4] = [s[:10] + "NNNnn" + s[15:] for s in seqs[::4]]
+        path.write_text("".join(f">{path.stem}{i}\n{s}\n" for i, s in enumerate(seqs)))
+    model_path = str(tmp_path / "model.npz")
+    main(["train", "-p", str(pos), "-n", str(neg), "-o", model_path,
+          "-l", "5", "-k", "3", "-d", "2", "--device", "cpu"])
+    assert Path(model_path).exists()
+
+
+def test_allow_other_bases(tmp_path):
+    """Non-ACGTN letters stop predict unless --allow-other-bases, which scores them
+    as N (A, as gkmpredict does)."""
+    model = str(FIXTURES / "lsgkm_wgkm_t1.model.txt.gz")
+    seqs = [s for s in FIXTURES.joinpath("lsgkm_wgkm_test100.fa").read_text().split("\n")
+            if s and not s.startswith(">")][:6]
+    iupac = [s[:20] + "RYKM" + s[24:] for s in seqs]
+    as_n = [s[:20] + "NNNN" + s[24:] for s in seqs]
+    paths = {}
+    for name, ss in (("iupac", iupac), ("n", as_n)):
+        paths[name] = tmp_path / f"{name}.fa"
+        paths[name].write_text("".join(f">s{i}\n{s}\n" for i, s in enumerate(ss)))
+    with pytest.raises(ValueError, match="allow_other"):
+        main(["predict", "-m", model, "-i", str(paths["iupac"]), "--device", "cpu"])
+    out = {}
+    for name, extra in (("iupac", ["--allow-other-bases"]), ("n", [])):
+        path = tmp_path / f"{name}.tsv"
+        main(["predict", "-m", model, "-i", str(paths[name]), "-o", str(path),
+              "--device", "cpu", *extra])
+        out[name] = path.read_text()
+    assert out["iupac"] == out["n"]

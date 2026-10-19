@@ -147,3 +147,11 @@ class TestEncodeBatch:
         batch, mask = encode_batch(["ACGT"])
         assert batch.shape == (1, 4, 4)
         assert mask.all()
+
+
+def test_allow_other_reads_letters_as_n():
+    """allow_other encodes any non-ACGT letter as N does (all-zero), implying allow_n."""
+    got = one_hot_encode("ACRYNnGT-", allow_other=True)
+    np.testing.assert_array_equal(got, one_hot_encode("ACNNNNGTN", allow_n=True))
+    with pytest.raises(ValueError, match="allow_other"):
+        one_hot_encode("ACRGT", allow_n=True)

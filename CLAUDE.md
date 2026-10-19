@@ -101,7 +101,7 @@ src/gkmsvm/
 
 ## Gotchas
 
-- N: lsgkm encodes any non-ACGT base as A before taking the reverse complement, so N is A on the forward strand and T on the reverse one (`pack_both`), for every kernel type. Imported models' coefficients were fit with that kernel, so N is not treated as its own symbol.
+- N: lsgkm encodes any non-ACGT base as A before taking the reverse complement, so N is A on the forward strand and T on the reverse one (`pack_both`), for every kernel type. Imported models' coefficients were fit with that kernel, so N is not treated as its own symbol. String inputs (CLI FASTAs, `train_gkmsvm`/`train_gkmsvr` DNA strings) accept N (`one_hot_encode(allow_n=True)`); other non-ACGT letters raise unless `allow_other=True` (`--allow-other-bases`, `allow_other_bases=`), which reads them as N, matching gkmpredict (LS-GKM reads every non-ACGT letter as A). Importers always read them as N, with a warning: the model was fit that way.
 - LS-GKM defaults are `-t 2 -l 11 -k 7 -d 3`. Always pass parameters explicitly when generating oracle fixtures.
 - The `d` parameter zeros weight table entries for m > d, for every kernel type including `-t 0` (LS-GKM's search visits only pairs within d mismatches; at l=11 k=7 d=3 that drops `-t 0`'s m = 4 term). Without this, scores diverge ~1.5% from `gkmpredict`. `DirectGkmKernel(d=None)` (a `-t 0` model with no `d` in its params, e.g. one saved before d applied to `-t 0`) counts every pair; training stores `d` for every kernel type. Oracle for `-t 0`/`-t 1` scores and attributions: `tests/fixtures/lsgkm_wgkm_t{0,1}_*`.
 - `-t 0` and `-t 2` use completely different weight table math. Do not mix.
