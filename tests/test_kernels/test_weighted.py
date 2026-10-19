@@ -147,18 +147,49 @@ def test_scoring_paths_match_definition(kernel_type):
 
 
 @pytest.mark.parametrize("kernel_type", ["wgkm", "wgkmrbf"])
-def test_ism_scores_mutants(kernel_type):
+@pytest.mark.parametrize("L", [33, 34])  # odd/even window counts
+def test_ism_scores_mutants(kernel_type, L):
+    """Window-delta ISM through the table, index, masked join and brute force
+    equals scoring every mutant."""
     from gkmsvm.ism import ism
 
     rng = np.random.default_rng(4)
-    model = GkmSVM(_encode(_seqs(rng, 30, 33)), rng.normal(size=30), 0.1, kernel_type, PARAMS)
-    x = _encode(_seqs(rng, 1, 33, with_n=False))
-    mut = np.broadcast_to(x[:, None, None], (1, 4, 33, 4, 33)).copy()
-    for p in range(33):
+    model = GkmSVM(_encode(_seqs(rng, 30, L)), rng.normal(size=30), 0.1, kernel_type, PARAMS)
+    x = _encode(_seqs(rng, 3, L, with_n=False))
+    mut = np.broadcast_to(x[:, None, None], (3, 4, L, 4, L)).copy()
+    for p in range(L):
         mut[:, :, p, :, p] = np.eye(4)
-    np.testing.assert_allclose(
-        ism(model, x), model(mut.reshape(-1, 4, 33)).reshape(1, 4, 33) - model(x)[0, 0],
-        rtol=1e-9, atol=1e-12)
+    expected = model(mut.reshape(-1, 4, L)).reshape(3, 4, L) - model(x)[:, :, None]
+    paths = [(True, False, True), (False, False, True), (False, False, False)]
+    if kernel_type == "wgkm":
+        paths.append((False, True, True))
+    for index, table, masked in paths:
+        model.use_lmer_index, model.use_lmer_table = index, table
+        model.kernel.base.use_masked = masked
+        model.clear_caches()
+        np.testing.assert_allclose(ism(model, x), expected, rtol=1e-9, atol=1e-12,
+                                   err_msg=f"{index=} {table=} {masked=}")
+
+
+def test_mutant_self_kernels():
+    """raw_diag_mutants equals the self-kernel of each mutant."""
+    from gkmsvm.ism import _packed_mutations
+
+    rng = np.random.default_rng(7)
+    L = 30
+    kernel = CenterWeightedGkmKernel(8, 5, d=D, M=M, H=H)
+    x = _encode(_seqs(rng, 2, L, with_n=False))
+    bx, bx_rc = kernel.pack_both(x)
+    W = L - kernel.l + 1
+    _, new = _packed_mutations(bx, L, W, kernel.l)
+    new_rc = _packed_mutations(bx_rc, L, W, kernel.l)[1][::-1, ::-1]
+    got = kernel.raw_diag_mutants(bx, bx_rc, new, new_rc, kernel.raw_diag_packed(bx, bx_rc))
+    for v in range(4):
+        for p in range(L):
+            m = x.copy()
+            m[:, :, p] = 0
+            m[:, v, p] = 1
+            np.testing.assert_allclose(got[v, p], kernel._raw_diagonal(m), rtol=1e-12)
 
 
 def test_gkmexplain_rejects_weighted():

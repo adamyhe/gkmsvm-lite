@@ -154,7 +154,7 @@ predictions = model(x)  # [B, 1]
 Training needs kernel values between pairs of training sequences.
 
 - **Precomputed Gram + sklearn** (`solver="libsvm"`): computes the full N x N kernel matrix in host RAM (tiles on the training device) and passes it to scikit-learn's LIBSVM-backed `SVC(kernel="precomputed")`. Fast, but O(N^2) memory: ~800 MB at N=10K.
-- **Column-cached SMO** (`solver="smo"`): WSS3 working set selection with shrinking and an LRU cache of kernel columns in a C extension; memory is O(cache_size x N). For `-t 1/2/3` a column is one query of an l-mer index over the training set; other kernels compute columns in batches through the masked join. With a cache smaller than N, evicted columns are recomputed, so it is slower than libsvm when the Gram fits.
+- **Column-cached SMO** (`solver="smo"`): WSS3 working set selection with shrinking and an LRU cache of kernel columns in a C extension; memory is O(cache_size x N). For `-t 1`-`-t 5` a column is one query of an l-mer index over the training set; other kernels compute columns in batches through the masked join. With a cache smaller than N, evicted columns are recomputed, so it is slower than libsvm when the Gram fits.
 - **Nyström approximation** (`solver="nystrom"`): kernel values against `n_components` landmarks only (O(N m) instead of O(N^2)), then an approximate N x N Gram for sklearn. Saves time, not memory; the solution is approximate.
 - **Auto** (`solver="auto"`, default): libsvm when the Gram fits in 75% of available RAM (and under `max_gram_gb`), else SMO with a warning.
 

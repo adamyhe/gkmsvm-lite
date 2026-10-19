@@ -64,7 +64,7 @@
 - [x] Masked-join kernel for Gram tiles and SMO columns, all six kernel types, CPU/CUDA/Metal ([design](design/mask-join-kernel.md))
 - [x] Exact l-mer weight table for `-t 0/1/2/4` prediction and `to_deltasvm`
 - [x] Packed kernel interface (`kernel.base`, `kernel.finish`, `raw_packed`) shared by Gram, SMO, scoring, ISM and mutation impact
-- [x] Cached l-mer index for scoring, ISM and mutation impact against SVs, and for SMO columns over the training set (`-t 1/2/3`)
+- [x] Cached l-mer index for scoring, ISM and mutation impact against SVs, and for SMO columns over the training set (`-t 1`-`-t 5`)
 - [x] ISM and mutation impact for every kernel type
 
 ## Next

@@ -1,6 +1,6 @@
 # Masked-join gkm kernel: handoff
 
-Status: implemented on `main`. The masked join serves Gram tiles and SMO columns for `-t 0` to `-t 5` on CPU, CUDA and MLX (Metal join with int32 counts); the exact l-mer table serves prediction and `to_deltasvm` for `-t 0/1/2/4`; a cached l-mer index serves scoring, ISM and mutation impact against a model's SVs, and SMO columns over the training set, for `-t 1/2/3`. Open: CUDA join tuning from a hardware profile, and the optimizations listed near the end. The sections below keep the design rationale and the measurements that motivated each step.
+Status: implemented on `main`. The masked join serves Gram tiles and SMO columns for `-t 0` to `-t 5` on CPU, CUDA and MLX (Metal join with int32 counts); the exact l-mer table serves prediction and `to_deltasvm` for `-t 0/1/2/4`; a cached l-mer index serves scoring, ISM and mutation impact against a model's SVs, and SMO columns over the training set, for `-t 1`-`-t 5`. Open: CUDA join tuning from a hardware profile, and the optimizations listed near the end. The sections below keep the design rationale and the measurements that motivated each step.
 
 ## Goal
 
@@ -131,7 +131,7 @@ SMO columns use the same index built over the training set: a column K(i, :) is 
 | Entry point | Path today | File |
 |---|---|---|
 | Gram tiles (`compute_gram`: libsvm, Nyström) | Masked join in column panels | `gram.py` |
-| SMO kernel columns (`KernelColumnCache.compute_columns`) | l-mer index over the training set (`-t 1/2/3`), else batched masked join | `solver.py` |
+| SMO kernel columns (`KernelColumnCache.compute_columns`) | l-mer index over the training set (`-t 1`-`-t 5`), else batched masked join | `solver.py` |
 | Prediction `-t 0/1/2/4` | Exact l-mer table | `svm.py`, `lmer_table.py` |
 | Prediction `-t 3`, other kernels; ISM; mutation impact | Cached l-mer index over the SVs, else masked join | `svm.py`, `ism.py`, `explain.py` |
 | `to_deltasvm` | l-mer table, else scoring all 4^l l-mers | `svm.py` |

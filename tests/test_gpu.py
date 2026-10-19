@@ -677,6 +677,45 @@ class TestWeightedGPU:
             assert model._sv_index() is not None
         np.testing.assert_allclose(got, cpu, rtol=1e-9, atol=1e-12)
 
+    @pytest.mark.parametrize("kernel_type", ["wgkm", "wgkmrbf"])
+    @pytest.mark.parametrize("path", ["index", "join", "table"])
+    def test_ism_matches_cpu(self, kernel_type, path):
+        """Window-delta ISM (one-window rows through the CUDA index or join, or
+        the table) vs the CPU path."""
+        from gkmsvm.ism import ism
+
+        if path == "table" and kernel_type == "wgkmrbf":
+            pytest.skip("RBF has no l-mer table")
+        sv = self._seqs(40, 41, 9)
+        X = np.stack([one_hot_encode(s) for s in _make_seqs(3, 41, seed=10)])
+        coef = np.random.default_rng(1).standard_normal(40)
+        model = GkmSVM(sv, coef, 0.2, kernel_type, WEIGHTED_PARAMS)
+        model.use_lmer_index = path == "index"
+        model.use_lmer_table = path == "table"
+        cpu = ism(model, X)
+        model.cuda()
+        got = cp.asnumpy(ism(model, cp.asarray(X)))
+        np.testing.assert_allclose(got, cpu, rtol=1e-9, atol=1e-12)
+
+    @pytest.mark.parametrize("kernel_type", ["wgkm", "wgkmrbf"])
+    def test_smo_columns_match_cpu(self, kernel_type):
+        """SMO columns through the CUDA l-mer index and the masked join vs the Gram."""
+        from gkmsvm.gram import compute_gram
+        from gkmsvm.solver import KernelColumnCache
+
+        X = self._seqs(40, 61, 11)
+        kernel = GkmSVM(X, np.ones(40), 0.0, kernel_type, WEIGHTED_PARAMS).kernel
+        ref = compute_gram(kernel, X)
+        cache = KernelColumnCache(kernel, cp.asarray(X))
+        assert cache._index is not None
+        for use_index in (True, False):
+            if not use_index:
+                cache._index = None
+            cols = cache.compute_columns(range(5, 30))
+            for i in range(5, 30):
+                np.testing.assert_allclose(cp.asnumpy(cols[i]), ref[:, i], rtol=1e-10,
+                                           atol=1e-12)
+
     def test_gram_matches_cpu(self):
         from gkmsvm.gram import compute_gram
         from gkmsvm.kernels.weighted import CenterWeightedGkmKernel

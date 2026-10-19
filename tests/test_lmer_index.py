@@ -117,11 +117,14 @@ def test_gram_and_columns_match_pairwise(name):
     np.testing.assert_allclose(compute_gram(kernel, X, chunk_size=16), expected,
                                rtol=1e-10, atol=1e-12)
     cache = KernelColumnCache(kernel, X)
-    assert cache._use_fast
-    for idx in ([3], list(range(5, 30))):
-        cols = cache.compute_columns(idx)
-        for i in idx:
-            np.testing.assert_allclose(cols[i], expected[i], rtol=1e-10, atol=1e-12)
+    assert cache._use_fast and cache._index is not None
+    for use_index in (True, False):  # one query row each; the masked join
+        if not use_index:
+            cache._index = None
+        for idx in ([3], list(range(5, 30))):
+            cols = cache.compute_columns(idx)
+            for i in idx:
+                np.testing.assert_allclose(cols[i], expected[i], rtol=1e-10, atol=1e-12)
 
 
 def test_applies_dense_neighborhoods():

@@ -187,22 +187,17 @@ def _query_reduce_cpu(bx, offsets, ids, vals, masks, weights, n_lmers, wx, inv_d
 
 
 @njit(inline="always")
-def _add_hits(acc, row, sign, offsets, ids, masks, weights, n_lmers):
-    """acc[s] += sign * K_raw(row, s) for the packed windows in row."""
+def _add_hits(acc, row, sign, rowwt, offsets, ids, vals, masks, weights, n_lmers):
+    """acc[s] += sign * K_raw(row, s) for the packed windows in row; rowwt: their
+    window weights (empty: all 1)."""
     for i in range(row.shape[0]):
-        w = row[i]
-        for t in range(masks.shape[0]):
-            v = np.int64(w ^ masks[t])
-            if v >= n_lmers:  # padding window
-                continue
-            wt = sign * weights[t]
-            for e in range(offsets[v], offsets[v + 1]):
-                acc[ids[e]] += wt
+        scale = sign * rowwt[i] if rowwt.shape[0] > 0 else sign
+        _add_window(acc, row[i], scale, offsets, ids, vals, masks, weights, n_lmers)
 
 
 @njit(parallel=True, cache=True, fastmath={"nsz", "arcp", "contract", "reassoc"})
-def _query_mutants_cpu(old, new, ref, ref_score, offsets, ids, masks, weights, n_lmers,
-                       inv_dx, inv_dmut, inv_ds, coef, gamma, n_tasks):
+def _query_mutants_cpu(old, new, ref, ref_score, offsets, ids, vals, masks, weights, n_lmers,
+                       slot_wt, inv_dx, inv_dmut, inv_ds, coef, gamma, n_tasks):
     """[4, L, B] ISM deltas: f(mutant) - ref_score[b], with
     f = sum_s coef_s f(K_raw(mutant, s) inv_dmut inv_ds[s]) as in _query_reduce_cpu.
 
@@ -210,6 +205,8 @@ def _query_mutants_cpu(old, new, ref, ref_score, offsets, ids, masks, weights, n
     [L, B, l] and new [4, L, B, l] hold the windows covering position p. A base
     with the reference's windows and norm (the reference base) gets 0; an N
     replaced by A keeps the forward windows (N packs as A) but not the norm.
+    slot_wt [L, l]: the window weights of those windows (0 for padding; [L, 0]
+    when unweighted).
     """
     L, B = old.shape[0], old.shape[1]
     S = inv_ds.shape[0]
@@ -221,13 +218,16 @@ def _query_mutants_cpu(old, new, ref, ref_score, offsets, ids, masks, weights, n
         tmp = np.empty(S)
         for item in range(task, L * B, n_tasks):
             p, b = item // B, item % B
-            _add_hits(d_old, old[p, b], -1.0, offsets, ids, masks, weights, n_lmers)
+            rowwt = slot_wt[p]
+            _add_hits(d_old, old[p, b], -1.0, rowwt, offsets, ids, vals, masks, weights,
+                      n_lmers)
             for v in range(4):
                 # Window 0 always covers p
                 if new[v, p, b, 0] == old[p, b, 0] and inv_dmut[v, p, b] == inv_dx[b]:
                     continue
                 tmp[:] = d_old
-                _add_hits(tmp, new[v, p, b], 1.0, offsets, ids, masks, weights, n_lmers)
+                _add_hits(tmp, new[v, p, b], 1.0, rowwt, offsets, ids, vals, masks, weights,
+                          n_lmers)
                 scale = inv_dmut[v, p, b]
                 total = 0.0
                 if rbf:
@@ -370,24 +370,25 @@ class LmerIndex:
                                  np.ascontiguousarray(coef, dtype=np.float64), float(gamma),
                                  max(1, min(bx.shape[0], 4 * numba.get_num_threads())))
 
-    def mutants(self, old, new, ref, ref_score, inv_dx, inv_dmut, inv_ds, coef, gamma=np.nan):
+    def mutants(self, old, new, ref, ref_score, inv_dx, inv_dmut, inv_ds, coef, gamma=np.nan,
+                slot_wt=None):
         """ISM deltas [4, L, B] on CPU (see _query_mutants_cpu), without [rows, S] blocks.
 
-        Not for weighted windows (old/new are window sets, not sequences).
+        slot_wt [L, l]: with window weights, those of the windows in old/new
+        (window sets, not sequences, so their weights can't follow from length).
         """
         import numba
 
-        if len(self.vals):
-            raise NotImplementedError("ISM scores weighted kernels' mutants through model()")
-
         L, B = old.shape[:2]
+        if len(self.vals) and slot_wt is None:
+            raise ValueError("weighted windows need slot_wt")
         def f64(a):
             return np.ascontiguousarray(a, dtype=np.float64)
 
         return _query_mutants_cpu(
             np.ascontiguousarray(old), np.ascontiguousarray(new), f64(ref), f64(ref_score),
-            self.offsets, self.ids, self.masks, self.weights, self.n_lmers, f64(inv_dx),
-            f64(inv_dmut),
+            self.offsets, self.ids, self.vals, self.masks, self.weights, self.n_lmers,
+            np.zeros((L, 0)) if slot_wt is None else f64(slot_wt), f64(inv_dx), f64(inv_dmut),
             f64(inv_ds), f64(coef), float(gamma),
             max(1, min(L * B, 4 * numba.get_num_threads())))
 
