@@ -311,8 +311,8 @@ def main():
         try:
             from modiscolite import tfmodisco
         except ImportError:
-            print("  modisco-lite not installed. Install with: "
-                  "uv pip install --system modisco-lite")
+            # kundajelab/tfmodisco (tfmodisco-lite merged into it), imported as modiscolite
+            print("  modisco not installed. Install with: uv pip install modisco")
             print("  Skipping TF-MoDISco.")
         else:
             # modisco expects [N, L, 4] — transpose from our [N, 4, L]
