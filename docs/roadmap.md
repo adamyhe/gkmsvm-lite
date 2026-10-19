@@ -87,7 +87,7 @@ Gaps found by checking against LS-GKM (2026-10-19), most important first:
 Performance gaps:
 
 - [ ] `-t 4`/`-t 5` self-kernels and brute force (< 16 rows) run on CPU even on CUDA; MLX joins and queries weighted windows on CPU.
-- [ ] GkmExplain on MLX falls back to CPU (Metal has no float64; a float-float accumulator could fix it).
+- [ ] GkmExplain on MLX runs on CPU and returns NumPy (Metal has no float64). Plan: per-window partials on the GPU folded in float64 on CPU, float-float within a window if float32 isn't enough; measure float32 error first (`docs/design/mlx-gkmexplain.md`). Not needed for the application note.
 - [ ] No explain table for RBF (`-t 3`/`-t 5`): their SV weights depend on the query, so they take the index path.
 
 Features:
