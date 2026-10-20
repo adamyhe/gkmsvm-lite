@@ -300,18 +300,28 @@ class TestTrainGkmsvm:
 
         stub = types.SimpleNamespace(
             ndarray=type("ndarray", (), {}),
-            cuda=types.SimpleNamespace(runtime=types.SimpleNamespace(getDeviceCount=no_device)))
+            cuda=types.SimpleNamespace(
+                runtime=types.SimpleNamespace(getDeviceCount=no_device)
+            ),
+        )
         monkeypatch.setattr(backend, "cp", stub)
         monkeypatch.setattr(backend, "HAS_CUPY", True)
         monkeypatch.setattr(backend, "HAS_MLX", False)
+        monkeypatch.setattr("gkmsvm.train.HAS_MLX", False)  # imported by name
         backend.cuda_available.cache_clear()
         try:
             assert not backend.cuda_available()
             X = np.zeros((2, 4, 20), dtype=np.float32)
             assert isinstance(_move_to_device(X, "auto", False), np.ndarray)
             rng = np.random.default_rng(0)
-            model = train_gkmsvm(_random_seqs_str(10, 20, rng), _random_seqs_str(10, 20, rng),
-                                 kernel_type="direct", l=7, k=5, device="cpu")
+            model = train_gkmsvm(
+                _random_seqs_str(10, 20, rng),
+                _random_seqs_str(10, 20, rng),
+                kernel_type="direct",
+                l=7,
+                k=5,
+                device="cpu",
+            )
             model._to_device("auto")
             assert not model._on_gpu
         finally:

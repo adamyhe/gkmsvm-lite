@@ -38,6 +38,7 @@ def cuda_available() -> bool:
     except Exception:  # no driver, a driver too old for CuPy's runtime, no device
         return False
 
+
 try:
     import mlx.core as mx
 

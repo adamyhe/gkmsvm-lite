@@ -13,7 +13,9 @@ from gkmsvm.backend import HAS_CUPY, cuda_available
 from gkmsvm.codec import one_hot_encode
 from gkmsvm.svm import GkmSVM
 
-pytestmark = pytest.mark.skipif(not cuda_available(), reason="No CUDA GPU (or CuPy not installed)")
+pytestmark = pytest.mark.skipif(
+    not cuda_available(), reason="No CUDA GPU (or CuPy not installed)"
+)
 
 if HAS_CUPY:
     import cupy as cp
