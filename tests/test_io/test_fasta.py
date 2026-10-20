@@ -121,7 +121,6 @@ class TestExtractLoci:
 
     def test_narrowpeak_summit_centers_windows(self, genome, tmp_path):
         """narrowPeak column 10 is the summit offset; -1 (and BED) means midpoint."""
-        pytest.importorskip("pandas")
         from gkmsvm.fasta import extract_loci, read_loci
 
         bed = tmp_path / "peaks.narrowPeak"
