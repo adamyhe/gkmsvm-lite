@@ -364,18 +364,28 @@ def test_mixed_lengths_on_device(device, kernel_type):
 @pytest.mark.parametrize("kernel_type", ["estimated", "wgkmrbf"])
 @pytest.mark.parametrize("solver", ["libsvm", "smo"])
 def test_training_on_device(device, kernel_type, solver):
-    """Training on sequences of different lengths on CUDA/MLX gives the CPU's model."""
-    from gkmsvm.train import train_gkmsvm
+    """Training on sequences of different lengths on CUDA/MLX: the Gram equals
+    the CPU's, and the trained model the CPU's to the solver's tolerance."""
+    from gkmsvm.gram import compute_gram
+    from gkmsvm.svm import as_batch
+    from gkmsvm.train import _build_kernel, train_gkmsvm
 
-    _device(device)
+    move, rtol = _device(device)
     rng = np.random.default_rng(17)
     pos, neg = _seqs(rng, 25, 12, 45), _seqs(rng, 25, 12, 45)
+    kernel, _, _ = _build_kernel(kernel_type, 6, 4, 2, 2.0, 20, 6.0, True)
+    x, lengths = as_batch(pos + neg)
+    gram = compute_gram(kernel, x, lengths=lengths)
+    _close(compute_gram(kernel, move(x), lengths=lengths), gram, rtol, "gram")
     kw = dict(kernel_type=kernel_type, l=6, k=4, d=2, M=20, H=6.0, gamma=2.0)
     kw.update(solver=solver, tol=1e-6) if solver == "smo" else kw.update(solver=solver)
     cpu = train_gkmsvm(pos, neg, device="cpu", **kw)
     dev = train_gkmsvm(pos, neg, device=device, **kw)
     q = _seqs(rng, 8, 12, 45)
-    tol = 1e-6 if device == "cuda" else 1e-3  # MLX Gram tiles are float32
+    # LIBSVM stops at tol 1e-3, and a last-digit difference in the Gram can
+    # move it to another point within that (seen on CUDA: 4e-16 in the Gram,
+    # 4e-5 in scores); SMO runs at 1e-6. MLX Gram tiles are float32.
+    tol = 1e-6 if device == "cuda" and solver == "smo" else 1e-3
     np.testing.assert_allclose(_np(dev(q)), _np(cpu(q)), atol=tol)
 
 
