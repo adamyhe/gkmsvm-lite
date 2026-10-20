@@ -149,7 +149,7 @@ def _add_kernel_args(parser: argparse.ArgumentParser) -> None:
         "-t",
         "--kernel-type",
         default="estimated",
-        help="Kernel type: 0-5, or name (default: estimated).",
+        help="Kernel type: 0-6, or name (default: estimated).",
     )
     parser.add_argument("-l", type=int, default=11, help="L-mer length (default: 11).")
     parser.add_argument(
@@ -242,6 +242,7 @@ def cmd_train(args: argparse.Namespace) -> None:
         k=args.k,
         d=args.d,
         C=args.C,
+        pos_weight=args.w,
         gamma=args.gamma,
         M=args.M,
         H=args.H,
@@ -445,14 +446,21 @@ def cmd_import(args: argparse.Namespace) -> None:
         from gkmsvm.importers.lsgkm import load_lsgkm_model
 
         model = load_lsgkm_model(inp, device="cpu")
-    elif fmt == "classic":
+    elif fmt in ("classic", "r_gkmsvm"):
+        # gkmsvm_train's files (C++ and R write the same), which don't record
+        # the kernel
         from gkmsvm.importers.classic import load_classic_model
 
-        model = load_classic_model(inp, device="cpu")
-    elif fmt == "r_gkmsvm":
-        from gkmsvm.importers.r_gkmsvm import load_r_gkmsvm_model
-
-        model = load_r_gkmsvm_model(inp, device="cpu")
+        model = load_classic_model(
+            inp,
+            args.svseq,
+            L=args.l,
+            k=args.k,
+            d=args.d,
+            filter_type=args.filter_type,
+            include_rc=not args.no_rc,
+            device="cpu",
+        )
     else:
         print(f"Unknown format: {fmt}", file=sys.stderr)
         sys.exit(1)
@@ -515,6 +523,12 @@ def build_parser() -> argparse.ArgumentParser:
         "-o", "--output", required=True, help="Output model (.npz or .model.txt)."
     )
     p.add_argument("-C", type=float, default=1.0, help="Regularization (default: 1.0).")
+    p.add_argument(
+        "-w",
+        type=float,
+        default=1.0,
+        help="Positives' C is w*C (as LS-GKM -w; default: 1.0).",
+    )
     p.add_argument(
         "--solver",
         default="auto",
@@ -683,6 +697,30 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         choices=["lsgkm", "classic", "r_gkmsvm"],
         help="Source format.",
+    )
+    # gkmsvm_train's PREFIX_svalpha.out + PREFIX_svseq.fa record no kernel
+    g = p.add_argument_group(
+        "classic/R gkmSVM PREFIX_svalpha.out models (the kernel gkmsvm_kernel used)"
+    )
+    g.add_argument(
+        "--svseq", default=None, help="PREFIX_svseq.fa (default: next to the input)."
+    )
+    g.add_argument("-l", type=int, default=10, help="Word length (default: 10).")
+    g.add_argument(
+        "-k", type=int, default=6, help="Informative positions (default: 6)."
+    )
+    g.add_argument("-d", type=int, default=3, help="Max mismatches (default: 3).")
+    g.add_argument(
+        "-t",
+        "--filter-type",
+        type=int,
+        default=1,
+        choices=[0, 1, 2],
+        help="gkmsvm_kernel -t (R useTgkm): 0 full, 1 truncated (default), "
+        "2 gkm counts.",
+    )
+    g.add_argument(
+        "--no-rc", action="store_true", help="Without reverse complements (-R)."
     )
 
     return parser

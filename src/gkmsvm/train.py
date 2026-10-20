@@ -30,6 +30,7 @@ def train_gkmsvm(
     k: int = 7,
     d: int = 3,
     C: float = 1.0,
+    pos_weight: float = 1.0,
     gamma: float = 1.0,
     M: int | None = None,
     H: float | None = None,
@@ -59,6 +60,8 @@ def train_gkmsvm(
         k: Number of informative positions.
         d: Maximum mismatch depth.
         C: SVM regularization parameter.
+        pos_weight: The positives' C is pos_weight * C (LS-GKM ``-w``), for
+            unbalanced sets.
         gamma: RBF gamma (for -t 3, -t 5).
         M: Weight of the center window, 1-255 (-t 4, -t 5; default 50, as LS-GKM).
         H: Half-life of the window weights in bp (-t 4, -t 5; default 50).
@@ -133,6 +136,7 @@ def train_gkmsvm(
         verbose=verbose,
         smo_args={"cache_size": cache_size, "tol": tol, "max_iter": max_iter},
         lengths=lengths,
+        pos_weight=pos_weight,
     )
 
 
@@ -284,7 +288,7 @@ def _build_kernel(kernel_type, l, k, d, gamma, M, H, include_rc):
     """Resolve kernel type, build params dict, instantiate kernel."""
     kernel_type = resolve_kernel_type(kernel_type)
     kernel_params = {"L": l, "k": k, "d": d, "include_rc": include_rc}
-    if kernel_type in ("gkmrbf", "wgkmrbf"):
+    if kernel_type in ("gkmrbf", "wgkmrbf", "gkm_cnt_rbf"):
         kernel_params["gamma"] = gamma
     if kernel_type in ("wgkm", "wgkmrbf"):
         kernel_params["M"] = 50 if M is None else M  # LS-GKM defaults
@@ -314,6 +318,7 @@ def _fit(
     epsilon=None,
     smo_args=None,
     lengths=None,
+    pos_weight=1.0,
 ) -> GkmSVM:
     """Train with `solver` ("libsvm", "nystrom" or "smo") and build the model.
     lengths: [N] sequence lengths when they differ (X padded to the longest)."""
@@ -336,7 +341,14 @@ def _fit(
                 f"cache={smo_args['cache_size']})..."
             )
         coefs, bias = smo_solve(
-            kernel, X, y, C=C, verbose=verbose, lengths=lengths, **smo_args
+            kernel,
+            X,
+            y,
+            C=C,
+            verbose=verbose,
+            lengths=lengths,
+            pos_weight=pos_weight,
+            **smo_args,
         )
         sv_idx = np.flatnonzero(np.abs(coefs) > 1e-10)
         coefs = coefs[sv_idx]
@@ -362,7 +374,9 @@ def _fit(
                 out=gram,
                 lengths=lengths,
             )
-        clf = _fit_sklearn(gram, y, C, epsilon=epsilon, verbose=verbose)
+        clf = _fit_sklearn(
+            gram, y, C, epsilon=epsilon, verbose=verbose, pos_weight=pos_weight
+        )
         del gram
         sv_idx, coefs, bias = clf.support_, clf.dual_coef_[0], float(clf.intercept_[0])
 
@@ -388,14 +402,16 @@ def _fit(
     )
 
 
-def _fit_sklearn(gram, y, C, *, epsilon=None, verbose=False):
-    """Fit SVC or SVR with a precomputed kernel matrix."""
+def _fit_sklearn(gram, y, C, *, epsilon=None, verbose=False, pos_weight=1.0):
+    """Fit SVC or SVR with a precomputed kernel matrix; SVC's positives get C
+    pos_weight * C."""
     from sklearn.svm import SVC, SVR
 
     if epsilon is not None:
         clf = SVR(C=C, epsilon=epsilon, kernel="precomputed")
     else:
-        clf = SVC(C=C, kernel="precomputed")
+        weights = None if pos_weight == 1.0 else {1: pos_weight}
+        clf = SVC(C=C, kernel="precomputed", class_weight=weights)
     if verbose:
         print(f"Fitting {type(clf).__name__} with sklearn...")
     clf.fit(gram, y)

@@ -57,6 +57,7 @@ gkmsvm train -p positive.fa -n negative.fa -o model.npz -t estimated -l 11 -k 7 
 | `-k` | K informative positions (default: 7) |
 | `-d` | Max mismatches (default: 3) |
 | `-C` | Regularization parameter (default: 1.0) |
+| `-w` | Positives' C is w·C, for unbalanced sets (as LS-GKM `-w`; default: 1.0) |
 | `--solver` | `auto`, `libsvm`, `smo`, or `nystrom` (default: auto: libsvm if the Gram fits in RAM, else smo) |
 | `--cache-size` | SMO kernel-column cache size (default: sized from available RAM) |
 | `--no-rc` | Disable reverse complement |

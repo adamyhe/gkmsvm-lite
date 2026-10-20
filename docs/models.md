@@ -23,40 +23,21 @@ Models trained with kundajelab/lsgkm (which adds GkmExplain) and kundajelab/lsgk
 
 Bias convention: `bias = -rho` (LIBSVM convention).
 
-### Classic gkmSVM (C implementation)
+### Classic gkmSVM (C++) and R gkmSVM
 
-The C gkmSVM implementation uses LIBSVM-style headers with an `SV` marker. Supports both embedded SVs (single file) and two-file format (model + FASTA).
-
-```python
-from gkmsvm import load_classic_model
-
-# Single file with embedded SVs
-model = load_classic_model("model.gkmmodel")
-
-# Two-file format: model + separate FASTA
-model = load_classic_model("model.txt", svseq_path="model.svseq.fa")
-```
-
-Bias convention: `bias = +rho` (opposite from LS-GKM). This is handled automatically — you don't need to adjust scores.
-
-### R gkmSVM (R/kernlab package)
-
-The R package (Ghandi et al. 2016) uses `#`-prefixed headers and FASTA-style support vectors. The kernel is `gkm_esttrunc` unless a `#kernel_type` header (name or `-t` integer) says otherwise.
+`gkmsvm_train`, in the C++ tool (Ghandi et al. 2014) and in the R package (Ghandi et al. 2016, which shares its code and trains with kernlab), writes a model as two files: `PREFIX_svalpha.out` (`SV id <TAB> signed alpha`) and `PREFIX_svseq.fa`. They record no bias and no kernel: `gkmsvm_classify` scores `sum_i alpha_i K(x, sv_i)` with the kernel given on its command line. So pass the parameters given to `gkmsvm_kernel` (defaults are the tools': l=10, k=6, d=3, truncated filter, reverse complements):
 
 ```python
-from gkmsvm import load_r_gkmsvm_model
+from gkmsvm import load_classic_model, load_r_gkmsvm_model
 
-# Unified .gkmmodel format
-model = load_r_gkmsvm_model("model.gkmmodel")
-
-# Legacy two-file format (auto-detects _svseq.fa companion)
-model = load_r_gkmsvm_model("mymodel_svalpha.out")
-
-# Or specify the FASTA file explicitly
-model = load_r_gkmsvm_model("alphas.out", svseq_path="sequences.fa")
+model = load_classic_model("mymodel_svalpha.out")  # finds mymodel_svseq.fa
+model = load_classic_model("a_svalpha.out", "a_svseq.fa", L=11, k=7, d=3, filter_type=2)
+model = load_r_gkmsvm_model("mymodel_svalpha.out", L=10, K=6, maxnmm=3, useTgkm=1)
 ```
 
-Bias convention: `bias = +rho` (same as C gkmSVM).
+`filter_type` is `gkmsvm_kernel -t` (R `useTgkm`): 0 full filter (`gkm_estfull`), 1 truncated (`gkm_esttrunc`), 2 gkm counts (`gkm_cnt`); wildcard and mismatch kernels (3, 4) aren't supported. CLI: `gkmsvm import -f classic -i mymodel_svalpha.out -o model.npz -l 10 -k 6 -d 3 -t 1`.
+
+Scores equal `sum_i alpha_i K(x, sv_i)` with the kernel of the tools' `gkmsvm_kernel` (`tests/test_importers/test_gkmsvm_tools.py`), the kernel the alphas were fit with. `gkmsvm_classify`'s own output differs from that by up to about 2%: its tree and simple algorithms normalize differently from `gkmsvm_kernel`. Both tools read FASTA by dropping every letter other than ACGT, so SVs load that way (an N stretch is removed, not read as A); for `gkmsvm_classify`'s treatment of queries, drop those letters from them too.
 
 ### DeltaSVM weights
 
@@ -186,6 +167,7 @@ All six kernel types are supported for both training and inference:
 | `-t 3` | `rbf` | RBF transform on estimated kernel. Better for some tasks. |
 | `-t 4` | `weighted` | `-t 2` with l-mers near the sequence center weighted up to `M` times more (`M`, `H`; LS-GKM defaults 50, 50). |
 | `-t 5` | `weighted_rbf` | Center-weighted + RBF (`M`, `H`, `gamma`). |
+| `-t 6` | `direct_rbf` | RBF on the gapped k-mer count kernel (`gamma`; `gkm_cnt_rbf`, in the kundajelab lsgkm fork only). |
 
 ```python
 # Weighted kernel example

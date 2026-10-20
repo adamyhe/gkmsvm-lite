@@ -9,10 +9,10 @@
 - [x] RbfGkmKernel (`-t 3` / `gkmrbf` / `rbf`)
 - [x] CenterWeightedGkmKernel (`-t 4` / `wgkm` / `weighted`)
 - [x] CenterWeightedRbfGkmKernel (`-t 5` / `wgkmrbf` / `weighted_rbf`)
+- [x] `-t 6` / `gkm_cnt_rbf` / `direct_rbf` (RBF on `-t 0`, the kundajelab fork's): its gkmtrain, gkmpredict and gkmexplain (modes 0/1/4/5) as oracles
 - [x] GkmSVM scoring with memory-capped [rows, S] blocks
 - [x] LS-GKM model importer (plain text and gzip)
-- [x] Classic gkmSVM importer — C gkmSVM LIBSVM-style format (opposite bias sign convention)
-- [x] R gkmSVM importer — `.gkmmodel` unified and `_svalpha.out`/`_svseq.fa` two-file formats
+- [x] Classic (C++) and R gkmSVM importer — `gkmsvm_train`'s `_svalpha.out`/`_svseq.fa` (no bias; the kernel as arguments; non-ACGT dropped as the tools read FASTA), checked against each tool's `gkmsvm_kernel` (`tests/test_importers/test_gkmsvm_tools.py`)
 - [x] DeltaSVM model + importer (linear gapped k-mer scoring)
 - [x] FASTA I/O and pyfaidx locus extraction
 - [x] Oracle validation against Dongwon-Lee/lsgkm `gkmpredict`
@@ -72,17 +72,16 @@
 - [x] lsgkm oracles for every kernel type (`-t 0` to `-t 5`): gkmpredict scores; gkmexplain modes 0/1/4 on every CPU explain path and mode 5 (mutation impact) on every scoring path, with N and odd/even window counts (kundajelab fork, `benchmarks/dev/lsgkm_wgkm_fixtures.py`)
 - [x] N as in LS-GKM (A on the forward strand, T on the reverse); N accepted in every string input; `--allow-other-bases` / `allow_other` reads other letters as N (as gkmpredict does)
 - [x] `-t 0` truncated at `d` mismatches, as LS-GKM
+- [x] `-w` positive-class weight (`pos_weight`; LIBSVM and SMO match gkmtrain `-w 2` and `-w 0.5`)
+- [x] SVR oracle: `train_gkmsvr` gives kundajelab/lsgkm-svr's epsilon-SVR models (`-t 2/3/4`: same SVs, coefficients to 1e-3, predictions to 5e-4), and its model files reproduce its gkmpredict
+- [x] Training oracle: `train_gkmsvm` (LIBSVM and SMO) gives gkmtrain's support vectors for `-t 0` to `-t 5` on fixed- and mixed-length sets with N, coefficients to the solvers' 1e-3 tolerance and gkmpredict's scores to 5e-4; gkmtrain's solutions meet our KKT conditions (`tests/test_train_oracle.py`)
 - [x] Fixed-length pipeline (`--genome` summit windows, `--length` center-crop, 300 bp for training) and sequences of different lengths for compatibility: padded SVs and queries on CPU, CUDA and Metal; imported mixed-length models, npz/LS-GKM round trips; training, ISM, GkmExplain, mutation impact, variant scores and DeltaSVM on mixed lengths (gkmpredict, gkmtrain and gkmexplain oracles)
 
 ## Next
 
 Gaps found by checking against LS-GKM (2026-10-19), most important first:
 
-- [ ] **Re-run the dsQTL check** — `tests/test_gpu.py` passes on a CUDA host (2026-10-19, after the `-t 0` `d`, N and padding changes); `benchmarks/agreement_lsgkm.py` still to re-run (last run 2026-10-16, before the N packing change: mutation impact matched the paper's `gkmexplain -m 5` outputs to ~5e-6). CUDA explain paths are checked against CPU only, not against lsgkm directly.
-- [ ] **Training oracle as a test** — `train_gkmsvm` gives gkmtrain's models (`-t 0/2/3/4`, with and without N: same SV counts, held-out scores within ~2e-4), checked by hand only; commit gkmtrain fixtures.
-- [ ] **`-w` positive-class weight** — LS-GKM's `-w` sets C to w*C for positives; not exposed.
-- [ ] **Importer and SVR oracles** — the classic gkmSVM and R gkmSVM importers, and `train_gkmsvr` (vs kundajelab/lsgkm-svr), have no reference-tool fixtures.
-- [ ] **`-t 6` gkm_cnt_rbf** — in the kundajelab fork only; not supported.
+- [ ] **Full dsQTL re-run on the CUDA host** — `benchmarks/agreement_lsgkm.py` with all five negsets and both kernels (`make` without `AGREE_ARGS`) for the figure; the default check (`-t 3`, negset 1) was re-run on CPU on 2026-10-19 after the N, padding and importer changes and matches the earlier run: mutation impact to 5.0e-6, ISM to 1.0e-5, deltaSVM (as `deltasvm.pl` scores it) to 3.4e-5 of the paper's outputs. CUDA explain paths are checked against CPU only, not against lsgkm directly.
 
 Performance gaps:
 

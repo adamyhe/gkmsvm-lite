@@ -13,8 +13,14 @@ tests/fixtures:
   lsgkm_wgkm_test100.fa / lsgkm_wgkm_test85.fa
   lsgkm_wgkm_t{0,1,4,5}_test{100,85}.pred.txt
 
-(-t 2/-t 3 attributions are checked on the lsgkm_mode5_* models.) --models
-trains a subset; the test FASTAs come out the same every run.
+(-t 2/-t 3 attributions are checked on the lsgkm_mode5_* models.) It also
+writes the training sets and -t 2/-t 3 models trained on them with their
+scores, the oracle for train_gkmsvm:
+
+  lsgkm_wgkm_{pos,neg}.fa, lsgkm_wgkm_{t2,t3,t2w2,t4w05}.model.txt.gz,
+  lsgkm_wgkm_{t2,t3,t2w2,t4w05}_test{100,85}.pred.txt (-w 2 and -w 0.5)
+
+--models trains a subset; the FASTAs come out the same every run.
 
 With --explain-bin (a build of the kundajelab/lsgkm fork, which has
 gkmexplain), also runs gkmexplain on each model and test set in modes 0
@@ -36,6 +42,19 @@ with every fixture model in modes 0, 1, 4 and 5:
   lsgkm_ragged_{t2,t4,t5}.model.txt.gz, lsgkm_ragged_test.fa,
   lsgkm_ragged_{t2,t4,t5}_test.pred.txt, lsgkm_ragged_{pos,neg}.fa,
   lsgkm_ragged_query.fa, lsgkm_{wgkm_t0,...,ragged_t5}_query.explain*.txt.gz
+
+With --fork-models (and --explain-bin), trains the kundajelab fork's -t 6
+(gkm_cnt_rbf) with its gkmtrain on the training sets, scores the test sets
+with its gkmpredict, and runs its gkmexplain on everything:
+
+  lsgkm_wgkm_t6.model.txt.gz, lsgkm_wgkm_t6_test{100,85}.pred.txt, ...explain*
+
+With --svr-bin (a build of kundajelab/lsgkm-svr), instead trains epsilon-SVR
+models (-y 3) on the training sets above with continuous labels (motif count
+plus noise) and scores the test sets with its gkmpredict:
+
+  lsgkm_svr_train.fa, lsgkm_svr_labels.txt,
+  lsgkm_svr_{t2,t3,t4}.model.txt.gz, lsgkm_svr_{t2,t3,t4}_test{100,85}.pred.txt
 
 Usage (a host with LS-GKM in the "lsgkm" conda env):
   python benchmarks/dev/lsgkm_wgkm_fixtures.py [--explain-bin ~/lsgkm-kundaje/bin]
@@ -79,6 +98,29 @@ RAGGED_MODELS = {
         "30",
         "-g",
         "2.0",
+    ],
+}
+# Trained and scored for the training oracle only (no gkmexplain outputs)
+TRAIN_MODELS = {
+    "t2": ["-t", "2", "-l", "10", "-k", "6", "-d", "3"],
+    "t3": ["-t", "3", "-l", "10", "-k", "6", "-d", "3", "-g", "2.0"],
+    # -w: the positives' C is w*C
+    "t2w2": ["-t", "2", "-l", "10", "-k", "6", "-d", "3", "-w", "2.0"],
+    "t4w05": [
+        "-t",
+        "4",
+        "-l",
+        "11",
+        "-k",
+        "7",
+        "-d",
+        "3",
+        "-M",
+        "20",
+        "-H",
+        "10",
+        "-w",
+        "0.5",
     ],
 }
 MODELS = {
@@ -133,13 +175,25 @@ def main():
     )
     ap.add_argument(
         "--models",
-        default=",".join(MODELS),
-        help=f"comma-separated models to train (default: {','.join(MODELS)})",
+        default=",".join([*MODELS, *TRAIN_MODELS]),
+        help="comma-separated models to train (default: "
+        f"{','.join([*MODELS, *TRAIN_MODELS])})",
     )
     ap.add_argument(
         "--ragged",
         action="store_true",
         help="only the fixtures on sequences of different lengths",
+    )
+    ap.add_argument(
+        "--fork-models",
+        action="store_true",
+        help="train FORK_MODELS (-t 6) with the --explain-bin build, then explain",
+    )
+    ap.add_argument(
+        "--svr-bin",
+        default=None,
+        help="directory with kundajelab/lsgkm-svr's gkmtrain and gkmpredict: "
+        "write only the SVR fixtures",
     )
     ap.add_argument(
         "--explain-only",
@@ -153,6 +207,16 @@ def main():
         explain = Path(args.explain_bin).expanduser() / "gkmexplain"
         if not explain.exists():
             sys.exit(f"{explain} not found")
+    if args.fork_models:
+        if explain is None:
+            sys.exit("--fork-models needs --explain-bin")
+        fork = explain.parent
+        train_models(fork / "gkmtrain", fork / "gkmpredict", FORK_MODELS)
+        run_explain(explain)
+        return
+    if args.svr_bin:
+        svr_fixtures(Path(args.svr_bin).expanduser())
+        return
     if args.explain_only:
         if explain is None:
             sys.exit("--explain-only needs --explain-bin")
@@ -174,8 +238,8 @@ def main():
     neg = [random_seq(rng, 100) for _ in range(80)]
     pos = [add_n(rng, s) if i % 5 == 0 else s for i, s in enumerate(pos)]
     neg = [add_n(rng, s) if i % 5 == 0 else s for i, s in enumerate(neg)]
-    write_seqs(workdir / "pos.fa", pos, "p")
-    write_seqs(workdir / "neg.fa", neg, "n")
+    write_seqs(FIXTURES / "lsgkm_wgkm_pos.fa", pos, "p")
+    write_seqs(FIXTURES / "lsgkm_wgkm_neg.fa", neg, "n")
 
     tests = {}
     for length in (100, 85):
@@ -187,7 +251,7 @@ def main():
         write_seqs(tests[length], seqs, "t")
 
     for name in args.models.split(","):
-        opts = MODELS[name]
+        opts = {**MODELS, **TRAIN_MODELS}[name]
         prefix = workdir / name
         run(
             [
@@ -195,17 +259,16 @@ def main():
                 *opts,
                 "-c",
                 "1.0",
-                str(workdir / "pos.fa"),
-                str(workdir / "neg.fa"),
+                str(FIXTURES / "lsgkm_wgkm_pos.fa"),
+                str(FIXTURES / "lsgkm_wgkm_neg.fa"),
                 str(prefix),
             ]
         )
         model = Path(f"{prefix}.model.txt")
-        with (
-            open(model, "rb") as src,
-            gzip.open(FIXTURES / f"lsgkm_wgkm_{name}.model.txt.gz", "wb") as dst,
-        ):
-            shutil.copyfileobj(src, dst)
+        # mtime=0: unchanged models give byte-identical files
+        (FIXTURES / f"lsgkm_wgkm_{name}.model.txt.gz").write_bytes(
+            gzip.compress(model.read_bytes(), mtime=0)
+        )
         for length, fa in tests.items():
             run(
                 [
@@ -218,6 +281,96 @@ def main():
     if explain is not None:
         run_explain(explain)
     print("wrote:", *sorted(p.name for p in FIXTURES.glob("lsgkm_wgkm_*")), sep="\n  ")
+
+
+# In the kundajelab fork only
+FORK_MODELS = {"t6": ["-t", "6", "-l", "10", "-k", "6", "-d", "3", "-g", "2.0"]}
+
+
+def train_models(train, predict, models):
+    """gkmtrain each of models on the training sets; gkmpredict the test sets."""
+    workdir = Path(tempfile.mkdtemp(prefix="lsgkm_fork_"))
+    for name, opts in models.items():
+        prefix = workdir / name
+        run(
+            [
+                str(train),
+                *opts,
+                "-c",
+                "1.0",
+                str(FIXTURES / "lsgkm_wgkm_pos.fa"),
+                str(FIXTURES / "lsgkm_wgkm_neg.fa"),
+                str(prefix),
+            ]
+        )
+        model = Path(f"{prefix}.model.txt")
+        (FIXTURES / f"lsgkm_wgkm_{name}.model.txt.gz").write_bytes(
+            gzip.compress(model.read_bytes(), mtime=0)
+        )
+        for length in (100, 85):
+            run(
+                [
+                    str(predict),
+                    str(FIXTURES / f"lsgkm_wgkm_test{length}.fa"),
+                    str(model),
+                    str(FIXTURES / f"lsgkm_wgkm_{name}_test{length}.pred.txt"),
+                ]
+            )
+
+
+SVR_MODELS = {
+    "t2": ["-t", "2", "-l", "10", "-k", "6", "-d", "3"],
+    "t3": ["-t", "3", "-l", "10", "-k", "6", "-d", "3", "-g", "2.0"],
+    "t4": ["-t", "4", "-l", "10", "-k", "6", "-d", "3", "-M", "20", "-H", "10"],
+}
+
+
+def svr_fixtures(svr_bin):
+    """epsilon-SVR (-c 1 -p 0.1) on the training sets, labels from the motif."""
+    rng = random.Random(3)
+    seqs = [s for kind in ("pos", "neg") for s in _read(f"lsgkm_wgkm_{kind}.fa")]
+    labels = [s.count(MOTIF[2:8]) + rng.gauss(0, 0.3) for s in seqs]
+    fa, lab = FIXTURES / "lsgkm_svr_train.fa", FIXTURES / "lsgkm_svr_labels.txt"
+    write_seqs(fa, seqs, "s")
+    lab.write_text("".join(f"{v:.6f}\n" for v in labels))
+    workdir = Path(tempfile.mkdtemp(prefix="lsgkm_svr_"))
+    for name, opts in SVR_MODELS.items():
+        prefix = workdir / name
+        run(
+            [
+                str(svr_bin / "gkmtrain"),
+                "-y",
+                "3",
+                *opts,
+                "-c",
+                "1.0",
+                "-p",
+                "0.1",
+                str(fa),
+                str(lab),
+                str(prefix),
+            ]
+        )
+        model = Path(f"{prefix}.model.txt")
+        (FIXTURES / f"lsgkm_svr_{name}.model.txt.gz").write_bytes(
+            gzip.compress(model.read_bytes(), mtime=0)
+        )
+        for length in (100, 85):
+            run(
+                [
+                    str(svr_bin / "gkmpredict"),
+                    str(FIXTURES / f"lsgkm_wgkm_test{length}.fa"),
+                    str(model),
+                    str(FIXTURES / f"lsgkm_svr_{name}_test{length}.pred.txt"),
+                ]
+            )
+    print("wrote:", *sorted(p.name for p in FIXTURES.glob("lsgkm_svr_*")), sep="\n  ")
+
+
+def _read(name):
+    """Sequences of a fixture FASTA."""
+    lines = (FIXTURES / name).read_text().split()
+    return [line for line in lines if not line.startswith(">")]
 
 
 def ragged_fixtures(train, predict, workdir):
@@ -278,7 +431,7 @@ def run_explain(explain):
     """gkmexplain on every fixture model and test FASTA, in EXPLAIN_MODES."""
     workdir = Path(tempfile.mkdtemp(prefix="lsgkm_wgkm_explain_"))
     jobs = []  # (model .txt.gz, FASTA, output prefix, modes)
-    for name in MODELS:
+    for name in [*MODELS, *FORK_MODELS]:
         if not (FIXTURES / f"lsgkm_wgkm_{name}.model.txt.gz").exists():
             continue
         for fa in sorted(FIXTURES.glob("lsgkm_wgkm_test*.fa")):
@@ -331,7 +484,7 @@ def run_explain(explain):
     # Queries of different lengths, every model
     query = FIXTURES / "lsgkm_ragged_query.fa"
     if query.exists():
-        models = [f"lsgkm_wgkm_{name}" for name in MODELS]
+        models = [f"lsgkm_wgkm_{name}" for name in [*MODELS, *FORK_MODELS]]
         models += [f"lsgkm_mode5_{kind}" for kind in ("est", "rbf")]
         models += [f"lsgkm_ragged_{name}" for name in RAGGED_MODELS]
         for name in models:

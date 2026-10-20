@@ -1,7 +1,7 @@
-"""Model importers: LS-GKM, classic C gkmSVM, R gkmSVM and deltaSVM files.
+"""Model importers: LS-GKM, classic C++ and R gkmSVM, and deltaSVM files.
 
-The gkm-SVM formats share LIBSVM-style ``key value`` headers and one-hot
-support vectors, parsed here.
+LS-GKM's ``key value`` header parsing and the one-hot support vectors every
+gkm-SVM format holds are here.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ def _open_auto(path: Path):
         return open(path, "r")
 
 
-_INT_KEYS = ("L", "k", "d", "M", "nr_class", "total_sv", "norc", "nsv", "npos", "nneg")
+_INT_KEYS = ("L", "k", "d", "M", "nr_class", "total_sv", "norc")
 _FLOAT_KEYS = ("gamma", "H")
 _LIST_KEYS = {"rho": float, "label": int, "nr_sv": int, "probA": float, "probB": float}
 
@@ -57,7 +57,6 @@ def build_model(
     *,
     bias: float,
     n_expected: int | None,
-    default_kernel: str | None = None,
     dtype,
     sv_chunk_size: int | None,
     device: str,
@@ -95,7 +94,7 @@ def build_model(
     from gkmsvm.svm import as_batch
 
     support_sequences, sv_lengths = as_batch(encoded)
-    kernel_type = header.get("kernel_type", default_kernel)
+    kernel_type = header.get("kernel_type")
     if kernel_type is None:
         raise ValueError("Model file missing kernel_type field")
     kernel_params = {

@@ -312,3 +312,13 @@ class TestNPacking:
     def _acgt(n, length, seed):
         rng = random.Random(seed)
         return ["".join(rng.choice("ACGT") for _ in range(length)) for _ in range(n)]
+
+
+def test_resolve_kernel_type_takes_cli_integers():
+    """The CLI passes -t as a string: "0"-"5" resolve as the integers do."""
+    from gkmsvm.svm import resolve_kernel_type
+
+    for t in range(6):
+        assert resolve_kernel_type(str(t)) == resolve_kernel_type(t)
+    with pytest.raises(ValueError, match="Valid: 0-6"):
+        resolve_kernel_type("7")

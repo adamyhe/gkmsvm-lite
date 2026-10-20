@@ -79,18 +79,9 @@ LS-GKM exists because the full N×N kernel matrix doesn't fit in memory at scale
 
 Header key-value pairs until `SV` marker, then `<signed_coef> <DNA_sequence>` per line. Key fields: `svm_type`, `kernel_type`, `L`, `k`, `d`, `norc`, `rho`, `nr_class`, `total_sv`. Auto-detects gzip. Binary classification only (nr_class=2). `norc` is optional (missing = RC on); some builds (kundajelab lsgkm) reject the key, so `save_lsgkm` writes it only for RC-off models.
 
-## Classic gkmSVM format (C)
+## Classic and R gkmSVM formats
 
-Original gkmSVM C implementation uses OPPOSITE sign convention: `bias = +rho`. LIBSVM-style `key value` headers followed by `SV` marker. Supports both embedded SVs (single file: `coef sequence` per line) and two-file format (model + FASTA). Integer kernel types (0-5) are mapped to string names. Load via `load_classic_model(model_path, svseq_path=...)`.
-
-## R gkmSVM format
-
-R gkmSVM package (Ghandi et al. 2016, kernlab-based) uses `#`-prefixed headers (`#rho`, `#nsv`, `#npos`, `#nneg`, `#L`, `#k`, `#d`). Two sub-formats:
-
-- **Unified `.gkmmodel`**: headers then FASTA entries where the header line is `>seq_id\tcoefficient`.
-- **Legacy two-file**: `_svalpha.out` (tab-separated `seq_id\tcoef`) plus `_svseq.fa`.
-
-Same bias convention as C gkmSVM: `bias = +rho`. Load via `load_r_gkmsvm_model(path, svseq_path=...)`. Auto-detects `_svseq.fa` companion file when loading `_svalpha.out`.
+`gkmsvm_train` (C++ and R, which share the code) writes `PREFIX_svalpha.out` (`id<TAB>alpha`) and `PREFIX_svseq.fa`: no bias (R drops kernlab's `b`), no kernel parameters. `classic.load_classic_model` (and `r_gkmsvm.load_r_gkmsvm_model`, under R's argument names) takes the kernel as arguments (defaults l=10, k=6, d=3, `-t 1`), maps `-t`/`useTgkm` 0/1/2 to `gkm_estfull`/`gkm_esttrunc`/`gkm_cnt` (each truncated at d), matches SVs to alphas by id and drops non-ACGT letters, as the tools' FASTA reader does. Checked against each tool's `gkmsvm_kernel`; `gkmsvm_classify` differs from that by up to ~2%.
 
 ## SV cache
 
