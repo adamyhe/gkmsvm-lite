@@ -1,4 +1,4 @@
-"""Column-cached SMO solver for gkm-SVM training."""
+"""Column-cached SMO solver for gkm-SVM training (C-SVC and epsilon-SVR)."""
 
 from __future__ import annotations
 
@@ -135,6 +135,65 @@ def smo_solve(
         coefficients: [N] signed dual coefficients (alpha_i * y_i).
         bias: Decision boundary offset (score = K*coef + bias).
     """
+    _check_solver(kernel)
+    if cache_size is None:
+        cache_size = auto_cache_columns(X.shape[0])
+    y = np.asarray(to_cpu(y), dtype=np.float64)
+    return _smo_csolver(
+        kernel,
+        X,
+        y,
+        -np.ones_like(y),
+        (C * pos_weight, C),
+        tol,
+        max_iter,
+        cache_size,
+        verbose,
+        lengths,
+    )
+
+
+def smo_svr_solve(
+    kernel: GkmKernel,
+    X: np.ndarray,
+    z: np.ndarray,
+    C: float = 1.0,
+    epsilon: float = 0.1,
+    tol: float = 1e-3,
+    max_iter: int = 10_000_000,
+    cache_size: int | None = None,
+    verbose: bool = False,
+    lengths=None,
+) -> tuple[np.ndarray, float]:
+    """Column-cached SMO solver for epsilon-SVR, LIBSVM's formulation
+    (as lsgkm-svr): 2N dual variables, alpha_i with sign +1 and linear term
+    epsilon - z_i, alpha*_i with sign -1 and epsilon + z_i, both over
+    sequence i's kernel column, so the cache holds N columns as for C-SVC.
+
+    Args:
+        kernel, X, tol, max_iter, cache_size, verbose, lengths: as smo_solve.
+        z: [N] regression targets.
+        C: Regularization parameter.
+        epsilon: Epsilon-tube width.
+
+    Returns:
+        coefficients: [N] alpha_i - alpha*_i.
+        bias: Offset (prediction = K*coef + bias).
+    """
+    _check_solver(kernel)
+    N = X.shape[0]
+    if cache_size is None:
+        cache_size = auto_cache_columns(N)
+    z = np.asarray(to_cpu(z), dtype=np.float64)
+    signs = np.r_[np.ones(N), -np.ones(N)]
+    p = np.r_[epsilon - z, epsilon + z]
+    coefs, bias = _smo_csolver(
+        kernel, X, signs, p, (C, C), tol, max_iter, cache_size, verbose, lengths
+    )
+    return coefs[:N] + coefs[N:], bias
+
+
+def _check_solver(kernel):
     if not kernel.normalize:
         raise ValueError("smo_solve needs a normalized kernel")
     if _get_csmo() is None:
@@ -142,11 +201,6 @@ def smo_solve(
             "The C SMO extension (gkmsvm._csmo) is not built; reinstall with a C "
             "compiler, or train with solver='libsvm'"
         )
-    if cache_size is None:
-        cache_size = auto_cache_columns(X.shape[0])
-    return _smo_csolver(
-        kernel, X, y, (C * pos_weight, C), tol, max_iter, cache_size, verbose, lengths
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -205,16 +259,18 @@ def auto_cache_columns(N: int) -> int:
 
 
 def _prefetch_candidates(state, y, C, k, fresh):
-    """Up to k indices WSS3 is likely to select next, among `fresh` ones; C:
-    each alpha's upper bound ([N]).
+    """Up to k sequence indices whose columns WSS3 is likely to need next,
+    among `fresh` ones ([N]); y, C: each dual variable's sign and upper bound
+    ([n]; variable t uses sequence t mod N's column, n = 2N for SVR).
 
     Working-set pairs come from the ends of -y*G: the largest values in
     I_up and the smallest in I_low. Take half from each. `fresh` excludes
     columns already cached or staged (the likeliest ones usually are).
     """
-    N = y.shape[0]
-    alpha, G = state[:N], state[N : 2 * N]
+    n, N = y.shape[0], fresh.shape[0]
+    alpha, G = state[:n], state[n : 2 * n]
     score = -y * G
+    fresh = np.tile(fresh, n // N)
     up = fresh & (((y > 0) & (alpha < C)) | ((y < 0) & (alpha > 0)))
     low = fresh & (((y > 0) & (alpha > 0)) | ((y < 0) & (alpha < C)))
     half = max(1, k // 2)
@@ -226,13 +282,15 @@ def _prefetch_candidates(state, y, C, k, fresh):
         vals = sign * score[cand]
         take = min(half, cand.size)
         top = cand[np.argpartition(vals, take - 1)[:take]]
-        out.extend(int(t) for t in top)
+        out.extend(int(t) % N for t in top)
     return list(dict.fromkeys(out))[:k]
 
 
-def _smo_csolver(kernel, X, y, C, tol, max_iter, cache_size, verbose, lengths=None):
-    """WSS3 SMO using the C solver with kernel column callback; C: (positives'
-    C, negatives' C).
+def _smo_csolver(kernel, X, y, p, C, tol, max_iter, cache_size, verbose, lengths=None):
+    """WSS3 SMO using the C solver with kernel column callback, over n dual
+    variables with signs y and linear term p ([n] host arrays; variable t
+    uses sequence t mod N's column, see csmo_solve); C: (C of the +1
+    variables, C of the -1 ones). Returns ([n] y_t alpha_t, bias).
 
     The C solver handles the optimization loop (WSS3, shrinking, gradient
     updates) while kernel columns are computed by our KernelColumnCache
@@ -246,18 +304,16 @@ def _smo_csolver(kernel, X, y, C, tol, max_iter, cache_size, verbose, lengths=No
     # Columns live in the C solver's cache; this object only computes them
     cache = KernelColumnCache(kernel, X, lengths)
 
-    y_np = (
-        to_cpu(y).astype(np.float64)
-        if mlx_input
-        else np.asarray(to_cpu(y) if xp is not np else y, dtype=np.float64)
-    )
+    y_np = np.ascontiguousarray(y, dtype=np.float64)
+    p_np = np.ascontiguousarray(p, dtype=np.float64)
+    n = y_np.shape[0]
 
     C_pos, C_neg = C
     C_of = np.where(y_np > 0, C_pos, C_neg)
-    # Written by the C solver: alpha in state[:N], gradient in state[N:2N],
-    # 1.0 in state[2N:] for columns in its cache
-    state = np.zeros(3 * N, dtype=np.float64)
-    in_cache = state[2 * N :]
+    # Written by the C solver: alpha in state[:n], gradient in state[n:2n],
+    # 1.0 in state[2n:] for columns in its cache
+    state = np.zeros(2 * n + N, dtype=np.float64)
+    in_cache = state[2 * n :]
     max_batch = max(1, _SMO_PREFETCH) if cache._use_fast else 1
     # With the l-mer index a column costs one query row, so prefetch only
     # fills empty slots: replacing unrequested prefetches would just churn
@@ -320,12 +376,14 @@ def _smo_csolver(kernel, X, y, C, tol, max_iter, cache_size, verbose, lengths=No
 
     cb = _COLUMN_CB(_column_callback)
 
-    alpha_out = np.zeros(N, dtype=np.float64)
+    alpha_out = np.zeros(n, dtype=np.float64)
     rho_out = np.zeros(1, dtype=np.float64)
 
     lib.csmo_solve.restype = _ct.c_int
     lib.csmo_solve.argtypes = [
         _ct.c_int,
+        _ct.c_int,
+        _ct.POINTER(_ct.c_double),
         _ct.POINTER(_ct.c_double),
         _ct.c_double,
         _ct.c_double,
@@ -340,8 +398,10 @@ def _smo_csolver(kernel, X, y, C, tol, max_iter, cache_size, verbose, lengths=No
     ]
 
     n_iter = lib.csmo_solve(
+        n,
         N,
         y_np.ctypes.data_as(_ct.POINTER(_ct.c_double)),
+        p_np.ctypes.data_as(_ct.POINTER(_ct.c_double)),
         C_pos,
         C_neg,
         tol,

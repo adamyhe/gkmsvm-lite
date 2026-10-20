@@ -281,6 +281,7 @@ def cmd_trainsvr(args: argparse.Namespace) -> None:
         H=args.H,
         include_rc=not args.no_rc,
         solver=args.solver,
+        cache_size=args.cache_size,
         device=args.device,
         allow_other_bases=args.allow_other_bases,
         verbose=args.verbose,
@@ -566,8 +567,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--solver",
         default="auto",
-        choices=["auto", "libsvm", "nystrom"],
-        help="Solver (default: auto).",
+        choices=["auto", "libsvm", "smo", "nystrom"],
+        help="Solver (default: auto: libsvm if the Gram fits in RAM, else smo).",
+    )
+    p.add_argument(
+        "--cache-size",
+        type=int,
+        default=None,
+        help="SMO kernel-column cache size (default: sized from available RAM).",
     )
     _add_kernel_args(p)
     _add_device_arg(p)

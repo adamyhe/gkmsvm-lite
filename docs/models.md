@@ -148,9 +148,8 @@ model = train_gkmsvm(pos, neg, solver="libsvm")  # needs N^2 memory
 model = train_gkmsvm(pos, neg, solver="smo", cache_size=2048)  # O(cache_size x N)
 model = train_gkmsvm(pos, neg, solver="nystrom", n_components=500)  # approximate
 
-# SVR uses the precomputed Gram (or Nyström); SMO SVR is not implemented,
-# so SVR training needs O(N^2) memory.
-model = train_gkmsvr(seqs, labels)
+# SVR takes the same solvers
+model = train_gkmsvr(seqs, labels, solver="smo")
 ```
 
 Training works on all backends (CPU, NVIDIA GPU, Apple Silicon MLX). The returned model is on CPU; use `model.cuda()` or `model.mlx()` to move it for inference. Timings are in [performance](performance.md#measurements).
