@@ -4,7 +4,7 @@ batches equal scoring each sequence at its own length."""
 import numpy as np
 import pytest
 
-from gkmsvm.codec import one_hot_encode
+from gkmsvm.codec import one_hot_decode, one_hot_encode
 from gkmsvm.kernels.packed import PAD_WINDOW
 from gkmsvm.svm import GkmSVM
 
@@ -373,10 +373,11 @@ def test_mixed_lengths_on_device(device, kernel_type):
 @pytest.mark.parametrize("solver", ["libsvm", "smo"])
 def test_training_on_device(device, kernel_type, solver):
     """Training on sequences of different lengths on CUDA/MLX: the Gram equals
-    the CPU's, and the trained model the CPU's to the solver's tolerance."""
+    the CPU's, and the trained models (C-SVC and epsilon-SVR) the CPU's to
+    the solver's tolerance."""
     from gkmsvm.gram import compute_gram
     from gkmsvm.svm import as_batch
-    from gkmsvm.train import _build_kernel, train_gkmsvm
+    from gkmsvm.train import _build_kernel, train_gkmsvm, train_gkmsvr
 
     move, rtol = _device(device)
     rng = np.random.default_rng(17)
@@ -394,6 +395,12 @@ def test_training_on_device(device, kernel_type, solver):
     # move it to another point within that (seen on CUDA: 4e-16 in the Gram,
     # 4e-5 in scores); SMO runs at 1e-6. MLX Gram tiles are float32.
     tol = 1e-6 if device == "cuda" and solver == "smo" else 1e-3
+    np.testing.assert_allclose(_np(dev(q)), _np(cpu(q)), atol=tol)
+
+    # epsilon-SVR, both solvers
+    labels = rng.normal(size=len(pos + neg))
+    cpu = train_gkmsvr(pos + neg, labels, device="cpu", **kw)
+    dev = train_gkmsvr(pos + neg, labels, device=device, **kw)
     np.testing.assert_allclose(_np(dev(q)), _np(cpu(q)), atol=tol)
 
 
@@ -602,6 +609,44 @@ def test_nystrom_and_svr_on_mixed_lengths():
     np.testing.assert_allclose(
         np.asarray(model(seqs)).ravel(), ref.predict(gram), rtol=1e-6, atol=1e-6
     )
+
+
+@pytest.mark.parametrize("kernel_type", ["estimated", "wgkmrbf"])
+@pytest.mark.parametrize("cache_size", [None, 8])
+def test_smo_svr_on_mixed_lengths(kernel_type, cache_size):
+    """SMO SVR (2N dual variables over N cached columns) gives LIBSVM's
+    model, with a cache smaller than N too (eviction, prefetch), and meets
+    the epsilon-SVR KKT conditions to its tolerance: |f - z| <= eps off the
+    SVs, = eps on free ones, >= eps at C, coefficient sign opposite f - z."""
+    from gkmsvm.train import train_gkmsvr
+
+    rng = np.random.default_rng(23)
+    seqs = _seqs(rng, 80, 12, 50)
+    labels = np.array([s.count("GC") + 0.2 * rng.normal() for s in seqs])
+    kw = dict(kernel_type=kernel_type, l=6, k=4, d=2, M=20, H=6.0, gamma=2.0)
+    kw.update(C=0.5, epsilon=0.1, device="cpu")
+    ref = train_gkmsvr(seqs, labels, solver="libsvm", **kw)
+    model = train_gkmsvr(
+        seqs, labels, solver="smo", tol=1e-6, cache_size=cache_size, **kw
+    )
+    q = _seqs(rng, 10, 12, 50)
+    np.testing.assert_allclose(np.asarray(model(q)), np.asarray(ref(q)), atol=2e-3)
+
+    coef = {
+        one_hot_decode(sv[:, :n]): c
+        for sv, n, c in zip(
+            model.support_sequences, model.sv_lengths, model.coefficients
+        )
+    }
+    a = np.array([coef.get(s.replace("N", "A"), 0.0) for s in seqs])
+    assert (a != 0).sum() == model.num_support_vectors
+    r = np.asarray(model(seqs)).ravel() - labels
+    free = (a != 0) & (np.abs(a) < 0.5 - 1e-9)
+    assert free.any() and (np.abs(a) >= 0.5 - 1e-9).any()
+    assert np.abs(np.abs(r[free]) - 0.1).max() < 1e-5
+    assert (np.abs(r[a == 0]) < 0.1 + 1e-5).all()
+    assert (np.abs(r[np.abs(a) >= 0.5 - 1e-9]) > 0.1 - 1e-5).all()
+    assert (np.sign(a[a != 0]) == -np.sign(r[a != 0])).all()
 
 
 def test_training_rejects_sequences_shorter_than_l():

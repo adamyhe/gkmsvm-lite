@@ -82,9 +82,10 @@ gkmsvm trainsvr -i sequences.fa --labels values.txt -o model.npz -C 1.0 --epsilo
 | `--labels` | Labels file (one value per line, same order as FASTA) |
 | `-o`, `--output` | Output model |
 | `--epsilon` | SVR epsilon / tube width (default: 0.1) |
-| `--solver` | `auto`, `libsvm`, or `nystrom` (default: auto) |
+| `--solver` | `auto`, `libsvm`, `smo`, or `nystrom` (default: auto: libsvm if the Gram fits in RAM, else smo) |
+| `--cache-size` | SMO kernel-column cache size (default: sized from available RAM) |
 
-Accepts the same kernel and device options as `train`. SVR uses the precomputed Gram (or Nyström); SMO is not implemented for SVR, so training dataset size is bounded by available memory.
+Accepts the same kernel and device options as `train`.
 
 ## explain
 

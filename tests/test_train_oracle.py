@@ -126,7 +126,8 @@ def _svr_predictions(name, length):
 
 
 @pytest.mark.parametrize("name", SVR_PARAMS)
-def test_svr_matches_lsgkm_svr(name):
+@pytest.mark.parametrize("solver", ["libsvm", "smo"])
+def test_svr_matches_lsgkm_svr(name, solver):
     """train_gkmsvr gives lsgkm-svr's support vectors, coefficients to the
     1e-3 stopping tolerance and predictions; its model files load and
     reproduce its gkmpredict."""
@@ -135,7 +136,13 @@ def test_svr_matches_lsgkm_svr(name):
     seqs = _seqs("lsgkm_svr_train.fa")
     labels = np.loadtxt(FIXTURES / "lsgkm_svr_labels.txt")
     model = train_gkmsvr(
-        seqs, labels, C=1.0, epsilon=0.1, device="cpu", **SVR_PARAMS[name]
+        seqs,
+        labels,
+        C=1.0,
+        epsilon=0.1,
+        solver=solver,
+        device="cpu",
+        **SVR_PARAMS[name],
     )
     imported = load_lsgkm_model(FIXTURES / f"lsgkm_svr_{name}.model.txt.gz")
     ref = _sv_coefficients(imported)
@@ -151,3 +158,28 @@ def test_svr_matches_lsgkm_svr(name):
         np.testing.assert_allclose(
             np.asarray(model(queries)).ravel(), expected, atol=5e-4
         )
+
+
+def test_cli_trainsvr_smo(tmp_path):
+    """gkmsvm trainsvr --solver smo gives lsgkm-svr's model."""
+    from gkmsvm.cli import main
+    from gkmsvm.serialization import load_model
+
+    out = str(tmp_path / "m.npz")
+    main(
+        [
+            "trainsvr",
+            "-i",
+            str(FIXTURES / "lsgkm_svr_train.fa"),
+            "--labels",
+            str(FIXTURES / "lsgkm_svr_labels.txt"),
+            "-o",
+            out,
+            *("-t", "2", "-l", "10", "-k", "6", "-d", "3", "--solver", "smo"),
+            *("--cache-size", "16", "--device", "cpu"),
+        ]
+    )
+    ref = _sv_coefficients(load_lsgkm_model(FIXTURES / "lsgkm_svr_t2.model.txt.gz"))
+    got = _sv_coefficients(load_model(out))
+    assert set(got) == set(ref)
+    np.testing.assert_allclose([got[s] for s in ref], list(ref.values()), atol=5e-3)

@@ -105,19 +105,7 @@ def train_gkmsvm(
             f"Unknown solver {solver!r}. Use 'auto', 'libsvm', 'nystrom', or 'smo'."
         )
     if solver == "auto":
-        N = X.shape[0]
-        gram_gb = N * N * 8 / 1024**3
-        capped = max_gram_gb is not None and gram_gb > max_gram_gb
-        solver = "libsvm" if not capped and _gram_fits_on_cpu(N) else "smo"
-        if solver == "smo":
-            import warnings
-
-            warnings.warn(
-                f"Gram matrix ({gram_gb:.1f} GB) does not fit in memory — falling back to "
-                f"column-cached SMO, which is slower than a precomputed Gram. Consider "
-                f"downsampling or solver='nystrom' for faster approximate training.",
-                stacklevel=2,
-            )
+        solver = _auto_solver(X.shape[0], max_gram_gb)
     return _fit(
         X,
         y,
@@ -157,6 +145,10 @@ def train_gkmsvr(
     include_rc: bool = True,
     solver: str = "auto",
     n_components: int | None = None,
+    cache_size: int | None = None,
+    tol: float = 1e-3,
+    max_iter: int = 10_000_000,
+    max_gram_gb: float | None = None,
     sv_chunk_size: int | None = None,
     gram_chunk_size: int = 1000,
     device: str = "auto",
@@ -166,7 +158,7 @@ def train_gkmsvr(
     """Train a gapped k-mer SVR (epsilon-SVR) for regression.
 
     Predicts continuous values from DNA sequences using the gapped
-    k-mer kernel with sklearn's epsilon-SVR solver.
+    k-mer kernel, LIBSVM's epsilon-SVR (as lsgkm-svr's gkmtrain -y 3).
 
     Args:
         sequences: DNA sequences — list of strings or [4, L] arrays (lengths
@@ -182,10 +174,15 @@ def train_gkmsvr(
         M: Weight of the center window, 1-255 (-t 4, -t 5; default 50, as LS-GKM).
         H: Half-life of the window weights in bp (-t 4, -t 5; default 50).
         include_rc: Include reverse complement in kernel.
-        solver: ``"auto"`` (precomputed Gram if it fits), ``"nystrom"``
-            (Nyström low-rank approximation — faster but approximate),
-            or ``"libsvm"`` (precomputed Gram + sklearn solver).
+        solver: As train_gkmsvm: ``"auto"``, ``"libsvm"`` (precomputed Gram +
+            sklearn's SVR), ``"smo"`` (column-cached SMO over the 2N dual
+            variables, O(cache_size x N) memory), or ``"nystrom"``.
         n_components: Number of landmark points for Nyström approximation.
+        cache_size: Number of kernel columns to cache (SMO only); None sizes
+            it from available RAM.
+        tol: KKT violation tolerance (SMO only).
+        max_iter: Maximum SMO iterations.
+        max_gram_gb: Largest Gram matrix (GB) ``solver="auto"`` may allocate.
         sv_chunk_size: ``sv_chunk_size`` of the returned model (GkmExplain).
         gram_chunk_size: Tile size for Gram matrix computation.
         device: Where to train: ``"auto"`` (CUDA, else MLX, if available),
@@ -198,9 +195,9 @@ def train_gkmsvr(
     Returns:
         A trained GkmSVM model. Scores are predicted continuous values.
     """
-    if solver not in ("auto", "libsvm", "nystrom"):
+    if solver not in ("auto", "libsvm", "nystrom", "smo"):
         raise ValueError(
-            f"solver must be 'auto', 'libsvm' or 'nystrom' for SVR, got {solver!r}"
+            f"Unknown solver {solver!r}. Use 'auto', 'libsvm', 'nystrom', or 'smo'."
         )
     X, lengths = _to_onehot(sequences, allow_other_bases)
     _check_lengths(X, lengths, l)
@@ -211,10 +208,12 @@ def train_gkmsvr(
             f"Number of labels ({y.shape[0]}) must match "
             f"number of sequences ({X.shape[0]})"
         )
+    if solver == "auto":
+        solver = _auto_solver(X.shape[0], max_gram_gb)
     return _fit(
         X,
         y,
-        "nystrom" if solver == "nystrom" else "libsvm",
+        solver,
         C=C,
         epsilon=epsilon,
         kernel_type=kernel_type,
@@ -229,6 +228,7 @@ def train_gkmsvr(
         gram_chunk_size=gram_chunk_size,
         sv_chunk_size=sv_chunk_size,
         verbose=verbose,
+        smo_args={"cache_size": cache_size, "tol": tol, "max_iter": max_iter},
         lengths=lengths,
     )
 
@@ -236,6 +236,23 @@ def train_gkmsvr(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _auto_solver(N: int, max_gram_gb: float | None) -> str:
+    """ "libsvm" when the N x N Gram fits in RAM and under max_gram_gb, else "smo"."""
+    gram_gb = N * N * 8 / 1024**3
+    capped = max_gram_gb is not None and gram_gb > max_gram_gb
+    if not capped and _gram_fits_on_cpu(N):
+        return "libsvm"
+    import warnings
+
+    warnings.warn(
+        f"Gram matrix ({gram_gb:.1f} GB) does not fit in memory — falling back to "
+        f"column-cached SMO, which is slower than a precomputed Gram. Consider "
+        f"downsampling or solver='nystrom' for faster approximate training.",
+        stacklevel=3,
+    )
+    return "smo"
 
 
 def _move_to_device(X: np.ndarray, device: str, verbose: bool) -> np.ndarray:
@@ -334,23 +351,35 @@ def _fit(
         include_rc,
     )
     if solver == "smo":
-        from gkmsvm.solver import smo_solve
+        from gkmsvm.solver import smo_solve, smo_svr_solve
 
         if verbose:
             print(
                 f"Training with SMO solver (N={X.shape[0]}, "
                 f"cache={smo_args['cache_size']})..."
             )
-        coefs, bias = smo_solve(
-            kernel,
-            X,
-            y,
-            C=C,
-            verbose=verbose,
-            lengths=lengths,
-            pos_weight=pos_weight,
-            **smo_args,
-        )
+        if epsilon is not None:
+            coefs, bias = smo_svr_solve(
+                kernel,
+                X,
+                y,
+                C=C,
+                epsilon=epsilon,
+                verbose=verbose,
+                lengths=lengths,
+                **smo_args,
+            )
+        else:
+            coefs, bias = smo_solve(
+                kernel,
+                X,
+                y,
+                C=C,
+                verbose=verbose,
+                lengths=lengths,
+                pos_weight=pos_weight,
+                **smo_args,
+            )
         sv_idx = np.flatnonzero(np.abs(coefs) > 1e-10)
         coefs = coefs[sv_idx]
     else:

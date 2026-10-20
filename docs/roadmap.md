@@ -74,6 +74,7 @@
 - [x] `-t 0` truncated at `d` mismatches, as LS-GKM
 - [x] `-w` positive-class weight (`pos_weight`; LIBSVM and SMO match gkmtrain `-w 2` and `-w 0.5`)
 - [x] SVR oracle: `train_gkmsvr` gives kundajelab/lsgkm-svr's epsilon-SVR models (`-t 2/3/4`: same SVs, coefficients to 1e-3, predictions to 5e-4), and its model files reproduce its gkmpredict
+- [x] SMO SVR: `train_gkmsvr(solver="smo")` (and `"auto"` when the Gram doesn't fit), the C SMO over LIBSVM's 2N epsilon-SVR dual variables with N cached columns; lsgkm-svr's models to 2e-7, LIBSVM's on mixed lengths, KKT conditions to the tolerance, on CPU, CUDA and MLX
 - [x] Training oracle: `train_gkmsvm` (LIBSVM and SMO) gives gkmtrain's support vectors for `-t 0` to `-t 5` on fixed- and mixed-length sets with N, coefficients to the solvers' 1e-3 tolerance and gkmpredict's scores to 5e-4; gkmtrain's solutions meet our KKT conditions (`tests/test_train_oracle.py`)
 - [x] Fixed-length pipeline (`--genome` summit windows, `--length` center-crop, 300 bp for training) and sequences of different lengths for compatibility: padded SVs and queries on CPU, CUDA and Metal; imported mixed-length models, npz/LS-GKM round trips; training, ISM, GkmExplain, mutation impact, variant scores and DeltaSVM on mixed lengths (gkmpredict, gkmtrain and gkmexplain oracles)
 
@@ -91,6 +92,5 @@ Performance gaps:
 
 Features:
 
-- [ ] **SMO SVR** — column-cached SMO solver for epsilon-SVR (2N dual variables, epsilon-tube working set selection). Currently SVR uses precomputed Gram only; SMO SVR needed for large-scale regression where the Gram matrix exceeds available memory. Reference implementation: kundajelab/lsgkm-svr
 - [ ] **Binary Platt scaling** — calibrated probability output for binary SVC models. Fit sigmoid (A, B) on held-out decision values; store parameters in GkmSVM and serialize to npz; add `predict_proba()` method. Post-hoc calibration avoids the 5-fold CV overhead of sklearn's `probability=True`. See mLS-GKM (Howard & Harmston, 2026) for reference.
 - [ ] **Multiclass SVC** — one-vs-one classification with K(K-1)/2 binary sub-models. Requires architectural changes to GkmSVM (multiple SV sets, per-pair coefficients/bias). Wu-Lin-Weng coupling converts pairwise probabilities into K-class vector (requires Platt scaling). See mLS-GKM (Howard & Harmston, 2026) for reference.

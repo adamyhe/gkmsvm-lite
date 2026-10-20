@@ -107,7 +107,7 @@ The mismatch table has zero entries for high-mismatch counts. For esttrunc l=11 
 
 ## Epsilon-SVR
 
-`train_gkmsvr()` trains an epsilon-SVR for continuous-valued prediction (e.g. quantitative chromatin accessibility from lsgkm-svr). The epsilon parameter controls the tube width — errors within ±epsilon are not penalized. Uses LIBSVM's `-s 3` solver with precomputed Gram matrix. SMO SVR (2N dual variables, different box constraints) is deferred — the Gram path handles typical regression dataset sizes.
+`train_gkmsvr()` trains an epsilon-SVR for continuous-valued prediction (e.g. quantitative chromatin accessibility from lsgkm-svr). The epsilon parameter controls the tube width — errors within ±epsilon are not penalized. It takes the same solvers as `train_gkmsvm`: LIBSVM's `-s 3` on the precomputed Gram, Nyström, or the column-cached SMO. The SMO solves LIBSVM's epsilon-SVR dual: 2N variables, α_i with sign +1 and linear term ε − z_i, α*_i with sign −1 and ε + z_i, both using sequence i's kernel column, so the cache holds N columns as for C-SVC and the solver is the C-SVC one with a linear term and a column index t mod N. Coefficients are α − α*.
 
 ## References
 
