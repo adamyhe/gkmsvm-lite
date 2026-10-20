@@ -598,7 +598,9 @@ class LmerIndex:
             )
         return out
 
-    def _pairwise_mlx(self, bx):
+    def _pairwise_mlx(self, bx, host=False):
+        """pairwise() in Metal; host: return the float64 NumPy result
+        (combined from exact counts) instead of float32 on the device."""
         import mlx.core as mx
 
         global _metal_fn, _metal_fn_w
@@ -629,7 +631,8 @@ class LmerIndex:
         if len(self.table) > _METAL_MAX_LEVELS:
             # One int32 [rows, S] block per level; with many levels, query on
             # CPU, which shares memory with the GPU
-            return mx.array(self.pairwise(np.asarray(to_cpu(bx))).astype(np.float32))
+            out = self.pairwise(np.ascontiguousarray(to_cpu(bx)))
+            return out if host else mx.array(out.astype(np.float32))
         if self.offsets[-1] >= 2**31:
             raise ValueError("l-mer index too large for the Metal kernel")
         offsets, ids, masks, levels, vals = self._arrays("mlx")
@@ -683,4 +686,4 @@ class LmerIndex:
             counts = counts.reshape(n_lev, nb, self.S)
             for m in range(n_lev):
                 out[b0 : b0 + nb] += self.table[m] * counts[m].astype(np.float64)
-        return mx.array(out.astype(np.float32))
+        return out if host else mx.array(out.astype(np.float32))

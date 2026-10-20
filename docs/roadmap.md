@@ -74,6 +74,8 @@
 - [x] `-t 0` truncated at `d` mismatches, as LS-GKM
 - [x] `-w` positive-class weight (`pos_weight`; LIBSVM and SMO match gkmtrain `-w 2` and `-w 0.5`)
 - [x] SVR oracle: `train_gkmsvr` gives kundajelab/lsgkm-svr's epsilon-SVR models (`-t 2/3/4`: same SVs, coefficients to 1e-3, predictions to 5e-4), and its model files reproduce its gkmpredict
+- [x] `-t 4/5` on CUDA and Metal: weighted brute force and self-kernels in both; on MLX the masked join and l-mer index count weighted hits in Metal, exact in 64 bits (uint32 word + carry). MLX 1500 x 1500 300 bp Gram 1.66 s -> 0.65 s (`-t 2` 0.58 s)
+- [x] GkmExplain on MLX: the l-mer path in Metal, per-window float32 partials folded in float64 on CPU (`docs/design/mlx-gkmexplain.md`); within 6e-7 of the CPU's largest attribution, 1.2-5x the CPU on an M4
 - [x] SMO SVR: `train_gkmsvr(solver="smo")` (and `"auto"` when the Gram doesn't fit), the C SMO over LIBSVM's 2N epsilon-SVR dual variables with N cached columns; lsgkm-svr's models to 2e-7, LIBSVM's on mixed lengths, KKT conditions to the tolerance, on CPU, CUDA and MLX
 - [x] Training oracle: `train_gkmsvm` (LIBSVM and SMO) gives gkmtrain's support vectors for `-t 0` to `-t 5` on fixed- and mixed-length sets with N, coefficients to the solvers' 1e-3 tolerance and gkmpredict's scores to 5e-4; gkmtrain's solutions meet our KKT conditions (`tests/test_train_oracle.py`)
 - [x] Fixed-length pipeline (`--genome` summit windows, `--length` center-crop, 300 bp for training) and sequences of different lengths for compatibility: padded SVs and queries on CPU, CUDA and Metal; imported mixed-length models, npz/LS-GKM round trips; training, ISM, GkmExplain, mutation impact, variant scores and DeltaSVM on mixed lengths (gkmpredict, gkmtrain and gkmexplain oracles)
@@ -86,9 +88,7 @@ Gaps found by checking against LS-GKM (2026-10-19), most important first:
 
 Performance gaps:
 
-- [ ] `-t 4`/`-t 5` self-kernels and brute force (< 16 rows) run on CPU even on CUDA; MLX joins and queries weighted windows on CPU.
-- [ ] GkmExplain on MLX runs on CPU and returns NumPy (Metal has no float64). Plan: per-window partials on the GPU folded in float64 on CPU, float-float within a window if float32 isn't enough; measure float32 error first (`docs/design/mlx-gkmexplain.md`). Not needed for the application note.
-- [ ] No explain table for RBF (`-t 3`/`-t 5`): their SV weights depend on the query, so they take the index path.
+- None open. RBF (`-t 3`/`-t 5`) has no explain table by construction: the table sums the SVs into one 4^l vector V before any query, and an RBF SV's weight depends on the query through exp(γ(K(x, sv) − 1)), so V would be per query and cost as much as the index path's query.
 
 Features:
 

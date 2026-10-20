@@ -781,8 +781,56 @@ def test_gkmexplain_mlx_reuses_cpu_model():
         first = gkmexplain(model, to_mlx(x), mode="hypothetical")
         cpu_model = model._sv_cache["cpu_model"]
         second = gkmexplain(model, to_mlx(x), mode="importance")
-    # Explained on CPU, so NumPy float64
+    # Window partials folded on CPU in float64, so NumPy float64
     assert isinstance(first, np.ndarray) and first.dtype == np.float64
     assert model._sv_cache["cpu_model"] is cpu_model
-    np.testing.assert_allclose(first, expected, rtol=1e-6)
-    np.testing.assert_allclose(second, expected * x, rtol=1e-6)
+    tol = 1e-6 * np.abs(expected).max()  # float32 sums within each window
+    np.testing.assert_allclose(first, expected, rtol=0, atol=tol)
+    np.testing.assert_allclose(second, expected * x, rtol=0, atol=tol)
+
+
+@pytest.mark.parametrize(
+    "kernel_type",
+    ["gkm_cnt", "gkm_estfull", "gkm_esttrunc", "gkmrbf", "wgkm", "wgkmrbf"],
+)
+@pytest.mark.parametrize("mode", ["hypothetical", "perturbation"])
+def test_gkmexplain_metal_matches_cpu(kernel_type, mode):
+    """The Metal l-mer path (index path for RBF) on mixed-length queries and
+    SVs with N: the CPU's attributions to 1e-6 of the largest, no CPU
+    fallback warning, and importance sums to score - bias (non-RBF)."""
+    import warnings
+
+    from gkmsvm.explain import gkmexplain
+
+    rng = np.random.default_rng(3)
+
+    def seqs(n, lo, hi):
+        out = []
+        for i in range(n):
+            s = list(rng.choice(list("ACGT"), int(rng.integers(lo, hi + 1))))
+            if i % 4 == 0:
+                s[3:7] = "NNNN"
+            out.append("".join(s))
+        return out
+
+    params = {"L": 7, "k": 5, "d": 2, "gamma": 2.0, "M": 20, "H": 6.0}
+    from gkmsvm.svm import as_batch
+
+    sv, sv_len = as_batch(seqs(60, 15, 70))
+    model = GkmSVM(sv, rng.normal(size=60), 0.3, kernel_type, params, sv_lengths=sv_len)
+    model.use_explain_table = False
+    q = seqs(9, 9, 80)
+    expected = gkmexplain(model, q, mode=mode)
+    model.mlx()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # a CPU fallback warns
+        got = gkmexplain(model, q, mode=mode)
+    assert isinstance(got, np.ndarray) and got.dtype == np.float64
+    np.testing.assert_allclose(
+        got, expected, rtol=0, atol=1e-6 * np.abs(expected).max()
+    )
+    if mode == "hypothetical" and kernel_type not in ("gkmrbf", "wgkmrbf"):
+        imp = gkmexplain(model, q, mode="importance").sum(axis=(1, 2))
+        model.cpu()
+        score = np.asarray(model(q)).ravel() - model.bias
+        np.testing.assert_allclose(imp, score, rtol=0, atol=1e-6 * np.abs(score).max())

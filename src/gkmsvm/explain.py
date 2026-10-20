@@ -386,6 +386,236 @@ def _explain_lmer_gpu(
     return out
 
 
+# Metal (MLX) version of explain_lmer: the same 16-lane groups, one per query
+# window, lane k owning position k and the neighbors passed round with
+# simd_shuffle (two groups per 32-wide SIMD group). Metal has no float64, so
+# nothing is summed across windows on the GPU: each window writes its four
+# float32 sums per position (r[d] + q) to part [slices, B, W, 4, 16], and the
+# CPU folds the overlapping windows in float64 (_fold_windows). No atomics.
+_EXPLAIN_LMER_METAL = """
+    uint tid = thread_position_in_threadgroup.x;
+    uint tg = threads_per_threadgroup.x;
+    uint lane = tid % 16;
+    uint i = threadgroup_position_in_grid.x * (tg / 16) + tid / 16;
+    uint slice = threadgroup_position_in_grid.y;
+    uint b = threadgroup_position_in_grid.z;
+    uint W = (uint)params[0], n_masks = (uint)params[1], chunk = (uint)params[2];
+    uint use_index = (uint)params[3], S = (uint)params[4], n_lmers = (uint)params[5];
+    uint perturbation = (uint)params[6], weighted = (uint)params[7];
+    uint wx_stride = (uint)params[8], B = (uint)params[9], l = (uint)params[10];
+    // Groups past the last window still take part in the shuffles
+    bool valid = i < W;
+    uint u = valid ? bx[b * W + i] : 0u;
+    uint shift = 2 * lane;
+    float r0 = 0.0f, r1 = 0.0f, r2 = 0.0f, r3 = 0.0f, q = 0.0f;
+    uint t_begin = slice * chunk;
+    uint t_end = min(n_masks, t_begin + chunk);
+    ushort src = (ushort)((tid % 32) & ~15u);  // this group's first lane
+    for (uint t0 = t_begin; t0 < t_end; t0 += 16) {
+        uint t = t0 + lane;
+        uint my_mask = 0u;
+        float my_a = 0.0f, my_b = 0.0f;
+        if (valid && t < t_end) {
+            my_mask = masks[t];
+            uint v = u ^ my_mask;
+            if (v < n_lmers) {  // else a padding window
+                float wv;
+                if (use_index) {
+                    // compensated sum: the SV weights are signed
+                    float hi = 0.0f, lo = 0.0f;
+                    for (int e = offsets[v]; e < offsets[v + 1]; e++) {
+                        float y = w[b * S + ids[e]] * (weighted ? (float)vals[e] : 1.0f);
+                        float t2 = hi + y;
+                        lo += (fabs(hi) >= fabs(y)) ? (hi - t2) + y : (y - t2) + hi;
+                        hi = t2;
+                    }
+                    wv = hi + lo;
+                } else {
+                    wv = V[v];
+                }
+                if (weighted) wv *= wx[b * wx_stride + i];
+                my_a = wv * table_a[levels[t]];
+                my_b = wv * table_b[levels[t]];
+            }
+        }
+        uint n = min(16u, t_end - t0);
+        for (uint j = 0; j < n; j++) {
+            uint mask = simd_shuffle(my_mask, (ushort)(src + j));
+            float av = simd_shuffle(my_a, (ushort)(src + j));
+            float bv = simd_shuffle(my_b, (ushort)(src + j));
+            if (av == 0.0f && bv == 0.0f) continue;
+            uint d = (mask >> shift) & 3u;
+            float val;
+            if (d != 0u) {
+                val = bv;
+            } else if (perturbation) {
+                q += av;
+                val = -av;
+            } else {
+                val = av;
+            }
+            r0 += d == 0u ? val : 0.0f;
+            r1 += d == 1u ? val : 0.0f;
+            r2 += d == 2u ? val : 0.0f;
+            r3 += d == 3u ? val : 0.0f;
+        }
+    }
+    if (!valid || lane >= l) return;
+    uint o = (((slice * B + b) * W + i) * 4) * 16 + lane;
+    part[o] = r0 + q;
+    part[o + 16] = r1 + q;
+    part[o + 32] = r2 + q;
+    part[o + 48] = r3 + q;
+"""
+_metal_explain_lmer = None
+_EXPLAIN_LMER_METAL_THREADS = 128
+# Bytes of window partials per launch ([slices, rows, W, 4, 16] float32)
+_EXPLAIN_LMER_METAL_BYTES = 256 * 2**20
+
+
+@njit(parallel=True, cache=True)
+def _fold_windows(packed_x, part, inv_dx, l, seqlen):
+    """[B, 4, seqlen] float64 from window partials part [slices, B, W, 4, 16]:
+    window i's sum for delta d at its position k goes to base u_k ^ d at
+    i + k, times inv_dx[b]."""
+    n_slices, B, W = part.shape[:3]
+    out = np.zeros((B, 4, seqlen))
+    for b in prange(B):
+        for i in range(W):
+            u = packed_x[b, i]
+            if u == _PAD:
+                continue
+            for k in range(l):
+                uk = (u >> np.uint32(2 * k)) & np.uint32(3)
+                for d in range(4):
+                    acc = 0.0
+                    for c in range(n_slices):
+                        acc += part[c, b, i, d, k]
+                    out[b, int(uk ^ np.uint32(d)), i + k] += acc
+        out[b] *= inv_dx[b]
+    return out
+
+
+def _explain_lmer_metal(
+    packed_x,
+    inv_dx,
+    V,
+    index,
+    w,
+    masks,
+    levels,
+    table_a,
+    table_b,
+    l,
+    seqlen,
+    perturbation,
+    wx,
+    cache,
+):
+    """_explain_lmer_gpu in Metal: [B, 4, seqlen] float64 NumPy. V (float32 on
+    the device, cached in `cache`) or, for RBF, the l-mer index and per-query
+    SV weights w [B, S]; wx: query window weights ([B or 1, W] float64, [1, 0]
+    unweighted)."""
+    import mlx.core as mx
+
+    global _metal_explain_lmer
+    if _metal_explain_lmer is None:
+        _metal_explain_lmer = mx.fast.metal_kernel(
+            name="gkm_explain_lmer",
+            input_names=[
+                "bx",
+                "masks",
+                "levels",
+                "V",
+                "offsets",
+                "ids",
+                "w",
+                "vals",
+                "wx",
+                "table_a",
+                "table_b",
+                "params",
+            ],
+            output_names=["part"],
+            source=_EXPLAIN_LMER_METAL,
+        )
+    B, W = packed_x.shape
+    n_masks = len(masks)
+    key = ("explain_lmer_metal", id(masks))
+    if cache.get(key, (None,))[0] is not masks:
+        cache[key] = (
+            masks,
+            mx.array(np.ascontiguousarray(masks, dtype=np.uint32)),
+            mx.array(np.ascontiguousarray(levels, dtype=np.int32)),
+        )
+    _, masks_d, levels_d = cache[key]
+    zero_f, zero_i = mx.zeros(1, dtype=mx.float32), mx.zeros(1, dtype=mx.int32)
+    use_index = V is None
+    if use_index:
+        offsets, ids, _, _, vals = index._arrays("mlx")
+        w_d = mx.array(np.ascontiguousarray(w, dtype=np.float32))
+        V_d, S = zero_f, w.shape[1]
+        vals = vals if vals is not None else mx.zeros(1, dtype=mx.uint32)
+    else:
+        if "explain_V_mlx" not in cache:
+            cache["explain_V_mlx"] = mx.array(V.astype(np.float32))
+        V_d, S = cache["explain_V_mlx"], 0
+        offsets = ids = zero_i
+        w_d, vals = zero_f, mx.zeros(1, dtype=mx.uint32)
+    weighted = wx.shape[1] > 0
+    wx_stride = W if weighted and wx.shape[0] > 1 else 0
+    wx_d = mx.array(wx.astype(np.float32)) if weighted else zero_f
+    per_tg = _EXPLAIN_LMER_METAL_THREADS // 16
+    groups = -(-W // per_tg)
+    n_slices = max(
+        1,
+        min(
+            -(-n_masks // 256),
+            -(-_EXPLAIN_LMER_THREADS // (B * groups * _EXPLAIN_LMER_METAL_THREADS)),
+            max(1, _EXPLAIN_LMER_METAL_BYTES // (B * W * 4 * 16 * 4)),
+        ),
+    )
+    chunk = -(-n_masks // n_slices)
+    n_slices = -(-n_masks // chunk)
+    params = [
+        W,
+        n_masks,
+        chunk,
+        int(use_index),
+        S,
+        4**l,
+        int(perturbation),
+        int(weighted),
+        wx_stride,
+        B,
+        l,
+    ]
+    part = _metal_explain_lmer(
+        inputs=[
+            mx.array(np.ascontiguousarray(packed_x, dtype=np.uint32)),
+            masks_d,
+            levels_d,
+            V_d,
+            offsets,
+            ids,
+            w_d,
+            vals,
+            wx_d,
+            mx.array(np.asarray(table_a, dtype=np.float32)),
+            mx.array(np.asarray(table_b, dtype=np.float32)),
+            mx.array(params, dtype=mx.int32),
+        ],
+        template=[],
+        grid=(groups * _EXPLAIN_LMER_METAL_THREADS, n_slices, B),
+        threadgroup=(_EXPLAIN_LMER_METAL_THREADS, 1, 1),
+        output_shapes=[(n_slices * B * W * 4 * 16,)],
+        output_dtypes=[mx.float32],
+        init_value=0,
+    )[0]
+    part = np.array(part).reshape(n_slices, B, W, 4, 16)
+    return _fold_windows(np.ascontiguousarray(packed_x), part, inv_dx, l, seqlen)
+
+
 @njit(parallel=True, cache=True, fastmath=True)
 def _explain_cpu(
     packed_x,
@@ -747,12 +977,9 @@ def gkmexplain(
     short = _short_rows(lengths, model.kernel.base.l, "attributions")
 
     if is_mlx(x):
-        # Metal can't accumulate in float64, which the completeness axiom needs
-        warnings.warn(
-            "GkmExplain does not have an MLX kernel: it runs on CPU and returns "
-            "a NumPy float64 array.",
-            stacklevel=2,
-        )
+        # The l-mer path runs in Metal (window partials folded in float64 on
+        # the CPU), the explain table and the per-SV kernel on CPU, on a CPU
+        # copy of the model; the result is NumPy float64
         from gkmsvm.backend import to_cpu
 
         # A CPU copy of the model, kept with the model's caches so its packed
@@ -772,16 +999,20 @@ def gkmexplain(
             cpu_model.use_lmer_table = model.use_lmer_table
             cpu_model.use_explain_table = model.use_explain_table
             model._sv_cache["cpu_model"] = cpu_model
-        out = _gkmexplain(cpu_model, to_cpu(x), lengths, resolved, batch_size, verbose)
+        out = _gkmexplain(
+            cpu_model, to_cpu(x), lengths, resolved, batch_size, verbose, metal=True
+        )
         return _per_position(out, lengths, short)
     out = _gkmexplain(model, x, lengths, resolved, batch_size, verbose)
     return _per_position(out, lengths, short)
 
 
-def _gkmexplain(model, x, lengths, resolved, batch_size, verbose):
-    """gkmexplain on x on the model's device (not MLX), lengths None or [B]."""
+def _gkmexplain(model, x, lengths, resolved, batch_size, verbose, metal=False):
+    """gkmexplain on x on the model's device (not MLX), lengths None or [B].
+    metal: x and the model are a CPU copy of an MLX model's, and the l-mer
+    path runs in Metal."""
     if resolved == "importance":
-        hyp = _gkmexplain(model, x, lengths, "hypothetical", batch_size, verbose)
+        hyp = _gkmexplain(model, x, lengths, "hypothetical", batch_size, verbose, metal)
         return hyp * _n_as_a(x)
 
     is_perturbation = resolved == "perturbation"
@@ -830,9 +1061,16 @@ def _gkmexplain(model, x, lengths, resolved, batch_size, verbose):
         gamma,
         batch_size,
         verbose,
+        metal,
     )
     if lmer is not None:
         return lmer
+    if metal:
+        warnings.warn(
+            "GkmExplain has no MLX kernel for this model (the l-mer path doesn't "
+            "apply): it runs on CPU.",
+            stacklevel=3,
+        )
 
     S = model.num_support_vectors
     coefs = model.coefficients
@@ -1182,7 +1420,17 @@ def _explain_with_table(model, x, A, perturbation, batch_size, verbose, lengths=
 
 
 def _explain_lmer(
-    model, x, lengths, table_a, table_b, dmax, perturbation, gamma, batch_size, verbose
+    model,
+    x,
+    lengths,
+    table_a,
+    table_b,
+    dmax,
+    perturbation,
+    gamma,
+    batch_size,
+    verbose,
+    metal=False,
 ):
     """GkmExplain through the SVs' l-mer weights, or None when it doesn't apply.
 
@@ -1196,7 +1444,8 @@ def _explain_lmer(
     RBF models (gamma given) scale each SV by _rbf_scale of its kernel value
     with the query, so V depends on the query: each neighbor sums the
     per-query SV weights over the l-mer index's entries instead (about one
-    more index query per call). Runs on CPU; results go back to x's device.
+    more index query per call). Runs on CPU (in Metal with metal, x on CPU);
+    results go back to x's device.
     """
     import numba
 
@@ -1270,6 +1519,32 @@ def _explain_lmer(
         W = packed_x.shape[1]
         n_split = max(1, min(W, -(-numba.get_num_threads() // x_b.shape[0])))
         wx = _query_wts(base, packed_x)
+        if metal:
+            w = None
+            if index is not None:
+                # The CPU query: exact in float64 too, and faster than the
+                # Metal one on large SV sets (contended atomics)
+                k_norm = index.pairwise(packed_x) * inv_dx[:, None] * inv_ds[None, :]
+                w = coef * inv_ds * _rbf_scale(k_norm, gamma)
+            parts.append(
+                _explain_lmer_metal(
+                    packed_x,
+                    inv_dx,
+                    V,
+                    index,
+                    w,
+                    masks,
+                    levels,
+                    table_a,
+                    table_b,
+                    l,
+                    seqlen,
+                    perturbation,
+                    wx,
+                    model._sv_cache,
+                )
+            )
+            continue
         if index is None:
             parts.append(
                 _explain_lmer_cpu(
