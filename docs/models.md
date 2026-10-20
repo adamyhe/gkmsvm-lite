@@ -29,18 +29,15 @@ Bias convention: `bias = -rho` (LIBSVM convention).
 
 ```python
 from gkmsvm import load_classic_model, load_r_gkmsvm_model
-from gkmsvm.importers.classic import load_svalpha_model
 
 model = load_classic_model("mymodel_svalpha.out")  # finds mymodel_svseq.fa
-model = load_r_gkmsvm_model("mymodel_svalpha.out", L=11, k=7, d=3)
-model = load_svalpha_model("a_svalpha.out", "a_svseq.fa", filter_type=2)  # -t 2
+model = load_classic_model("a_svalpha.out", "a_svseq.fa", L=11, k=7, d=3, filter_type=2)
+model = load_r_gkmsvm_model("mymodel_svalpha.out", L=10, K=6, maxnmm=3, useTgkm=1)
 ```
 
 `filter_type` is `gkmsvm_kernel -t` (R `useTgkm`): 0 full filter (`gkm_estfull`), 1 truncated (`gkm_esttrunc`), 2 gkm counts (`gkm_cnt`); wildcard and mismatch kernels (3, 4) aren't supported. CLI: `gkmsvm import -f classic -i mymodel_svalpha.out -o model.npz -l 10 -k 6 -d 3 -t 1`.
 
 Scores equal `sum_i alpha_i K(x, sv_i)` with the kernel of the tools' `gkmsvm_kernel` (`tests/test_importers/test_gkmsvm_tools.py`), the kernel the alphas were fit with. `gkmsvm_classify`'s own output differs from that by up to about 2%: its tree and simple algorithms normalize differently from `gkmsvm_kernel`. Both tools read FASTA by dropping every letter other than ACGT, so SVs load that way (an N stretch is removed, not read as A); for `gkmsvm_classify`'s treatment of queries, drop those letters from them too.
-
-`load_classic_model` also reads LIBSVM-style files with `key value` headers and `rho` (`bias = +rho`), with alphas after the header and the SVs in a FASTA (`svseq_path`), or `alpha sequence` lines after an `SV` marker; `load_r_gkmsvm_model` also reads a single `.gkmmodel` file (`#rho`, `#L`, `#k`, `#d` headers, `>id<TAB>alpha` FASTA headers). No released gkmSVM version writes either.
 
 ### DeltaSVM weights
 

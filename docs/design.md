@@ -81,7 +81,7 @@ Header key-value pairs until `SV` marker, then `<signed_coef> <DNA_sequence>` pe
 
 ## Classic and R gkmSVM formats
 
-`gkmsvm_train` (C++ and R, which share the code) writes `PREFIX_svalpha.out` (`id<TAB>alpha`) and `PREFIX_svseq.fa`: no bias (R drops kernlab's `b`), no kernel parameters. `classic.load_svalpha_model` takes the kernel as arguments (defaults l=10, k=6, d=3, `-t 1`), maps `-t`/`useTgkm` 0/1/2 to `gkm_estfull`/`gkm_esttrunc`/`gkm_cnt` (each truncated at d), matches SVs to alphas by id and drops non-ACGT letters, as the tools' FASTA reader does. Checked against each tool's `gkmsvm_kernel`; `gkmsvm_classify` differs from that by up to ~2%. Older parsers for LIBSVM-style headers with `rho` (`load_classic_model`) and a single `.gkmmodel` file (`load_r_gkmsvm_model`) remain, with `bias = +rho`; no released tool writes them.
+`gkmsvm_train` (C++ and R, which share the code) writes `PREFIX_svalpha.out` (`id<TAB>alpha`) and `PREFIX_svseq.fa`: no bias (R drops kernlab's `b`), no kernel parameters. `classic.load_classic_model` (and `r_gkmsvm.load_r_gkmsvm_model`, under R's argument names) takes the kernel as arguments (defaults l=10, k=6, d=3, `-t 1`), maps `-t`/`useTgkm` 0/1/2 to `gkm_estfull`/`gkm_esttrunc`/`gkm_cnt` (each truncated at d), matches SVs to alphas by id and drops non-ACGT letters, as the tools' FASTA reader does. Checked against each tool's `gkmsvm_kernel`; `gkmsvm_classify` differs from that by up to ~2%.
 
 ## SV cache
 

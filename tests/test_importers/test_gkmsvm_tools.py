@@ -27,12 +27,10 @@ def _load(prefix, tool, filter_type):
     alpha = FIXTURES / f"{prefix}_svalpha.out"
     with pytest.warns(UserWarning, match="other than ACGT, dropped"):
         if tool == "r":
-            return load_r_gkmsvm_model(alpha, filter_type=filter_type)
+            return load_r_gkmsvm_model(alpha, useTgkm=filter_type)
         if filter_type == 1:  # the tools' default kernel
             return load_classic_model(alpha)
-        from gkmsvm.importers.classic import load_svalpha_model
-
-        return load_svalpha_model(alpha, filter_type=filter_type)
+        return load_classic_model(alpha, filter_type=filter_type)
 
 
 def _scores(path):
@@ -74,3 +72,55 @@ def test_cli_import(tmp_path):
     ref = _load("gkmsvm_classic_t2", "classic", 2)
     q = ["ACGTTGCATGCAAGTCCTAGGATCCATGCATGACTGACAA"]
     np.testing.assert_allclose(np.asarray(model(q)), np.asarray(ref(q)), rtol=1e-6)
+
+
+def _write(tmp_path, alphas, seqs):
+    """PREFIX_svalpha.out ({id: alpha}) and PREFIX_svseq.fa ({id: sequence})."""
+    alpha = tmp_path / "m_svalpha.out"
+    alpha.write_text("".join(f"{i}\t{a:e}\n" for i, a in alphas.items()))
+    (tmp_path / "m_svseq.fa").write_text(
+        "".join(f">{i}\n{s}\n" for i, s in seqs.items())
+    )
+    return alpha
+
+
+def test_svs_matched_by_id(tmp_path):
+    """As gkmsvm_classify: each alpha picks its SV by id (extra FASTA records
+    are ignored, lowercase is read as uppercase); an id missing from the
+    FASTA is an error."""
+    from gkmsvm.codec import one_hot_encode
+
+    seqs = {"a": "ACGTTGCAAGGTC", "b": "ttgacgatcgaat", "c": "GGGCCCATATAGC"}
+    model = load_classic_model(_write(tmp_path, {"c": 0.5, "b": -0.3}, seqs), L=5, k=3)
+    assert model.num_support_vectors == 2 and model.bias == 0.0
+    np.testing.assert_array_equal(
+        model.support_sequences,
+        np.stack([one_hot_encode(seqs[i].upper()) for i in ("c", "b")]),
+    )
+    np.testing.assert_array_equal(model.coefficients, [0.5, -0.3])
+    with pytest.raises(ValueError, match="not in"):
+        load_classic_model(_write(tmp_path, {"a": 1.0, "z": 1.0}, seqs), L=5, k=3)
+
+
+def test_kernel_arguments(tmp_path):
+    """The files record no kernel: it comes from the arguments, R's under
+    its gkmsvm_kernel names."""
+    alpha = _write(tmp_path, {"a": 1.0}, {"a": "ACGTTGCAAGGTCAT"})
+    model = load_classic_model(alpha, L=6, k=4, d=2, filter_type=0, include_rc=False)
+    assert model.kernel_type == "gkm_estfull"
+    assert (model.kernel.l, model.kernel.k, model.kernel.d) == (6, 4, 2)
+    assert not model.kernel.include_rc
+    r = load_r_gkmsvm_model(alpha, L=6, K=4, maxnmm=2, useTgkm=0, addRC=False)
+    assert r.kernel_params == model.kernel_params
+    with pytest.raises(NotImplementedError, match="wildcard"):
+        load_classic_model(alpha, filter_type=3)
+
+
+def test_malformed_alpha_file(tmp_path):
+    alpha = tmp_path / "m_svalpha.out"
+    alpha.write_text("svm_type c_svc\nrho 0.1 0.2\n")
+    (tmp_path / "m_svseq.fa").write_text(">a\nACGT\n")
+    with pytest.raises(ValueError):
+        load_classic_model(alpha)
+    with pytest.raises(ValueError, match="give svseq_path"):
+        load_classic_model(tmp_path / "alphas.txt")

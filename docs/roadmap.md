@@ -12,8 +12,7 @@
 - [x] `-t 6` / `gkm_cnt_rbf` / `direct_rbf` (RBF on `-t 0`, the kundajelab fork's): its gkmtrain, gkmpredict and gkmexplain (modes 0/1/4/5) as oracles
 - [x] GkmSVM scoring with memory-capped [rows, S] blocks
 - [x] LS-GKM model importer (plain text and gzip)
-- [x] Classic gkmSVM importer — C gkmSVM LIBSVM-style format (opposite bias sign convention)
-- [x] Classic (C++) and R gkmSVM importer — `gkmsvm_train`'s `_svalpha.out`/`_svseq.fa` (no bias; the kernel as arguments; non-ACGT dropped as the tools read FASTA), checked against each tool's `gkmsvm_kernel` (`tests/test_importers/test_gkmsvm_tools.py`); also LIBSVM-style and `.gkmmodel` files, which no released tool writes
+- [x] Classic (C++) and R gkmSVM importer — `gkmsvm_train`'s `_svalpha.out`/`_svseq.fa` (no bias; the kernel as arguments; non-ACGT dropped as the tools read FASTA), checked against each tool's `gkmsvm_kernel` (`tests/test_importers/test_gkmsvm_tools.py`)
 - [x] DeltaSVM model + importer (linear gapped k-mer scoring)
 - [x] FASTA I/O and pyfaidx locus extraction
 - [x] Oracle validation against Dongwon-Lee/lsgkm `gkmpredict`

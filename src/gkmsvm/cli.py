@@ -447,28 +447,20 @@ def cmd_import(args: argparse.Namespace) -> None:
 
         model = load_lsgkm_model(inp, device="cpu")
     elif fmt in ("classic", "r_gkmsvm"):
-        from gkmsvm.importers.classic import _is_svalpha, load_svalpha_model
+        # gkmsvm_train's files (C++ and R write the same), which don't record
+        # the kernel
+        from gkmsvm.importers.classic import load_classic_model
 
-        if args.svseq is not None or _is_svalpha(Path(inp)):
-            # gkmsvm_train's files, which don't record the kernel
-            model = load_svalpha_model(
-                inp,
-                args.svseq,
-                L=args.l,
-                k=args.k,
-                d=args.d,
-                filter_type=args.filter_type,
-                include_rc=not args.no_rc,
-                device="cpu",
-            )
-        elif fmt == "classic":
-            from gkmsvm.importers.classic import load_classic_model
-
-            model = load_classic_model(inp, device="cpu")
-        else:
-            from gkmsvm.importers.r_gkmsvm import load_r_gkmsvm_model
-
-            model = load_r_gkmsvm_model(inp, device="cpu")
+        model = load_classic_model(
+            inp,
+            args.svseq,
+            L=args.l,
+            k=args.k,
+            d=args.d,
+            filter_type=args.filter_type,
+            include_rc=not args.no_rc,
+            device="cpu",
+        )
     else:
         print(f"Unknown format: {fmt}", file=sys.stderr)
         sys.exit(1)
@@ -713,16 +705,16 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument(
         "--svseq", default=None, help="PREFIX_svseq.fa (default: next to the input)."
     )
-    g.add_argument("-l", type=int, default=None, help="Word length (default: 10).")
+    g.add_argument("-l", type=int, default=10, help="Word length (default: 10).")
     g.add_argument(
-        "-k", type=int, default=None, help="Informative positions (default: 6)."
+        "-k", type=int, default=6, help="Informative positions (default: 6)."
     )
-    g.add_argument("-d", type=int, default=None, help="Max mismatches (default: 3).")
+    g.add_argument("-d", type=int, default=3, help="Max mismatches (default: 3).")
     g.add_argument(
         "-t",
         "--filter-type",
         type=int,
-        default=None,
+        default=1,
         choices=[0, 1, 2],
         help="gkmsvm_kernel -t (R useTgkm): 0 full, 1 truncated (default), "
         "2 gkm counts.",
