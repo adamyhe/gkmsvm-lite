@@ -7,6 +7,12 @@ packed on the CPU). Reverse complements enter as a second column block.
 
 Subclasses provide the brute-force pair loop (`_brute`, `_brute_cross_diag`)
 and the mask plan for the masked join (`_join_plan`, kernels/masked.py).
+
+Sequences of different lengths share one array: pack(x, lengths) writes
+PAD_WINDOW past each row's last window (RC rows, being reversed, hold their
+pads first). Every kernel skips PAD explicitly; a row's windows and, for
+-t 4/5, their weights follow from its count of non-PAD windows
+(docs/design/variable-length.md).
 """
 
 from __future__ import annotations
@@ -20,22 +26,58 @@ from gkmsvm.kernels.base import GkmKernel
 # build costs more than it saves (e.g. single SMO columns)
 _MASKED_MIN_ROWS = 16
 
-# Window value standing for "no window" in padded window sets (ISM). It has
-# bits set above every l-mer, so the l-mer index skips it; the brute and
-# masked kernels count it identically wherever it appears, so it cancels in
-# differences between window sets padded the same way.
+# Window value standing for "no window": past a shorter sequence's last
+# window, and in ISM's window sets. It has bits set above every l-mer (l <=
+# 15), so the l-mer index never finds it; every kernel skips it explicitly
+# (against itself it would score as a full match, and masked to an l-mer's
+# bits it equals the all-T l-mer).
 PAD_WINDOW = np.uint32(0xFFFFFFFF)
+# Longest l: a uint32 packs 16 bases, and at 16 the all-T l-mer is PAD_WINDOW
+# (LS-GKM allows l <= 12)
+MAX_L = 15
 
 
 def _rc_windows(packed, l):
     """Packed windows of the reverse complement: window j is window W-1-j with
-    its bases complemented (b ^ 3: A<->T, C<->G) and in reverse order."""
+    its bases complemented (b ^ 3: A<->T, C<->G) and in reverse order. PAD
+    stays PAD, so a padded row's RC holds its pads first."""
     xp = get_array_module(packed)
-    u = packed[:, ::-1] ^ xp.uint32((1 << (2 * l)) - 1)
+    rev = packed[:, ::-1]
+    u = rev ^ xp.uint32((1 << (2 * l)) - 1)
     out = xp.zeros_like(u)
     for k in range(l):
         out |= ((u >> xp.uint32(2 * k)) & xp.uint32(3)) << xp.uint32(2 * (l - 1 - k))
+    pad = rev == PAD_WINDOW
+    if bool(pad.any()):
+        out = xp.where(pad, PAD_WINDOW, out)
     return xp.ascontiguousarray(out)
+
+
+def is_padded(packed) -> bool:
+    """Whether any row of packed windows holds PAD_WINDOW."""
+    if packed is None:
+        return False
+    if is_mlx(packed):
+        packed = np.asarray(packed)
+    return bool((packed == PAD_WINDOW).any())
+
+
+def window_counts(packed) -> np.ndarray:
+    """[R] int64 number of windows (non-PAD) in each row, on CPU (counted on
+    packed's device, so only the counts move)."""
+    if is_mlx(packed):
+        packed = np.asarray(packed)
+    n = (packed != PAD_WINDOW).sum(axis=1)
+    return np.asarray(to_cpu(n)).astype(np.int64)
+
+
+def window_spans(packed) -> np.ndarray:
+    """[R, 2] int64 (start, end) of each row's windows, on CPU: forward rows
+    hold theirs first, RC rows last (a row with none gives an empty span)."""
+    valid = np.asarray(to_cpu(packed) != PAD_WINDOW)
+    n = valid.sum(axis=1)
+    start = np.where(n > 0, valid.argmax(axis=1), 0)
+    return np.stack([start, start + n], axis=1).astype(np.int64)
 
 
 def device_of(x) -> str:
@@ -52,6 +94,11 @@ class PackedGkmKernel(GkmKernel):
     # brute-force loop (e.g. as a test oracle).
     use_masked = True
 
+    def __init__(self, l: int, k: int, **kwargs):
+        if l > MAX_L:
+            raise ValueError(f"l must be <= {MAX_L}, got {l}")
+        super().__init__(l, k, **kwargs)
+
     def _join_plan(self):
         """Mask plan for kernels/masked.py, or None."""
 
@@ -64,16 +111,37 @@ class PackedGkmKernel(GkmKernel):
         complement's windows carry them reversed), or None when every window
         counts once. Only -t 4/-t 5 weight windows (kernels/weighted.py)."""
 
+    def row_weights(self, packed, rc: bool = False):
+        """Window weights of packed rows: [1, W] uint8 when no row is padded,
+        else [R, W] (each row's from its own window count, 0 on PAD); None
+        when every window counts once. rc: the rows are RC windows (weights
+        reversed, as their windows are)."""
+        if packed is None:
+            return None
+        W = packed.shape[1]
+        if self.window_weights(W) is None:
+            return None
+        counts = window_counts(packed)
+        if (counts == W).all():
+            w = self.window_weights(W)[None]
+        else:
+            w = np.zeros((len(counts), W), dtype=np.uint8)
+            for n in np.unique(counts[counts > 0]):
+                w[counts == n, :n] = self.window_weights(int(n))
+        return np.ascontiguousarray(w[:, ::-1]) if rc else w
+
     def _check_length(self, L: int) -> None:
         if L < self.l:
             raise ValueError(
                 f"Sequence length {L} is shorter than window length {self.l}"
             )
 
-    def pack(self, x):
+    def pack(self, x, lengths=None):
         """[B, W] uint32 packed windows of one-hot x, on x's device.
 
-        N (all-zero) positions pack as A.
+        N (all-zero) positions pack as A. lengths [B]: each row's sequence
+        length (x is padded to its longest); windows past a row's last are
+        PAD_WINDOW, and a row shorter than l has none.
         """
         B, _, L = x.shape
         self._check_length(L)
@@ -84,14 +152,22 @@ class PackedGkmKernel(GkmKernel):
         packed = xp.zeros((B, W), dtype=xp.uint32)
         for k in range(self.l):
             packed |= base[:, k : k + W] << xp.uint32(2 * k)
+        if lengths is not None:
+            lengths = np.asarray(to_cpu(lengths), dtype=np.int64)
+            if lengths.shape != (B,) or (lengths > L).any() or (lengths < 0).any():
+                raise ValueError(f"lengths must be [{B}] values in 0..{L}")
+            if (lengths < L).any():
+                n = xp.asarray(np.clip(lengths - self.l + 1, 0, None))
+                past = xp.arange(W)[None, :] >= n[:, None]
+                packed = xp.where(past, PAD_WINDOW, packed).astype(xp.uint32)
         if dev == "mlx":
             import mlx.core as mx
 
             return mx.array(packed)
         return packed
 
-    def pack_both(self, x):
-        """(packed x, packed reverse complement of x or None).
+    def pack_both(self, x, lengths=None):
+        """(packed x, packed reverse complement of x or None); lengths as in pack.
 
         The RC windows come from the packed forward ones, so N packs as A on
         the forward strand and T on the reverse one, as in lsgkm (which reads
@@ -99,7 +175,7 @@ class PackedGkmKernel(GkmKernel):
         would give A on both strands, and an RC block that isn't the reverse
         complement of the forward one.
         """
-        fwd = self.pack(x)
+        fwd = self.pack(x, lengths)
         if not self.include_rc:
             return fwd, None
         if device_of(fwd) == "mlx":
@@ -119,17 +195,19 @@ class PackedGkmKernel(GkmKernel):
             diag_offset.. of one set (a self-Gram column panel); entries below
             the diagonal may be left 0 (CPU masked join only).
 
-        Rows and columns are whole sequences' windows, in order: window
-        weights (window_weights) follow their positions.
+        Rows and columns are whole sequences' windows, in order, PAD past the
+        end of shorter ones: window weights (row_weights) follow their
+        positions.
 
         CPU and CUDA return float64; MLX returns float32 on the device.
         """
         dev = device_of(bx)
         plan = self._masked_plan()
         small = min(bx.shape[0], by.shape[0]) < _MASKED_MIN_ROWS
-        wx, wy = self.window_weights(bx.shape[1]), self.window_weights(by.shape[1])
+        wx, wy = self.row_weights(bx), self.row_weights(by)
+        wy_rc = self.row_weights(by_rc, rc=True)
         if plan is not None and not (small and self._HAS_BRUTE):
-            return _masked(bx, by, plan, by_rc, diag_offset, dev, wx, wy)
+            return _masked(bx, by, plan, by_rc, diag_offset, dev, wx, wy, wy_rc)
         if not self._HAS_BRUTE:
             raise ValueError(
                 f"{type(self).__name__} needs the masked join (use_masked=True)"
@@ -141,7 +219,7 @@ class PackedGkmKernel(GkmKernel):
             return raw
         raw = self._brute(bx, by, dev, wx, wy)
         if by_rc is not None:
-            raw = raw + self._brute(bx, by_rc, dev, wx, wy[::-1])
+            raw = raw + self._brute(bx, by_rc, dev, wx, wy_rc)
         return raw
 
     # Whether _brute exists; without it the masked join serves every size
@@ -211,15 +289,18 @@ class PackedGkmKernel(GkmKernel):
         return self.raw_diag_packed(*self.pack_both(x)).astype(float_dtype(x))
 
 
-def _masked(bx, by, plan, by_rc, diag_offset, dev, wx=None, wy=None):
+def _masked(bx, by, plan, by_rc, diag_offset, dev, wx=None, wy=None, wy_rc=None):
+    """wx, wy, wy_rc: row_weights of the rows, columns and RC columns."""
     from gkmsvm.kernels import masked
 
     if dev == "cpu":
         return masked.masked_pairwise(
-            bx, by, plan, by_rc, diag_offset=diag_offset, wx=wx, wy=wy
+            bx, by, plan, by_rc, diag_offset=diag_offset, wx=wx, wy=wy, wy_rc=wy_rc
         )
     if dev == "cuda":
-        return masked.masked_pairwise_gpu(bx, by, plan, by_rc, wx=wx, wy=wy)
+        return masked.masked_pairwise_gpu(
+            bx, by, plan, by_rc, wx=wx, wy=wy, wy_rc=wy_rc
+        )
     import mlx.core as mx
 
     if wx is not None:  # Metal counts in int32; weighted windows join on the CPU
@@ -230,6 +311,7 @@ def _masked(bx, by, plan, by_rc, diag_offset, dev, wx=None, wy=None):
             None if by_rc is None else np.asarray(by_rc),
             wx=wx,
             wy=wy,
+            wy_rc=wy_rc,
         )
         return mx.array(out.astype(np.float32))
     # Exact integer counts combined in float64; Metal holds float32

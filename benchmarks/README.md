@@ -129,6 +129,8 @@ bash benchmarks/run.sh --mlsgkm-bin <path>/mLS-GKM/bin
 
 With it, 1C adds mLS-GKM rows at every CPU thread count (`gkmpredict -D -t N -T 1`, `gkmexplain -D -m 5 -t N`), S2 adds its `gkmpredict` at `THREADS`, and 1B adds `t_mlsgkm_infer` (prediction with the LS-GKM-trained model). Training stays LS-GKM's `gkmtrain`. 1C's mLS-GKM rows record `max_abs_diff` against LS-GKM's output, a check that both compute the same scores.
 
+mLS-GKM's `gkmexplain` (commit 2bb06be, 2026-08-30) is wrong for non-RBF models in every mode: on `-t 2` it logs "kmertree for SVs has not been initialized", writes zeros (mode 5) or near-zero attributions, and exits 0. On `-t 3` it equals the kundajelab fork exactly. 1C uses the paper's `-t 3` models; `timing_variants.py` skips mLS-GKM's `gkmexplain` for any other kernel.
+
 ## `dev/`
 
 Experiments that don't feed a figure: the CUDA masked-join ablation, the Nanog replication, and SVR and caQTL training. Finished experiments are deleted once their result is recorded (the earlier solver comparisons, the Nyström landmark sweep and the mask-join prototypes are in git history). Run them from the repo root, e.g. `python benchmarks/dev/replicate_nanog.py`.

@@ -22,7 +22,7 @@ import numpy as np
 from numba import njit, prange
 
 from gkmsvm.backend import to_cpu
-from gkmsvm.kernels.direct import _packed_mismatches, _rc_window
+from gkmsvm.kernels.direct import _counts, _packed_mismatches, _rc_window, _spans
 from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
 from gkmsvm.kernels.rbf import RbfKernel
 
@@ -37,21 +37,26 @@ def _window_weights(W: int, M: int, H: float) -> np.ndarray:
 
 @njit(parallel=True, cache=True, fastmath=True)
 def _brute_weighted_numba(bx, wx, by, wy, table, l, min_matches):
-    """[B, S]: sum over window pairs of wx[i] wy[j] table[m]."""
-    B, Wx = bx.shape
-    S, Wy = by.shape
+    """[B, S]: sum over window pairs of wx[b, i] wy[s, j] table[m]. wx, wy:
+    [B or 1, Wx], [S or 1, Wy] (one row: shared by every row); PAD windows
+    are skipped."""
+    B = bx.shape[0]
+    S = by.shape[0]
+    sx, sy = _spans(bx), _spans(by)
     result = np.empty((B, S), dtype=np.float64)
     for idx in prange(B * S):
         b, s = idx // S, idx % S
+        wxb = wx[min(np.int64(b), wx.shape[0] - 1)]
+        wys = wy[min(np.int64(s), wy.shape[0] - 1)]
         acc = 0.0
-        for i in range(Wx):
+        for i in range(sx[b, 0], sx[b, 1]):
             u = bx[b, i]
             row = 0.0
-            for j in range(Wy):
+            for j in range(sy[s, 0], sy[s, 1]):
                 matches = l - _packed_mismatches(u, by[s, j])
                 if matches >= min_matches:
-                    row += wy[j] * table[l - matches]
-            acc += wx[i] * row
+                    row += wys[j] * table[l - matches]
+            acc += wxb[i] * row
         result[b, s] = acc
     return result
 
@@ -81,22 +86,26 @@ def _self_diagonal_weighted_numba(bx, by, w, table, l):
     In forward order the RC windows (rev[k] = rc(fwd[k])) carry the forward
     weights, and g(fwd[i], rc(fwd[k])) is symmetric in i, k, so both blocks
     visit each unordered pair once. A row whose RC block isn't the reverse
-    complement of its forward one visits every RC pair.
+    complement of its forward one visits every RC pair. w: [B or 1, W]
+    forward weights (row_weights); a padded row is its first n windows.
     """
     B, W = bx.shape
     has_rc = by.shape[1] > W
+    counts = _counts(bx)
     result = np.empty(B, dtype=np.float64)
     for b in prange(B):
-        fwd = bx[b]
-        acc = _weighted_block(fwd, w, fwd, w, True, table)
+        n = counts[b]
+        fwd = bx[b, :n]
+        wb = w[min(np.int64(b), w.shape[0] - 1), :n]
+        acc = _weighted_block(fwd, wb, fwd, wb, True, table)
         if has_rc:
-            rev = by[b, W:][::-1].copy()
+            rev = by[b, W:][::-1][:n].copy()
             paired = True
-            for k in range(W):
+            for k in range(n):
                 if rev[k] != _rc_window(fwd[k], l):
                     paired = False
                     break
-            acc += _weighted_block(fwd, w, rev, w, paired, table)
+            acc += _weighted_block(fwd, wb, rev, wb, paired, table)
         result[b] = acc
     return result
 
@@ -135,34 +144,45 @@ def _weighted_block_delta(f, nf, a_s, a_e, wf, c, nc, c_s, c_e, wc, table):
 @njit(parallel=True, cache=True, fastmath=True)
 def _mutant_diag_weighted_numba(fwd, rc, new, new_rc, diag, w, table, l):
     """K_raw(mutant, mutant) [4, L, B]: the reference's plus the pairs touching a
-    changed window (rc has 0 columns without RC; its window j weighs w[W-1-j])."""
+    changed window (rc has 0 columns without RC). w: [B or 1, W] forward
+    weights (row_weights); a padded row is its first n windows, its RC row's
+    last n, whose window j weighs the forward window n-1-j's weight."""
     B, W = fwd.shape
     L = new.shape[1]
     has_rc = rc.shape[1] > 0
-    w_rc = w[::-1].copy()
+    counts = _counts(fwd)
     out = np.empty((4, L, B))
     for item in prange(L * B):
         p, b = item // B, item % B
-        a_s, a_e = max(0, p - l + 1), min(p + 1, W)
+        n = counts[b]
+        a_s, a_e = max(0, p - l + 1), min(p + 1, n)
+        if a_s >= a_e:
+            for v in range(4):
+                out[v, p, b] = diag[b]
+            continue
+        f = fwd[b, :n]
+        wb = w[min(np.int64(b), w.shape[0] - 1), :n]
+        wb_rc = wb[::-1].copy()
+        # RC windows r_s..r_e change; the row's own are W-n.. (new_rc from r_s)
         q = L - 1 - p
         r_s, r_e = max(0, q - l + 1), min(q + 1, W)
+        o = W - n
+        c_s = max(r_s, o)
         for v in range(4):
             nf = new[v, p, b]
-            d = _weighted_block_delta(
-                fwd[b], nf, a_s, a_e, w, fwd[b], nf, a_s, a_e, w, table
-            )
+            d = _weighted_block_delta(f, nf, a_s, a_e, wb, f, nf, a_s, a_e, wb, table)
             if has_rc:
                 d += _weighted_block_delta(
-                    fwd[b],
+                    f,
                     nf,
                     a_s,
                     a_e,
-                    w,
-                    rc[b],
-                    new_rc[v, p, b],
-                    r_s,
-                    r_e,
-                    w_rc,
+                    wb,
+                    rc[b, o:],
+                    new_rc[v, p, b, c_s - r_s :],
+                    c_s - o,
+                    r_e - o,
+                    wb_rc,
                     table,
                 )
             out[v, p, b] = diag[b] + d
@@ -239,7 +259,7 @@ class CenterWeightedGkmKernel(EstTruncGkmKernel):
         bx's device."""
         fwd = np.ascontiguousarray(to_cpu(bx))
         by = fwd if bx_rc is None else np.concatenate([fwd, to_cpu(bx_rc)], axis=1)
-        w = self.window_weights(fwd.shape[1]).astype(np.float64)
+        w = self.row_weights(fwd).astype(np.float64)
         return _on_device(
             _self_diagonal_weighted_numba(
                 fwd, np.ascontiguousarray(by), w, self._mismatch_table, self.l
@@ -251,7 +271,7 @@ class CenterWeightedGkmKernel(EstTruncGkmKernel):
         """See PackedGkmKernel.raw_diag_mutants; on CPU, only pairs touching a
         changed window; the result is on bx's device."""
         fwd = np.ascontiguousarray(to_cpu(bx))
-        B, W = fwd.shape
+        B = fwd.shape[0]
         rc = (
             np.zeros((B, 0), np.uint32)
             if bx_rc is None
@@ -265,7 +285,7 @@ class CenterWeightedGkmKernel(EstTruncGkmKernel):
                 np.ascontiguousarray(new),
                 np.ascontiguousarray(new_rc),
                 np.asarray(to_cpu(diag), dtype=np.float64),
-                self.window_weights(W).astype(np.float64),
+                self.row_weights(fwd).astype(np.float64),
                 self._mismatch_table,
                 self.l,
             ),

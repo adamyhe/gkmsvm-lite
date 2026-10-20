@@ -687,6 +687,16 @@ _LSGKM_EXPLAIN_SETS = {
         for t in ("t0", "t1", "t4", "t5")
         for n in (100, 85)
     },
+    # Models gkmtrain trained on sequences of different lengths (60-140 bp)
+    **{
+        f"ragged_{t}_{n}": (
+            f"lsgkm_ragged_{t}.model.txt.gz",
+            f"lsgkm_wgkm_test{n}.fa",
+            f"lsgkm_ragged_{t}_test{n}",
+        )
+        for t in ("t2", "t4", "t5")
+        for n in (100, 85)
+    },
 }
 
 
@@ -740,7 +750,20 @@ def test_matches_lsgkm_gkmexplain(name, lsgkm_mode, mode):
         )
 
 
-@pytest.mark.parametrize("name", ["t0_85", "t1_85", "t2_85", "t3_85", "t4_85", "t5_85"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "t0_85",
+        "t1_85",
+        "t2_85",
+        "t3_85",
+        "t4_85",
+        "t5_85",
+        "ragged_t2_85",
+        "ragged_t4_85",
+        "ragged_t5_85",
+    ],
+)
 @pytest.mark.parametrize("path", ["index", "join", "brute"])
 def test_matches_lsgkm_mode5_fixture_models(name, path):
     """Mutation impact equals gkmexplain -m 5 through the l-mer index, the
@@ -771,6 +794,94 @@ def test_matches_lsgkm_mode5_fixture_models(name, path):
     )
     assert (model._sv_index() is not None) == (path == "index")
     expected = _read_lsgkm_explain(oracle)[:, :, 0]
+    np.testing.assert_allclose(
+        got, expected, rtol=2e-5, atol=5e-6 * np.abs(expected).max()
+    )
+
+
+# Every fixture model on queries of odd lengths from 31 to 151 bp, with N
+# stretches (lsgkm_ragged_query.fa)
+_LSGKM_QUERY_MODELS = [
+    *(f"lsgkm_wgkm_{t}" for t in ("t0", "t1", "t4", "t5")),
+    "lsgkm_mode5_est",
+    "lsgkm_mode5_rbf",
+    *(f"lsgkm_ragged_{t}" for t in ("t2", "t4", "t5")),
+]
+
+
+def _read_lsgkm_explain_rows(path):
+    """gkmexplain output as one [4, L_i] array per sequence."""
+    import gzip
+
+    with gzip.open(path, "rt") as f:
+        rows = [line.rstrip("\n").split("\t") for line in f]
+    return [
+        np.array([[float(v) for v in pos.split(",")] for pos in r[2].split(";")]).T
+        for r in rows
+    ]
+
+
+def _query_seqs():
+    from gkmsvm.fasta import read_fasta
+
+    return [s for _, s in read_fasta(str(_FIXTURES / "lsgkm_ragged_query.fa"))]
+
+
+@pytest.mark.parametrize("name", _LSGKM_QUERY_MODELS)
+@pytest.mark.parametrize(
+    "lsgkm_mode,mode", [(0, "importance"), (1, "hypothetical"), (4, "perturbation")]
+)
+def test_matches_lsgkm_gkmexplain_on_mixed_queries(name, lsgkm_mode, mode):
+    """Queries of different lengths explained in one padded batch equal the
+    kundajelab fork's gkmexplain on each, on every explain path."""
+    from gkmsvm.importers.lsgkm import load_lsgkm_model
+
+    oracle = _FIXTURES / f"{name}_query.explain{lsgkm_mode}.txt.gz"
+    if not oracle.exists():
+        pytest.skip("gkmexplain fixtures not generated")
+    model = load_lsgkm_model(_FIXTURES / f"{name}.model.txt.gz")
+    seqs = _query_seqs()
+    expected = _read_lsgkm_explain_rows(oracle)
+    scale = max(np.abs(e).max() for e in expected)
+    for table, index in [(True, True), (False, True), (False, False)]:
+        model.use_explain_table, model.use_lmer_index = table, index
+        model.clear_caches()
+        got = np.asarray(gkmexplain(model, seqs, mode=mode, batch_size=8))
+        for i, (s, e) in enumerate(zip(seqs, expected)):
+            # gkmexplain prints 6 significant digits
+            np.testing.assert_allclose(
+                got[i, :, : len(s)],
+                e,
+                rtol=2e-5,
+                atol=5e-6 * scale,
+                err_msg=f"{table=} {index=} sequence {i}",
+            )
+            assert (got[i, :, len(s) :] == 0).all()
+
+
+@pytest.mark.parametrize("name", _LSGKM_QUERY_MODELS)
+@pytest.mark.parametrize("path", ["index", "join", "brute"])
+def test_matches_lsgkm_mode5_on_mixed_queries(name, path):
+    """Mutation impact at each query's central base ((L - 1) / 2), queries of
+    different lengths in one call, equals gkmexplain -m 5."""
+    from gkmsvm.explain import mutation_impact
+    from gkmsvm.importers.lsgkm import load_lsgkm_model
+
+    oracle = _FIXTURES / f"{name}_query.explain5.txt.gz"
+    if not oracle.exists():
+        pytest.skip("gkmexplain fixtures not generated")
+    model = load_lsgkm_model(_FIXTURES / f"{name}.model.txt.gz")
+    model.use_lmer_index = path == "index"
+    model.kernel.base.use_masked = path != "brute"
+    seqs = _query_seqs()
+    ref = [s for s in seqs for _ in "ACGT"]
+    alt = [
+        s[: (len(s) - 1) // 2] + b + s[(len(s) + 1) // 2 :]
+        for s in seqs
+        for b in "ACGT"
+    ]
+    got = np.asarray(mutation_impact(model, ref, alt, batch_size=16)).reshape(-1, 4)
+    expected = np.stack([e[:, 0] for e in _read_lsgkm_explain_rows(oracle)])
     np.testing.assert_allclose(
         got, expected, rtol=2e-5, atol=5e-6 * np.abs(expected).max()
     )

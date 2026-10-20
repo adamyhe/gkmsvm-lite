@@ -47,19 +47,21 @@ def build_lmer_table(kernel, sv_packed, sv_rc_packed, sv_weights) -> np.ndarray 
         return None
 
     n = 4**l
-    W = sv_packed.shape[1]
     coef = np.asarray(sv_weights, dtype=np.float64)[:, None]
-    wy = kernel.window_weights(W)
-    wy = np.ones(W) if wy is None else wy.astype(np.float64)
-    # An RC window carries the weight of the forward window it came from
-    blocks = [(sv_packed, wy)] + (
-        [(sv_rc_packed, wy[::-1])] if sv_rc_packed is not None else []
+    # Window weights follow each SV's own windows; an RC window carries the
+    # weight of the forward window it came from (row_weights, rc=True). PAD
+    # (past a shorter SV's windows) is left out.
+    blocks = [(sv_packed, False)] + (
+        [(sv_rc_packed, True)] if sv_rc_packed is not None else []
     )
     V = np.zeros(n)
-    for packed, w in blocks:
-        V += np.bincount(
-            packed.ravel().astype(np.int64), weights=(coef * w).ravel(), minlength=n
-        )
+    for packed, rc in blocks:
+        w = kernel.row_weights(packed, rc=rc)
+        wt = coef if w is None else coef * w.astype(np.float64)
+        keys = packed.ravel().astype(np.int64)
+        wt = np.broadcast_to(wt, packed.shape).ravel()
+        keep = keys < n
+        V += np.bincount(keys[keep], weights=wt[keep], minlength=n)
 
     # Packed index = sum_k base_k 4^k, so in a C-order (4,)*l view axis a holds
     # position l - 1 - a

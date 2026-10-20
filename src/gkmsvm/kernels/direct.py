@@ -5,7 +5,9 @@ from math import comb
 import numpy as np
 from numba import njit, prange
 
-from gkmsvm.kernels.packed import PackedGkmKernel, device_of
+from gkmsvm.kernels.packed import PAD_WINDOW, PackedGkmKernel, device_of
+
+_PAD = PAD_WINDOW
 
 # ---------------------------------------------------------------------------
 # Numba-accelerated kernels
@@ -28,21 +30,52 @@ def _packed_mismatches(a, b):
     return _popcount(((x >> 1) | x) & np.uint32(0x55555555))
 
 
+@njit(cache=True)
+def _spans(packed):
+    """[R, 2] (start, end) of each row's non-PAD windows (one contiguous run:
+    first in forward rows, last in RC rows)."""
+    R, W = packed.shape
+    out = np.zeros((R, 2), dtype=np.int64)
+    for r in range(R):
+        start = 0
+        while start < W and packed[r, start] == _PAD:
+            start += 1
+        end = start
+        while end < W and packed[r, end] != _PAD:
+            end += 1
+        out[r, 0] = start
+        out[r, 1] = end
+    return out
+
+
+@njit(cache=True)
+def _counts(packed):
+    """Number of windows before the first PAD in each row (forward rows)."""
+    R, W = packed.shape
+    out = np.empty(R, dtype=np.int64)
+    for r in range(R):
+        n = 0
+        while n < W and packed[r, n] != _PAD:
+            n += 1
+        out[r] = n
+    return out
+
+
 @njit(parallel=True, cache=True, fastmath=True)
 def _fused_pairwise_packed_numba(bx, by, table, l, min_matches):
-    """Fused pairwise using packed uint32 comparison with min-matches skip."""
+    """Fused pairwise using packed uint32 comparison with min-matches skip;
+    PAD windows (rows of shorter sequences) are skipped."""
     B = bx.shape[0]
-    Wx = bx.shape[1]
     S = by.shape[0]
-    Wy = by.shape[1]
+    sx, sy = _spans(bx), _spans(by)
     result = np.empty((B, S), dtype=np.float64)
     for idx in prange(B * S):
         b = idx // S
         s = idx % S
         acc = 0.0
-        for i in range(Wx):
+        for i in range(sx[b, 0], sx[b, 1]):
             bx_val = bx[b, i]
-            for j in range(Wy):
+            for j in range(sy[s, 0], sy[s, 1]):
                 matches = l - _packed_mismatches(bx_val, by[s, j])
                 if matches >= min_matches:
                     acc += table[l - matches]
@@ -132,19 +165,22 @@ def _self_diagonal_packed_numba(bx, by, table, l):
     Both blocks are symmetric, so each unordered pair is visited once: the
     forward block as (i, j), the RC block as (i, W-1-j), since its column j is
     rc(window W-1-j). A row whose RC block isn't the reverse complement of its
-    forward one visits every RC pair.
+    forward one visits every RC pair. A padded row (a shorter sequence) is
+    its first n windows, and its RC block reversed, whose pads come last too.
     """
     B, W = bx.shape
     has_rc = by.shape[1] > W
+    counts = _counts(bx)
     result = np.empty(B, dtype=np.float64)
     for b in prange(B):
-        fwd = bx[b]
+        n = counts[b]
+        fwd = bx[b, :n]
         acc = _block_sum(fwd, fwd, True, table)
         if has_rc:
             # RC windows in forward order: rev[k] = rc(fwd[k]) when paired
-            rev = by[b, W:][::-1].copy()
+            rev = by[b, W:][::-1][:n].copy()
             paired = True
-            for k in range(W):
+            for k in range(n):
                 if rev[k] != _rc_window(fwd[k], l):
                     paired = False
                     break
@@ -177,22 +213,41 @@ def _block_delta(f, nf, a_s, a_e, c, nc, c_s, c_e, table):
 def _mutant_diag_numba(fwd, rc, new, new_rc, diag, table, l):
     """K_raw(mutant, mutant) [4, L, B]: the reference's plus the pairs touching a
     changed window (see PackedGkmKernel.raw_diag_mutants; rc has 0 columns
-    without RC)."""
+    without RC). A padded row is its first n windows (its RC row's last n);
+    a position past them changes nothing."""
     B, W = fwd.shape
     L = new.shape[1]
     has_rc = rc.shape[1] > 0
+    counts = _counts(fwd)
     out = np.empty((4, L, B))
     for item in prange(L * B):
         p, b = item // B, item % B
-        a_s, a_e = max(0, p - l + 1), min(p + 1, W)
+        n = counts[b]
+        a_s, a_e = max(0, p - l + 1), min(p + 1, n)
+        if a_s >= a_e:
+            for v in range(4):
+                out[v, p, b] = diag[b]
+            continue
+        f = fwd[b, :n]
+        # RC windows r_s..r_e change; the row's own are W-n.. (new_rc from r_s)
         q = L - 1 - p
         r_s, r_e = max(0, q - l + 1), min(q + 1, W)
+        o = W - n
+        c_s = max(r_s, o)
         for v in range(4):
             nf = new[v, p, b]
-            d = _block_delta(fwd[b], nf, a_s, a_e, fwd[b], nf, a_s, a_e, table)
+            d = _block_delta(f, nf, a_s, a_e, f, nf, a_s, a_e, table)
             if has_rc:
                 d += _block_delta(
-                    fwd[b], nf, a_s, a_e, rc[b], new_rc[v, p, b], r_s, r_e, table
+                    f,
+                    nf,
+                    a_s,
+                    a_e,
+                    rc[b, o:],
+                    new_rc[v, p, b, c_s - r_s :],
+                    c_s - o,
+                    r_e - o,
+                    table,
                 )
             out[v, p, b] = diag[b] + d
     return out
@@ -250,12 +305,15 @@ void fused_pairwise_idx(
 
     const bool use_shared = (b_first == b_last);
 
+    // PAD windows (0xFFFFFFFF, past a shorter sequence's) are skipped
     double acc = 0.0;
     for (int i = 0; i < Wx; i++) {
         unsigned int bx_val = use_shared ? s_bx[i]
                                          : bx_packed[b * Wx + i];
+        if (bx_val == 0xFFFFFFFFu) continue;
         for (int j = 0; j < Wy; j++) {
             unsigned int by_val = by_packed[j * S + s];
+            if (by_val == 0xFFFFFFFFu) continue;
             unsigned int x = bx_val ^ by_val;
             unsigned int mismatches = ((x >> 1) | x) & 0x55555555u;
             int mismatch_count = __popc(mismatches);
@@ -291,11 +349,15 @@ void fused_cross_diagonal(
     const int b = blockDim.x * blockIdx.x + threadIdx.x;
     if (b >= B) return;
 
+    // PAD windows (0xFFFFFFFF, past a shorter sequence's) are skipped
     double acc = 0.0;
     for (int i = 0; i < W; i++) {
         unsigned int bx_val = bx_packed[b * W + i];
+        if (bx_val == 0xFFFFFFFFu) continue;
         for (int j = 0; j < W_rc; j++) {
-            unsigned int x = bx_val ^ bx_rc_packed[b * W_rc + j];
+            unsigned int y = bx_rc_packed[b * W_rc + j];
+            if (y == 0xFFFFFFFFu) continue;
+            unsigned int x = bx_val ^ y;
             unsigned int mismatches = ((x >> 1) | x) & 0x55555555u;
             int mismatch_count = __popc(mismatches);
             int matches = l - mismatch_count;
@@ -369,11 +431,15 @@ _METAL_PAIRWISE_SOURCE = """
     uint b = idx / S;
     uint s = idx % S;
 
+    // PAD windows (0xFFFFFFFF, past a shorter sequence's) are skipped
     float acc = 0.0f;
     for (uint i = 0; i < Wx; i++) {
         uint32_t bx_val = bx_packed[b * Wx + i];
+        if (bx_val == 0xFFFFFFFFu) continue;
         for (uint j = 0; j < Wy; j++) {
-            uint32_t xored = bx_val ^ by_packed[s * Wy + j];
+            uint32_t by_val = by_packed[s * Wy + j];
+            if (by_val == 0xFFFFFFFFu) continue;
+            uint32_t xored = bx_val ^ by_val;
             uint32_t mask = ((xored >> 1) | xored) & 0x55555555u;
             uint mm = popcount(mask);
             uint matches = l - mm;
@@ -395,11 +461,15 @@ _METAL_CROSS_DIAGONAL_SOURCE = """
 
     if (idx >= B) return;
 
+    // PAD windows (0xFFFFFFFF, past a shorter sequence's) are skipped
     float acc = 0.0f;
     for (uint i = 0; i < W; i++) {
         uint32_t bx_val = bx_packed[idx * W + i];
+        if (bx_val == 0xFFFFFFFFu) continue;
         for (uint j = 0; j < W_rc; j++) {
-            uint32_t xored = bx_val ^ bx_rc_packed[idx * W_rc + j];
+            uint32_t y = bx_rc_packed[idx * W_rc + j];
+            if (y == 0xFFFFFFFFu) continue;
+            uint32_t xored = bx_val ^ y;
             uint32_t mask = ((xored >> 1) | xored) & 0x55555555u;
             uint mm = popcount(mask);
             uint matches = l - mm;

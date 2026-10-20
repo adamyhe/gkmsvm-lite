@@ -269,6 +269,15 @@ def _lsgkm_runs(
     return [(cmd + [str(work / "ref.fa"), model, str(out)], out)]
 
 
+def _kernel_type(model: str) -> str:
+    """kernel_type from an LS-GKM model file's header."""
+    with open(model) as f:
+        for line in f:
+            if line.startswith("kernel_type"):
+                return line.split()[1]
+    return ""
+
+
 def _lsgkm_scores(method: str, work: Path, alt_base: np.ndarray) -> np.ndarray:
     if method == "ISM":
         return _read_scores(work / "lsgkm_alt.txt") - _read_scores(
@@ -426,6 +435,11 @@ def main():
     print(f"Work dir: {work}")
     info = _prepare(args, work)
     print(f"{info['n_variants']:,} variants, model {Path(info['model']).name}")
+    # mLS-GKM's gkmexplain (2bb06be, 2026-08-30) returns zeros for non-RBF models
+    # ("kmertree for SVs has not been initialized", exit 0): time it on RBF only
+    rbf_model = _kernel_type(info["model"]) in ("gkmrbf", "wgkmrbf")
+    if MLSGKM in c_impls and "GkmExplain" in args.methods and not rbf_model:
+        print(f"{MLSGKM} gkmexplain skipped: wrong for non-RBF models")
     # (device, CPU threads) for each gkmsvm-lite run
     lite_runs = [("cpu", t) for t in cpu_threads] + (
         [("cuda", lite_threads)] if args.device == "cuda" else []
@@ -448,6 +462,7 @@ def main():
                 (impl, bins, t)
                 for impl, (bins, thr) in c_impls.items()
                 for t in thr[binary]
+                if not (impl == MLSGKM and binary == "gkmexplain" and not rbf_model)
             ]
         )
         for impl, bins, n_thr in c_runs:

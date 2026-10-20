@@ -18,13 +18,130 @@ def _add_device_arg(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_bases_arg(parser: argparse.ArgumentParser) -> None:
+# Window length for training when --length isn't given: the ENCODE gkm-SVM
+# and DART-Eval convention
+TRAIN_LENGTH = 300
+
+
+def _add_input_args(
+    parser: argparse.ArgumentParser,
+    *,
+    length_default: str,
+    genome: bool = True,
+    variable_length: bool = False,
+) -> None:
+    """Options for reading sequences: --genome, --length, --variable-length,
+    --allow-other-bases (see _load_inputs)."""
+    if genome:
+        parser.add_argument(
+            "--genome",
+            default=None,
+            help="Genome FASTA: read the inputs as BED/narrowPeak files and take "
+            "--length bp around each summit (narrowPeak column 10, else the "
+            "midpoint). Windows past a chromosome end are dropped.",
+        )
+    parser.add_argument(
+        "--length",
+        type=int,
+        default=None,
+        help="Window length: FASTA records of different lengths (or longer than "
+        "this) are center-cropped to it; a shorter record is an error. Default: "
+        f"{length_default}.",
+    )
+    if variable_length:
+        parser.add_argument(
+            "--variable-length",
+            action="store_true",
+            help="Use FASTA records at their own lengths, as LS-GKM does "
+            "(compatibility), instead of cropping.",
+        )
     parser.add_argument(
         "--allow-other-bases",
         action="store_true",
         help="Read letters other than ACGTN (IUPAC codes, ...) as N, scored as A as "
         "LS-GKM does, instead of stopping with an error. N is always allowed.",
     )
+
+
+def _fail(msg: str):
+    print(f"Error: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def _model_length(model) -> int | None:
+    """The model's SV length, or None when its SVs differ in length."""
+    return None if model.sv_lengths is not None else model.support_sequences.shape[2]
+
+
+def _load_inputs(args: argparse.Namespace, path: str, default_length: int | None):
+    """(names, X [B, 4, L], lengths or None, mask over BED lines or None).
+
+    With --genome, path is a BED/narrowPeak file: windows of --length (else
+    default_length) around each summit. Otherwise a FASTA: used as is when its
+    records share a length (and --length doesn't say otherwise), center-cropped
+    to --length (else default_length) when they differ; with
+    --variable-length, padded with each record's length.
+    """
+    from gkmsvm.codec import center_crop, one_hot_encode
+    from gkmsvm.fasta import read_fasta
+
+    if getattr(args, "genome", None):
+        from gkmsvm.fasta import extract_loci, read_loci
+
+        length = args.length or default_length
+        if length is None:
+            _fail("give --length for windows from --genome")
+        loci = read_loci(path)
+        X, mask = extract_loci(loci, args.genome, in_window=length, return_mask=True)
+        if (~mask).any():
+            print(
+                f"Dropped {int((~mask).sum())} of {len(mask)} loci (chromosome missing "
+                "from the genome, or window past its end)",
+                file=sys.stderr,
+            )
+        return list(loci["name"][mask]), X, None, mask
+
+    records = read_fasta(path)
+    names = [name for name, _ in records]
+    seqs = [seq for _, seq in records]
+
+    def encode(s):
+        # N (and with --allow-other-bases any letter) encodes as all-zero,
+        # scored as A, as in LS-GKM
+        return one_hot_encode(s, allow_n=True, allow_other=args.allow_other_bases)
+
+    if getattr(args, "variable_length", False):
+        from gkmsvm.svm import as_batch
+
+        X, lengths = as_batch([encode(s) for s in seqs])
+        return names, X, lengths, None
+    lens = {len(s) for s in seqs}
+    target = args.length
+    if target is None and len(lens) > 1:
+        target = default_length
+        if target is None:
+            _fail(
+                f"{path}: records range from {min(lens)} to {max(lens)} bp; give "
+                "--length to center-crop them"
+            )
+    if target is not None and lens != {target}:
+        try:
+            seqs = center_crop(seqs, target, names)
+        except ValueError as e:
+            hint = (
+                "; extract full windows from the genome with --genome"
+                if hasattr(args, "genome")
+                else ""
+            )
+            if hasattr(args, "variable_length"):
+                hint += ", or use records at their own lengths with --variable-length"
+            _fail(f"{path}: {e}{hint}")
+    return names, np.stack([encode(s) for s in seqs]), None, None
+
+
+def _as_list(X, lengths):
+    """[4, L_i] arrays of X's rows at their lengths (X itself when uniform)."""
+    return X if lengths is None else [x[:, :n] for x, n in zip(X, lengths)]
 
 
 def _add_kernel_args(parser: argparse.ArgumentParser) -> None:
@@ -71,21 +188,6 @@ def _read_seqs(path: str) -> list[tuple[str, str]]:
     return read_fasta(path)
 
 
-def _encode_seqs(
-    records: list[tuple[str, str]], args: argparse.Namespace
-) -> np.ndarray:
-    from gkmsvm.codec import one_hot_encode
-
-    # N (and with --allow-other-bases any letter) encodes as all-zero, scored
-    # as A, as in LS-GKM
-    return np.stack(
-        [
-            one_hot_encode(seq, allow_n=True, allow_other=args.allow_other_bases)
-            for name, seq in records
-        ]
-    )
-
-
 def _write_tsv(path: str | None, columns: tuple[str, str], names, values) -> None:
     """Two-column TSV to `path`, or stdout when None."""
     import contextlib
@@ -107,34 +209,34 @@ def _save_model(model, path: str) -> None:
 
 
 def cmd_predict(args: argparse.Namespace) -> None:
-    from gkmsvm.fasta import read_fasta
-
     model = _load_model(args.model, device=args.device)
-
-    records = read_fasta(args.input)
-    names = [name for name, seq in records]
-    X = _encode_seqs(records, args)
+    names, X, lengths, _ = _load_inputs(args, args.input, _model_length(model))
 
     from gkmsvm.backend import to_cpu
 
-    scores = to_cpu(model(X, batch_size=args.batch_size, verbose=args.verbose)).ravel()
+    scores = to_cpu(
+        model(X, lengths=lengths, batch_size=args.batch_size, verbose=args.verbose)
+    ).ravel()
     _write_tsv(args.output, ("name", "score"), names, scores)
     if args.output:
         print(f"Wrote {len(scores)} scores to {args.output}", file=sys.stderr)
 
 
 def cmd_train(args: argparse.Namespace) -> None:
-    from gkmsvm.fasta import read_fasta
     from gkmsvm.train import train_gkmsvm
 
-    pos_records = read_fasta(args.positives)
-    neg_records = read_fasta(args.negatives)
-    pos_seqs = [seq for _, seq in pos_records]
-    neg_seqs = [seq for _, seq in neg_records]
+    length = args.length or TRAIN_LENGTH
+    _, pos, pos_len, _ = _load_inputs(args, args.positives, length)
+    _, neg, neg_len, _ = _load_inputs(args, args.negatives, length)
+    if not args.variable_length and pos.shape[2] != neg.shape[2]:
+        _fail(
+            f"positives are {pos.shape[2]} bp and negatives {neg.shape[2]} bp; give "
+            "--length to crop both"
+        )
 
     model = train_gkmsvm(
-        pos_seqs,
-        neg_seqs,
+        _as_list(pos, pos_len),
+        _as_list(neg, neg_len),
         kernel_type=args.kernel_type,
         l=args.l,
         k=args.k,
@@ -154,23 +256,18 @@ def cmd_train(args: argparse.Namespace) -> None:
 
 
 def cmd_trainsvr(args: argparse.Namespace) -> None:
-    from gkmsvm.fasta import read_fasta
     from gkmsvm.train import train_gkmsvr
 
-    records = read_fasta(args.input)
-    seqs = [seq for _, seq in records]
-
-    labels_path = Path(args.labels)
-    labels = np.loadtxt(labels_path, dtype=np.float64)
-    if labels.shape[0] != len(seqs):
-        print(
-            f"Error: {len(seqs)} sequences but {labels.shape[0]} labels",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    _, X, lengths, mask = _load_inputs(args, args.input, args.length or TRAIN_LENGTH)
+    labels = np.loadtxt(Path(args.labels), dtype=np.float64)
+    n_in = len(mask) if mask is not None else X.shape[0]
+    if labels.shape[0] != n_in:
+        _fail(f"{n_in} sequences but {labels.shape[0]} labels")
+    if mask is not None:
+        labels = labels[mask]  # labels of the loci kept
 
     model = train_gkmsvr(
-        seqs,
+        _as_list(X, lengths),
         labels,
         kernel_type=args.kernel_type,
         l=args.l,
@@ -195,16 +292,17 @@ def cmd_ism(args: argparse.Namespace) -> None:
     from gkmsvm.ism import ism
 
     model = _load_model(args.model, device=args.device)
-    records = _read_seqs(args.input)
-    names = np.array([name for name, _ in records])
-    X = _encode_seqs(records, args)
+    names, X, lengths, _ = _load_inputs(args, args.input, _model_length(model))
+    names = np.array(names)
     one_hot = X.copy()
 
     X = model._match_device(X)
-    result = ism(model, X, verbose=args.verbose)
+    result = ism(model, X, lengths=lengths, verbose=args.verbose)
     result = to_cpu(result)
 
-    np.savez(args.output, scores=result, one_hot=one_hot, names=names)
+    # With --variable-length, rows are padded past their lengths
+    extra = {} if lengths is None else {"lengths": lengths}
+    np.savez(args.output, scores=result, one_hot=one_hot, names=names, **extra)
     print(
         f"Wrote ISM scores {result.shape} to {args.output}",
         file=sys.stderr,
@@ -216,20 +314,23 @@ def cmd_explain(args: argparse.Namespace) -> None:
     from gkmsvm.explain import gkmexplain
 
     model = _load_model(args.model, device=args.device)
-    records = _read_seqs(args.input)
-    X = _encode_seqs(records, args)
+    _, X, lengths, _ = _load_inputs(args, args.input, _model_length(model))
     one_hot = X.astype(np.float32)
 
     X = model._match_device(X)
-    hyp = to_cpu(gkmexplain(model, X, mode="hypothetical", verbose=args.verbose))
+    hyp = to_cpu(
+        gkmexplain(model, X, mode="hypothetical", lengths=lengths, verbose=args.verbose)
+    )
 
     # Two files: sequences and attributions, each [B, 4, L] as arr_0.
     # Directly usable with: modisco motifs -s seqs.npz -a attr.npz ...
+    # (with --variable-length, rows are zero past their lengths, also saved)
     seq_path = args.sequences_output
     attr_path = args.output
 
-    np.savez(attr_path, hyp.astype(np.float32))
-    np.savez(seq_path, one_hot)
+    extra = {} if lengths is None else {"lengths": lengths}
+    np.savez(attr_path, hyp.astype(np.float32), **extra)
+    np.savez(seq_path, one_hot, **extra)
 
     print(
         f"Wrote attributions {hyp.shape} to {attr_path}",
@@ -239,6 +340,12 @@ def cmd_explain(args: argparse.Namespace) -> None:
         f"Wrote sequences {one_hot.shape} to {seq_path}",
         file=sys.stderr,
     )
+    if lengths is not None:
+        print(
+            "Records differ in length: rows are zero past their lengths (saved as "
+            "'lengths'); TF-MoDISco expects one length (crop with --length)",
+            file=sys.stderr,
+        )
     print(
         f"Run: modisco motifs -s {seq_path} -a {attr_path} "
         f"-n 2000 -o modisco_results.h5",
@@ -256,14 +363,12 @@ def cmd_deltasvm(args: argparse.Namespace) -> None:
         device=args.device,
     )
 
-    records = _read_seqs(args.input)
-    names = [name for name, seq in records]
-    X = _encode_seqs(records, args)
+    names, X, lengths, _ = _load_inputs(args, args.input, None)
     X = dsvm._match_device(X)
 
     from gkmsvm.backend import to_cpu
 
-    scores = to_cpu(dsvm(X, verbose=args.verbose).flatten())
+    scores = to_cpu(dsvm(X, lengths=lengths, verbose=args.verbose).flatten())
     _write_tsv(args.output, ("name", "score"), names, scores)
 
 
@@ -308,28 +413,23 @@ def cmd_score_variants(args: argparse.Namespace) -> None:
 
     model = _load_model(args.model, device=args.device)
 
-    ref_records = _read_seqs(args.ref)
-    alt_records = _read_seqs(args.alt)
-
-    if len(ref_records) != len(alt_records):
-        print(
-            f"Error: {len(ref_records)} ref sequences but "
-            f"{len(alt_records)} alt sequences",
-            file=sys.stderr,
+    ref_names, X_ref, ref_len, _ = _load_inputs(args, args.ref, _model_length(model))
+    _, X_alt, alt_len, _ = _load_inputs(args, args.alt, _model_length(model))
+    if X_ref.shape[0] != X_alt.shape[0] or (
+        not args.variable_length and X_ref.shape != X_alt.shape
+    ):
+        _fail(
+            f"{X_ref.shape[0]} ref sequences of {X_ref.shape[2]} bp but "
+            f"{X_alt.shape[0]} alt sequences of {X_alt.shape[2]} bp"
         )
-        sys.exit(1)
 
-    ref_names = [name for name, _ in ref_records]
-    X_ref = _encode_seqs(ref_records, args)
-    X_alt = _encode_seqs(alt_records, args)
-
-    X_ref = model._match_device(X_ref)
-    X_alt = model._match_device(X_alt)
     deltas = to_cpu(
         model.score_variants(
             X_ref,
             X_alt,
             method=args.method,
+            ref_lengths=ref_len,
+            alt_lengths=alt_len,
             verbose=args.verbose,
         )
     ).ravel()
@@ -384,18 +484,33 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "-m", "--model", required=True, help="Model file (.npz or .model.txt)."
     )
-    p.add_argument("-i", "--input", required=True, help="Input FASTA file.")
+    p.add_argument(
+        "-i",
+        "--input",
+        required=True,
+        help="Input FASTA (BED/narrowPeak with --genome).",
+    )
     p.add_argument("-o", "--output", default=None, help="Output TSV (default: stdout).")
     p.add_argument(
         "--batch-size", type=int, default=100, help="Batch size (default: 100)."
     )
     _add_device_arg(p)
-    _add_bases_arg(p)
+    _add_input_args(p, length_default="the model's SV length", variable_length=True)
 
     # ── train ────────────────────────────────────────────────────────
     p = sub.add_parser("train", help="Train a gkm-SVM classifier.")
-    p.add_argument("-p", "--positives", required=True, help="Positive sequences FASTA.")
-    p.add_argument("-n", "--negatives", required=True, help="Negative sequences FASTA.")
+    p.add_argument(
+        "-p",
+        "--positives",
+        required=True,
+        help="Positive sequences FASTA (BED/narrowPeak with --genome).",
+    )
+    p.add_argument(
+        "-n",
+        "--negatives",
+        required=True,
+        help="Negative sequences FASTA (BED/narrowPeak with --genome).",
+    )
     p.add_argument(
         "-o", "--output", required=True, help="Output model (.npz or .model.txt)."
     )
@@ -414,11 +529,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_kernel_args(p)
     _add_device_arg(p)
-    _add_bases_arg(p)
+    _add_input_args(
+        p, length_default="300 (when records differ in length)", variable_length=True
+    )
 
     # ── trainsvr ─────────────────────────────────────────────────────
     p = sub.add_parser("trainsvr", help="Train a gkm-SVR regressor.")
-    p.add_argument("-i", "--input", required=True, help="Sequences FASTA.")
+    p.add_argument(
+        "-i",
+        "--input",
+        required=True,
+        help="Sequences FASTA (BED/narrowPeak with --genome).",
+    )
     p.add_argument("--labels", required=True, help="Labels file (one value per line).")
     p.add_argument(
         "-o", "--output", required=True, help="Output model (.npz or .model.txt)."
@@ -435,17 +557,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_kernel_args(p)
     _add_device_arg(p)
-    _add_bases_arg(p)
+    _add_input_args(
+        p, length_default="300 (when records differ in length)", variable_length=True
+    )
 
     # ── ism ──────────────────────────────────────────────────────────
     p = sub.add_parser("ism", help="In-silico mutagenesis.")
     p.add_argument("-m", "--model", required=True, help="Model file.")
-    p.add_argument("-i", "--input", required=True, help="Input FASTA.")
+    p.add_argument(
+        "-i",
+        "--input",
+        required=True,
+        help="Input FASTA (BED/narrowPeak with --genome).",
+    )
     p.add_argument(
         "-o", "--output", required=True, help="Output .npz file (scores + names)."
     )
     _add_device_arg(p)
-    _add_bases_arg(p)
+    _add_input_args(
+        p,
+        length_default="the model's SV length (when records differ in length)",
+        variable_length=True,
+    )
 
     # ── explain ──────────────────────────────────────────────────────
     p = sub.add_parser(
@@ -455,7 +588,12 @@ def build_parser() -> argparse.ArgumentParser:
         "modisco motifs -s SEQS -a ATTR -n 2000 -o results.h5",
     )
     p.add_argument("-m", "--model", required=True, help="Model file.")
-    p.add_argument("-i", "--input", required=True, help="Input FASTA.")
+    p.add_argument(
+        "-i",
+        "--input",
+        required=True,
+        help="Input FASTA (BED/narrowPeak with --genome).",
+    )
     p.add_argument(
         "-o",
         "--output",
@@ -469,17 +607,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="Sequences .npz file (one-hot, [B,4,L] as arr_0).",
     )
     _add_device_arg(p)
-    _add_bases_arg(p)
+    _add_input_args(
+        p,
+        length_default="the model's SV length (when records differ in length)",
+        variable_length=True,
+    )
 
     # ── deltasvm ─────────────────────────────────────────────────────
     p = sub.add_parser("deltasvm", help="Score sequences with deltaSVM weights.")
     p.add_argument("-w", "--weights", required=True, help="DeltaSVM weight file.")
-    p.add_argument("-i", "--input", required=True, help="Input FASTA.")
+    p.add_argument(
+        "-i",
+        "--input",
+        required=True,
+        help="Input FASTA (BED/narrowPeak with --genome).",
+    )
     p.add_argument("-o", "--output", default=None, help="Output TSV (default: stdout).")
     p.add_argument("-l", type=int, required=True, help="L-mer window length.")
     p.add_argument("--no-rc", action="store_true", help="Disable reverse complement.")
     _add_device_arg(p)
-    _add_bases_arg(p)
+    _add_input_args(
+        p,
+        length_default="none: records must share a length, or give --length",
+        variable_length=True,
+    )
 
     # ── to-deltasvm ──────────────────────────────────────────────────
     p = sub.add_parser(
@@ -515,7 +666,12 @@ def build_parser() -> argparse.ArgumentParser:
         "(lsgkm gkmexplain -m 5). Default: kernel.",
     )
     _add_device_arg(p)
-    _add_bases_arg(p)
+    _add_input_args(
+        p,
+        length_default="the model's SV length (when records differ in length)",
+        genome=False,
+        variable_length=True,
+    )
 
     # ── import ───────────────────────────────────────────────────────
     p = sub.add_parser("import", help="Import external model format to .npz.")

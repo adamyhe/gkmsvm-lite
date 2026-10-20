@@ -111,19 +111,37 @@ class DeltaSVM(DeviceModel):
 
     def __call__(
         self,
-        x: np.ndarray,
+        x,
         *,
+        lengths=None,
         verbose: bool = False,
     ) -> np.ndarray:
         """Score sequences by summing gapped k-mer weights.
 
         Args:
-            x: [B, 4, L] one-hot encoded DNA sequences.
+            x: [B, 4, L] one-hot encoded DNA sequences, or a list of [4, L_i]
+                arrays or DNA strings of different lengths.
+            lengths: [B] lengths of x's rows when they differ (x padded to
+                the longest).
             verbose: Show tqdm progress bar over batch chunks.
 
         Returns:
             [B, 1] scores.
         """
+        from gkmsvm.backend import to_cpu
+        from gkmsvm.svm import as_batch
+
+        x, lengths = as_batch(x, lengths)
+        if lengths is not None:
+            # Each length's rows at that length (padding would count as A)
+            x = to_cpu(x)
+            score = np.zeros((x.shape[0], 1))
+            for n in np.unique(lengths):
+                rows = lengths == n
+                score[rows] = to_cpu(self(x[rows, :, : int(n)]))
+            return self._match_device(
+                score.astype(np.float32 if self._on_mlx else np.float64)
+            )
         x = self._match_device(x)
         score = self._score_strand(x, verbose=verbose)
         if self.include_rc:

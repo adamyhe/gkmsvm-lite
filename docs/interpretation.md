@@ -69,7 +69,7 @@ GkmExplain processes input sequences in batches (default 50) and support vectors
 attr = gkmexplain(model, x, mode="importance", batch_size=20, verbose=True)
 ```
 
-GkmExplain compares packed uint32 windows (XOR + popcount), skipping window pairs beyond the mismatch cutoff (~99.9% for l=11 k=7 d=3), and decomposes only the contributing pairs per position. The kernel multiplies by the normalized coefficient and reduces over SVs in its inner loop, accumulating into the `[B, 4, L]` result, so there is no per-SV intermediate. On CPU a Numba kernel parallelizes over the batch; on NVIDIA GPUs a CuPy kernel runs one thread per (sequence, SV) pair and accumulates with float64 `atomicAdd` (compute capability >= 6.0). On Apple Silicon it falls back to CPU (Metal has no float64, which the completeness axiom needs).
+GkmExplain compares packed uint32 windows (XOR + popcount), skipping window pairs beyond the mismatch cutoff (~99.9% for l=11 k=7 d=3), and decomposes only the contributing pairs per position. The kernel multiplies by the normalized coefficient and reduces over SVs in its inner loop, accumulating into the `[B, 4, L]` result, so there is no per-SV intermediate. On CPU a Numba kernel parallelizes over the batch; on NVIDIA GPUs a CuPy kernel runs one thread per (sequence, SV) pair and accumulates with float64 `atomicAdd` (compute capability >= 6.0). On Apple Silicon it runs on CPU and returns a NumPy float64 array (Metal has no float64, which the completeness axiom needs).
 
 ## In-silico mutagenesis (ISM)
 
