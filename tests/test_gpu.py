@@ -1,4 +1,4 @@
-"""GPU tests for all operations. Skipped when CuPy is not available.
+"""GPU tests for all operations. Skipped without a CUDA GPU.
 
 Each test computes the result on both CPU and GPU, then asserts they match.
 This validates the CuPy RawKernels, device transfers, and GPU code paths.
@@ -9,11 +9,13 @@ import random
 import numpy as np
 import pytest
 
-from gkmsvm.backend import HAS_CUPY
+from gkmsvm.backend import HAS_CUPY, cuda_available
 from gkmsvm.codec import one_hot_encode
 from gkmsvm.svm import GkmSVM
 
-pytestmark = pytest.mark.skipif(not HAS_CUPY, reason="CuPy not installed")
+pytestmark = pytest.mark.skipif(
+    not cuda_available(), reason="No CUDA GPU (or CuPy not installed)"
+)
 
 if HAS_CUPY:
     import cupy as cp

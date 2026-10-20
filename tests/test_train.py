@@ -287,6 +287,46 @@ class TestTrainGkmsvm:
         )
         assert model.num_support_vectors > 0
 
+    def test_device_auto_without_gpu(self, monkeypatch):
+        """CuPy importing on a machine without a usable GPU (a CPU node with an
+        old NVIDIA driver library) keeps "auto" on CPU."""
+        import types
+
+        from gkmsvm import backend
+        from gkmsvm.train import _move_to_device
+
+        def no_device():
+            raise RuntimeError("cudaErrorInsufficientDriver")
+
+        stub = types.SimpleNamespace(
+            ndarray=type("ndarray", (), {}),
+            cuda=types.SimpleNamespace(
+                runtime=types.SimpleNamespace(getDeviceCount=no_device)
+            ),
+        )
+        monkeypatch.setattr(backend, "cp", stub)
+        monkeypatch.setattr(backend, "HAS_CUPY", True)
+        monkeypatch.setattr(backend, "HAS_MLX", False)
+        monkeypatch.setattr("gkmsvm.train.HAS_MLX", False)  # imported by name
+        backend.cuda_available.cache_clear()
+        try:
+            assert not backend.cuda_available()
+            X = np.zeros((2, 4, 20), dtype=np.float32)
+            assert isinstance(_move_to_device(X, "auto", False), np.ndarray)
+            rng = np.random.default_rng(0)
+            model = train_gkmsvm(
+                _random_seqs_str(10, 20, rng),
+                _random_seqs_str(10, 20, rng),
+                kernel_type="direct",
+                l=7,
+                k=5,
+                device="cpu",
+            )
+            model._to_device("auto")
+            assert not model._on_gpu
+        finally:
+            backend.cuda_available.cache_clear()
+
 
 def test_train_strings_with_n_equal_onehot():
     """DNA strings with N train the same model as their one-hot arrays (N all-zero)."""

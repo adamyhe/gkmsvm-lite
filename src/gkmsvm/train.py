@@ -7,6 +7,7 @@ import numpy as np
 from gkmsvm.backend import (
     HAS_CUPY,
     HAS_MLX,
+    cuda_available,
     get_array_module,
     is_mlx,
     to_cpu,
@@ -255,7 +256,7 @@ def _move_to_device(X: np.ndarray, device: str, verbose: bool) -> np.ndarray:
             print("Moving training data to CUDA GPU")
         return to_gpu(X)
     if device == "auto":
-        if HAS_CUPY:
+        if cuda_available():
             if verbose:
                 print("Moving training data to CUDA GPU")
             return to_gpu(X)
