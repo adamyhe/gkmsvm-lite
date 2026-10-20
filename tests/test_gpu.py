@@ -873,6 +873,24 @@ class TestWeightedGPU:
                     cp.asnumpy(cols[i]), ref[:, i], rtol=1e-10, atol=1e-12
                 )
 
+    @pytest.mark.parametrize("padded", [False, True])
+    def test_brute_and_self_kernels_on_gpu(self, padded):
+        """Brute force (< 16 rows) and self-kernels run in CUDA (CuPy results)."""
+        from gkmsvm.kernels.weighted import CenterWeightedGkmKernel
+
+        kernel = CenterWeightedGkmKernel(8, 5, d=2, M=20, H=6.0)
+        rng = np.random.default_rng(6)
+        lengths = rng.integers(10, 62, 9) if padded else None
+        bx, bx_rc = kernel.pack_both(self._seqs(9, 61, 14), lengths)
+        gbx, grc = cp.asarray(bx), cp.asarray(bx_rc)
+        for got, ref in (
+            (kernel.raw_diag_packed(gbx, grc), kernel.raw_diag_packed(bx, bx_rc)),
+            (kernel.raw_diag_packed(gbx), kernel.raw_diag_packed(bx)),
+            (kernel.raw_packed(gbx, gbx, grc), kernel.raw_packed(bx, bx, bx_rc)),
+        ):
+            assert isinstance(got, cp.ndarray)
+            np.testing.assert_allclose(cp.asnumpy(got), ref, rtol=1e-12)
+
     def test_gram_matches_cpu(self):
         from gkmsvm.gram import compute_gram
         from gkmsvm.kernels.weighted import CenterWeightedGkmKernel

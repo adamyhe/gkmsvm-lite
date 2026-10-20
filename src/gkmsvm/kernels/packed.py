@@ -303,19 +303,9 @@ def _masked(bx, by, plan, by_rc, diag_offset, dev, wx=None, wy=None, wy_rc=None)
         )
     import mlx.core as mx
 
-    if wx is not None:  # Metal counts in int32; weighted windows join on the CPU
-        out = masked.masked_pairwise(
-            np.asarray(bx),
-            np.asarray(by),
-            plan,
-            None if by_rc is None else np.asarray(by_rc),
-            wx=wx,
-            wy=wy,
-            wy_rc=wy_rc,
-        )
-        return mx.array(out.astype(np.float32))
     # Exact integer counts combined in float64; Metal holds float32
-    return mx.array(masked.masked_pairwise_mlx(bx, by, plan, by_rc).astype(np.float32))
+    out = masked.masked_pairwise_mlx(bx, by, plan, by_rc, wx=wx, wy=wy, wy_rc=wy_rc)
+    return mx.array(out.astype(np.float32))
 
 
 def _concat_windows(a, b):

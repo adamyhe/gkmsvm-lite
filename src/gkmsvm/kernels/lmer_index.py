@@ -345,8 +345,30 @@ _METAL_SRC = """
     for (int e = offsets[v]; e < offsets[v + 1]; e++)
         atomic_fetch_add_explicit(&counts[base + ids[e]], 1, memory_order_relaxed);
 """
+# With window weights (-t 4/5): each hit adds wx[b, i] * vals[e], exact in 64
+# bits as a low uint32 word plus a carry word (bumped by the thread whose add
+# wraps the low word)
+_METAL_SRC_W = """
+    uint it = thread_position_in_grid.x;
+    uint b = thread_position_in_grid.y;
+    uint W = (uint)params[0], n_masks = (uint)params[1], S = (uint)params[2];
+    uint n_lmers = (uint)params[3], B = (uint)params[4], wx_stride = (uint)params[5];
+    if (it >= W * n_masks) return;
+    uint i = it / n_masks, t = it - i * n_masks;
+    uint v = bx[b * W + i] ^ masks[t];
+    if (v >= n_lmers) return;
+    uint a = (uint)wx[b * wx_stride + i];
+    uint base = ((uint)levels[t] * B + b) * S;
+    for (int e = offsets[v]; e < offsets[v + 1]; e++) {
+        uint c = a * (uint)vals[e];
+        uint old = atomic_fetch_add_explicit(&lo[base + ids[e]], c, memory_order_relaxed);
+        if (old + c < old)
+            atomic_fetch_add_explicit(&hi[base + ids[e]], 1u, memory_order_relaxed);
+    }
+"""
 _cuda_fn = None
 _metal_fn = None
+_metal_fn_w = None
 # Rows per Metal launch: caps the int32 [levels, rows, S] counts
 _METAL_COUNT_BYTES = 256 * 2**20
 # Above this many distinct pair weights, MLX queries on CPU
@@ -527,6 +549,7 @@ class LmerIndex:
                     mx.array(self.ids),
                     mx.array(self.masks),
                     mx.array(self.levels),
+                    mx.array(self.vals.astype(np.uint32)) if len(self.vals) else None,
                 )
         return self._dev[dev]
 
@@ -578,7 +601,7 @@ class LmerIndex:
     def _pairwise_mlx(self, bx):
         import mlx.core as mx
 
-        global _metal_fn
+        global _metal_fn, _metal_fn_w
         if _metal_fn is None:
             _metal_fn = mx.fast.metal_kernel(
                 name="gkm_lmer_index_query",
@@ -587,42 +610,77 @@ class LmerIndex:
                 source=_METAL_SRC,
                 atomic_outputs=True,
             )
-        if len(self.table) > _METAL_MAX_LEVELS or len(self.vals):
-            # One int32 [rows, S] block per level; many levels, or window
-            # weights (counts no longer per level), query on CPU, which shares
-            # memory with the GPU
+            _metal_fn_w = mx.fast.metal_kernel(
+                name="gkm_lmer_index_query_w",
+                input_names=[
+                    "bx",
+                    "wx",
+                    "offsets",
+                    "ids",
+                    "vals",
+                    "masks",
+                    "levels",
+                    "params",
+                ],
+                output_names=["lo", "hi"],
+                source=_METAL_SRC_W,
+                atomic_outputs=True,
+            )
+        if len(self.table) > _METAL_MAX_LEVELS:
+            # One int32 [rows, S] block per level; with many levels, query on
+            # CPU, which shares memory with the GPU
             return mx.array(self.pairwise(np.asarray(to_cpu(bx))).astype(np.float32))
         if self.offsets[-1] >= 2**31:
             raise ValueError("l-mer index too large for the Metal kernel")
-        offsets, ids, masks, levels = self._arrays("mlx")
+        offsets, ids, masks, levels, vals = self._arrays("mlx")
         bx_np = np.ascontiguousarray(to_cpu(bx), dtype=np.uint32)
         B, W = bx_np.shape
+        weighted = vals is not None
+        if weighted:  # the query windows' weights (row_weights)
+            wx_np = np.ascontiguousarray(self.row_weights(bx_np), dtype=np.uint32)
+            wx_stride = W if wx_np.shape[0] > 1 else 0
         n_lev = len(self.table)
-        rows = max(1, _METAL_COUNT_BYTES // (4 * n_lev * self.S))
+        words = 2 if weighted else 1
+        rows = max(1, _METAL_COUNT_BYTES // (4 * words * n_lev * self.S))
         out = np.zeros((B, self.S), dtype=np.float64)
         n_items = W * len(self.masks)
         for b0 in range(0, B, rows):
             nb = min(rows, B - b0)
-            params = mx.array(
-                [W, len(self.masks), self.S, self.n_lmers, nb], dtype=mx.int32
-            )
-            counts = _metal_fn(
-                inputs=[
-                    mx.array(bx_np[b0 : b0 + nb].ravel()),
-                    offsets,
-                    ids,
-                    masks,
-                    levels,
-                    params,
-                ],
+            launch = dict(
                 template=[],
                 grid=((n_items + 255) // 256 * 256, nb, 1),
                 threadgroup=(256, 1, 1),
-                output_shapes=[(n_lev * nb * self.S,)],
-                output_dtypes=[mx.int32],
                 init_value=0,
-            )[0]
-            counts = np.array(counts).reshape(n_lev, nb, self.S)
+            )
+            q = mx.array(bx_np[b0 : b0 + nb].ravel())
+            if weighted:
+                params = mx.array(
+                    [W, len(self.masks), self.S, self.n_lmers, nb, wx_stride],
+                    dtype=mx.int32,
+                )
+                wq = wx_np[b0 : b0 + nb] if wx_stride else wx_np
+                lo, hi = _metal_fn_w(
+                    inputs=[q, mx.array(wq.ravel()), offsets, ids, vals, masks]
+                    + [levels, params],
+                    output_shapes=[(n_lev * nb * self.S,)] * 2,
+                    output_dtypes=[mx.uint32, mx.uint32],
+                    **launch,
+                )
+                counts = (np.array(hi).astype(np.uint64) << np.uint64(32)) | np.array(
+                    lo
+                ).astype(np.uint64)
+            else:
+                params = mx.array(
+                    [W, len(self.masks), self.S, self.n_lmers, nb], dtype=mx.int32
+                )
+                counts = _metal_fn(
+                    inputs=[q, offsets, ids, masks, levels, params],
+                    output_shapes=[(n_lev * nb * self.S,)],
+                    output_dtypes=[mx.int32],
+                    **launch,
+                )[0]
+                counts = np.array(counts)
+            counts = counts.reshape(n_lev, nb, self.S)
             for m in range(n_lev):
-                out[b0 : b0 + nb] += self.table[m] * counts[m]
+                out[b0 : b0 + nb] += self.table[m] * counts[m].astype(np.float64)
         return mx.array(out.astype(np.float32))

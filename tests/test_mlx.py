@@ -647,6 +647,80 @@ class TestMaskedMLX:
         np.testing.assert_allclose(got, cpu, atol=1e-5)
 
 
+class TestWeightedMLX:
+    """-t 4/5 window weights in Metal: the masked join and l-mer index count
+    in 64 bits (a carry word), brute force and self-kernels in float32."""
+
+    @staticmethod
+    def _polya_and_random(n, length, seed):
+        x = np.zeros((n, 4, length), np.float32)
+        x[: n // 2, 0] = 1  # poly-A: every pair matches, counts past 2^32
+        rng = np.random.default_rng(seed)
+        x[n // 2 :] = np.eye(4, dtype=np.float32)[
+            rng.integers(0, 4, (n - n // 2, length))
+        ].transpose(0, 2, 1)
+        return x
+
+    @pytest.mark.parametrize("padded", [False, True])
+    @pytest.mark.parametrize("col_tile", [2048, 7])
+    def test_join_is_exact(self, padded, col_tile, monkeypatch):
+        import gkmsvm.kernels.masked as masked
+        from gkmsvm.kernels.weighted import CenterWeightedGkmKernel
+
+        monkeypatch.setattr(masked, "_METAL_COL_TILE_W", col_tile)
+        kernel = CenterWeightedGkmKernel(11, 7, d=3, M=255, H=1e9)  # all 255
+        x = self._polya_and_random(18, 1000, 1)
+        lengths = np.r_[1000, np.random.default_rng(2).integers(20, 1001, 17)]
+        bx, bx_rc = kernel.pack_both(x, lengths if padded else None)
+        w, w_rc = kernel.row_weights(bx), kernel.row_weights(bx_rc, rc=True)
+        plan = kernel._join_plan()
+        got = masked.masked_pairwise_mlx(bx, bx, plan, bx_rc, wx=w, wy=w, wy_rc=w_rc)
+        # poly-A against poly-A: every forward pair a full match at weight 255,
+        # none on the RC; exact (the CPU's float64 sums are off by ~1e-9)
+        n = (lengths[:9] if padded else np.full(9, 1000)) - 11 + 1
+        expected = np.outer(n, n) * 255**2 * kernel._mismatch_table[0]
+        np.testing.assert_allclose(got[:9, :9], expected, rtol=1e-15)
+        ref = masked.masked_pairwise(bx, bx, plan, bx_rc, wx=w, wy=w, wy_rc=w_rc)
+        np.testing.assert_allclose(got, ref, rtol=1e-8)
+
+    @pytest.mark.parametrize("padded", [False, True])
+    def test_index_matches_cpu(self, padded):
+        from gkmsvm.kernels.lmer_index import LmerIndex
+        from gkmsvm.kernels.weighted import CenterWeightedGkmKernel
+
+        kernel = CenterWeightedGkmKernel(11, 7, d=3, M=255, H=1e9)
+        y = self._polya_and_random(20, 600, 3)
+        lengths = np.random.default_rng(4).integers(20, 601, 20) if padded else None
+        by, by_rc = kernel.pack_both(y, lengths)
+        index = LmerIndex(kernel, by, by_rc)
+        ref = index.pairwise(by)
+        got = np.array(index.pairwise(to_mlx(by)))
+        np.testing.assert_allclose(got, ref, rtol=1e-6)
+
+    @pytest.mark.parametrize("kernel_type", ["wgkm", "wgkmrbf"])
+    def test_brute_and_self_kernels(self, kernel_type):
+        """On MLX they run in Metal and return MLX arrays."""
+        from gkmsvm.svm import as_batch
+
+        kernel = _make_model(
+            3, 40, kernel_type, {"L": 8, "k": 5, "M": 20, "H": 6.0, "gamma": 2.0}
+        ).kernel.base
+        rng = np.random.default_rng(5)
+        seqs = [
+            "".join(rng.choice(list("ACGT"), rng.integers(10, 70))) for _ in range(9)
+        ]
+        x, lengths = as_batch(seqs)
+        bx, bx_rc = kernel.pack_both(x, lengths)
+        mbx, mrc = to_mlx(bx), to_mlx(bx_rc)
+        for got, ref in (
+            (kernel.raw_diag_packed(mbx, mrc), kernel.raw_diag_packed(bx, bx_rc)),
+            (kernel.raw_diag_packed(mbx), kernel.raw_diag_packed(bx)),
+            (kernel.raw_packed(mbx, mbx, mrc), kernel.raw_packed(bx, bx, bx_rc)),
+        ):
+            assert isinstance(got, mx.array)
+            np.testing.assert_allclose(np.array(got), ref, rtol=1e-5)
+
+
 class TestLmerIndexMLX:
     """Cached l-mer index on the device vs the CPU index."""
 

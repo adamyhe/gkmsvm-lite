@@ -21,9 +21,10 @@ from __future__ import annotations
 import numpy as np
 from numba import njit, prange
 
-from gkmsvm.backend import to_cpu
+from gkmsvm.backend import get_array_module, to_cpu
 from gkmsvm.kernels.direct import _counts, _packed_mismatches, _rc_window, _spans
 from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
+from gkmsvm.kernels.packed import device_of
 from gkmsvm.kernels.rbf import RbfKernel
 
 
@@ -189,10 +190,201 @@ def _mutant_diag_weighted_numba(fwd, rc, new, new_rc, diag, w, table, l):
     return out
 
 
+# ---------------------------------------------------------------------------
+# CUDA and Metal: weighted pair loops (brute force below the masked join's
+# minimum rows, and self-kernels). Weights are [rows or 1, W] with a row
+# stride, 0 when every row shares one row of weights.
+# ---------------------------------------------------------------------------
+
+_WEIGHTED_CUDA = r"""
+#define PAD_WINDOW 0xFFFFFFFFu  // past a shorter sequence's windows: skipped
+
+__device__ __forceinline__ int n_mismatch(unsigned int a, unsigned int b)
+{
+    unsigned int x = a ^ b;
+    return __popc(((x >> 1) | x) & 0x55555555u);
+}
+
+// result[b, s] = sum_i wx[b, i] sum_j wy[s, j] table[m(bx[b, i], by[s, j])];
+// by_t is [Wy, S] (adjacent threads read adjacent columns)
+extern "C" __global__ void brute_weighted(
+    const unsigned int* __restrict__ bx, const double* __restrict__ wx, int wx_stride,
+    const unsigned int* __restrict__ by_t, const double* __restrict__ wy, int wy_stride,
+    const double* __restrict__ table, double* __restrict__ result,
+    long long total, int S, int Wx, int Wy, int l, int min_matches)
+{
+    __shared__ double s_table[17];
+    for (int i = threadIdx.x; i <= l; i += blockDim.x) s_table[i] = table[i];
+    __syncthreads();
+    long long idx = (long long)blockDim.x * blockIdx.x + threadIdx.x;
+    if (idx >= total) return;
+    long long b = idx / S;
+    int s = (int)(idx % S);
+    const double* wxb = wx + b * wx_stride;
+    const double* wys = wy + (long long)s * wy_stride;
+    double acc = 0.0;
+    for (int i = 0; i < Wx; i++) {
+        unsigned int u = bx[b * Wx + i];
+        if (u == PAD_WINDOW) continue;
+        double row = 0.0;
+        for (int j = 0; j < Wy; j++) {
+            unsigned int v = by_t[(long long)j * S + s];
+            if (v == PAD_WINDOW) continue;
+            int matches = l - n_mismatch(u, v);
+            if (matches >= min_matches) row += wys[j] * s_table[l - matches];
+        }
+        acc += wxb[i] * row;
+    }
+    result[idx] = acc;
+}
+
+// result[b] = sum_i wx[b, i] sum_j wy[b, j] table[m(bx[b, i], by[b, j])]
+extern "C" __global__ void cross_diag_weighted(
+    const unsigned int* __restrict__ bx, const double* __restrict__ wx, int wx_stride,
+    const unsigned int* __restrict__ by, const double* __restrict__ wy, int wy_stride,
+    const double* __restrict__ table, double* __restrict__ result,
+    int B, int Wx, int Wy, int l, int min_matches)
+{
+    __shared__ double s_table[17];
+    for (int i = threadIdx.x; i <= l; i += blockDim.x) s_table[i] = table[i];
+    __syncthreads();
+    int b = blockDim.x * blockIdx.x + threadIdx.x;
+    if (b >= B) return;
+    const double* wxb = wx + (long long)b * wx_stride;
+    const double* wyb = wy + (long long)b * wy_stride;
+    double acc = 0.0;
+    for (int i = 0; i < Wx; i++) {
+        unsigned int u = bx[(long long)b * Wx + i];
+        if (u == PAD_WINDOW) continue;
+        double row = 0.0;
+        for (int j = 0; j < Wy; j++) {
+            unsigned int v = by[(long long)b * Wy + j];
+            if (v == PAD_WINDOW) continue;
+            int matches = l - n_mismatch(u, v);
+            if (matches >= min_matches) row += wyb[j] * s_table[l - matches];
+        }
+        acc += wxb[i] * row;
+    }
+    result[b] = acc;
+}
+"""
+
+# Metal: one thread per (row, column) pair, float32 sums (as the unweighted
+# Metal brute force); params: total, S, Wx, Wy, l, min_matches, wx_stride,
+# wy_stride
+_METAL_BRUTE_W = """
+    uint idx = thread_position_in_grid.x;
+    uint total = (uint)params[0], S = (uint)params[1];
+    uint Wx = (uint)params[2], Wy = (uint)params[3];
+    uint l = (uint)params[4], min_matches = (uint)params[5];
+    uint wxs = (uint)params[6], wys = (uint)params[7];
+    if (idx >= total) return;
+    // DIAG: row b against row b of by (self-kernels), else column c
+    uint b = DIAG ? idx : idx / S, c = DIAG ? idx : idx % S;
+    float acc = 0.0f;
+    for (uint i = 0; i < Wx; i++) {
+        uint32_t u = bx[b * Wx + i];
+        if (u == 0xFFFFFFFFu) continue;
+        float row = 0.0f;
+        for (uint j = 0; j < Wy; j++) {
+            uint32_t v = by[c * Wy + j];
+            if (v == 0xFFFFFFFFu) continue;
+            uint32_t x = u ^ v;
+            uint matches = l - popcount(((x >> 1) | x) & 0x55555555u);
+            if (matches >= min_matches) row += wy[c * wys + j] * table[l - matches];
+        }
+        acc += wx[b * wxs + i] * row;
+    }
+    result[idx] = acc;
+"""
+
+_cuda_weighted = None
+_metal_weighted = {}
+
+
+def _stride(w, W):
+    return W if w.shape[0] > 1 else 0
+
+
+def _brute_weighted_gpu(bx, wx, by, wy, table, l, min_matches, diag=False):
+    """CUDA [B, S] brute force (diag: [B], row b against row b of by)."""
+    import cupy as cp
+
+    global _cuda_weighted
+    if _cuda_weighted is None:
+        _cuda_weighted = cp.RawModule(code=_WEIGHTED_CUDA)
+    bx = cp.ascontiguousarray(bx, dtype=cp.uint32)
+    B, Wx = bx.shape
+    S, Wy = by.shape
+    args_w = (cp.asarray(wx, dtype=cp.float64), np.int32(_stride(wx, Wx)))
+    args_wy = (cp.asarray(wy, dtype=cp.float64), np.int32(_stride(wy, Wy)))
+    table_d = cp.asarray(table, dtype=cp.float64)
+    block = 256
+    if diag:
+        result = cp.empty(B, dtype=cp.float64)
+        _cuda_weighted.get_function("cross_diag_weighted")(
+            ((B + block - 1) // block,),
+            (block,),
+            (bx, *args_w, cp.ascontiguousarray(by, dtype=cp.uint32), *args_wy)
+            + (table_d, result, np.int32(B), np.int32(Wx), np.int32(Wy))
+            + (np.int32(l), np.int32(min_matches)),
+        )
+        return result
+    total = B * S
+    result = cp.empty(total, dtype=cp.float64)
+    by_t = cp.ascontiguousarray(cp.asarray(by, dtype=cp.uint32).T)
+    _cuda_weighted.get_function("brute_weighted")(
+        ((total + block - 1) // block,),
+        (block,),
+        (bx, *args_w, by_t, *args_wy, table_d, result, np.int64(total))
+        + (np.int32(S), np.int32(Wx), np.int32(Wy), np.int32(l))
+        + (np.int32(min_matches),),
+    )
+    return result.reshape(B, S)
+
+
+def _brute_weighted_mlx(bx, wx, by, wy, table, l, min_matches, diag=False):
+    """Metal [B, S] brute force in float32 (diag: [B], row b against row b of by)."""
+    import mlx.core as mx
+
+    if diag not in _metal_weighted:
+        _metal_weighted[diag] = mx.fast.metal_kernel(
+            name="gkm_brute_weighted" + ("_diag" if diag else ""),
+            input_names=["bx", "wx", "by", "wy", "table", "params"],
+            output_names=["result"],
+            source=_METAL_BRUTE_W.replace("DIAG", "true" if diag else "false"),
+        )
+    B, Wx = bx.shape
+    S, Wy = by.shape
+    total = B if diag else B * S
+    params = [total, S, Wx, Wy, l, min_matches, _stride(wx, Wx), _stride(wy, Wy)]
+    block = min(total, 256)
+    out = _metal_weighted[diag](
+        inputs=[
+            mx.array(np.asarray(bx, dtype=np.uint32)),
+            mx.array(np.asarray(wx, dtype=np.float32)),
+            mx.array(np.asarray(by, dtype=np.uint32)),
+            mx.array(np.asarray(wy, dtype=np.float32)),
+            mx.array(np.asarray(table, dtype=np.float32)),
+            mx.array(params, dtype=mx.int32),
+        ],
+        template=[],
+        grid=((total + block - 1) // block * block, 1, 1),
+        threadgroup=(block, 1, 1),
+        output_shapes=[(total,)],
+        output_dtypes=[mx.float32],
+    )[0]
+    return out if diag else out.reshape(B, S)
+
+
+def _mx_concat(arrays, axis):
+    import mlx.core as mx
+
+    return mx.concatenate(arrays, axis=axis)
+
+
 def _on_device(out: np.ndarray, like):
     """CPU result out on like's device (float32 on MLX)."""
-    from gkmsvm.kernels.packed import device_of
-
     dev = device_of(like)
     if dev == "mlx":
         import mlx.core as mx
@@ -242,29 +434,53 @@ class CenterWeightedGkmKernel(EstTruncGkmKernel):
         return self._weights_cache[W]
 
     def _brute(self, bx, by, dev, wx=None, wy=None):
-        """Weighted pair loop on CPU; the result is on bx's device."""
-        out = _brute_weighted_numba(
-            np.ascontiguousarray(to_cpu(bx)),
+        """Weighted pair loop on bx's device."""
+        args = (self._mismatch_table, self.l, self._min_matches)
+        if dev == "cuda":
+            return _brute_weighted_gpu(bx, wx, by, wy, *args)
+        if dev == "mlx":
+            return _brute_weighted_mlx(bx, wx, by, wy, *args)
+        return _brute_weighted_numba(
+            np.ascontiguousarray(bx),
             wx.astype(np.float64),
-            np.ascontiguousarray(to_cpu(by)),
+            np.ascontiguousarray(by),
             wy.astype(np.float64),
-            self._mismatch_table,
-            self.l,
-            self._min_matches,
+            *args,
         )
-        return _on_device(out, bx)
 
     def raw_diag_packed(self, bx, bx_rc=None):
-        """K_raw(x, x), on CPU (_self_diagonal_weighted_numba); the result is on
-        bx's device."""
-        fwd = np.ascontiguousarray(to_cpu(bx))
-        by = fwd if bx_rc is None else np.concatenate([fwd, to_cpu(bx_rc)], axis=1)
-        w = self.row_weights(fwd).astype(np.float64)
-        return _on_device(
-            _self_diagonal_weighted_numba(
-                fwd, np.ascontiguousarray(by), w, self._mismatch_table, self.l
-            ),
-            bx,
+        """K_raw(x, x) on bx's device; on CPU, each pair of the symmetric blocks
+        once (_self_diagonal_weighted_numba)."""
+        dev = device_of(bx)
+        w = self.row_weights(bx)
+        if dev != "cpu":
+            # every pair of the forward and RC blocks: [W] or [2W] columns
+            by, wy = bx, w
+            if bx_rc is not None:
+                xp = get_array_module(bx) if dev == "cuda" else None
+                cat = xp.concatenate if xp is not None else _mx_concat
+                by = cat([bx, bx_rc], axis=1)
+                w_rc = self.row_weights(bx_rc, rc=True)
+                rows = max(w.shape[0], w_rc.shape[0])
+                wy = np.concatenate(
+                    [
+                        np.broadcast_to(w, (rows, w.shape[1])),
+                        np.broadcast_to(w_rc, (rows, w_rc.shape[1])),
+                    ],
+                    axis=1,
+                )
+            f = _brute_weighted_gpu if dev == "cuda" else _brute_weighted_mlx
+            return f(
+                bx, w, by, wy, self._mismatch_table, self.l, self._min_matches, True
+            )
+        fwd = np.ascontiguousarray(bx)
+        by = fwd if bx_rc is None else np.concatenate([fwd, bx_rc], axis=1)
+        return _self_diagonal_weighted_numba(
+            fwd,
+            np.ascontiguousarray(by),
+            w.astype(np.float64),
+            self._mismatch_table,
+            self.l,
         )
 
     def raw_diag_mutants(self, bx, bx_rc, new, new_rc, diag):
