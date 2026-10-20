@@ -82,7 +82,7 @@
 
 Gaps found by checking against LS-GKM (2026-10-19), most important first:
 
-- [ ] **Re-run the dsQTL check** — `tests/test_gpu.py` passes on a CUDA host (2026-10-19, after the `-t 0` `d`, N and padding changes); `benchmarks/agreement_lsgkm.py` still to re-run (last run 2026-10-16, before the N packing change: mutation impact matched the paper's `gkmexplain -m 5` outputs to ~5e-6). CUDA explain paths are checked against CPU only, not against lsgkm directly.
+- [ ] **Full dsQTL re-run on the CUDA host** — `benchmarks/agreement_lsgkm.py` with all five negsets and both kernels (`make` without `AGREE_ARGS`) for the figure; the default check (`-t 3`, negset 1) was re-run on CPU on 2026-10-19 after the N, padding and importer changes and matches the earlier run: mutation impact to 5.0e-6, ISM to 1.0e-5, deltaSVM (as `deltasvm.pl` scores it) to 3.4e-5 of the paper's outputs. CUDA explain paths are checked against CPU only, not against lsgkm directly.
 
 Performance gaps:
 
