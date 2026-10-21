@@ -702,6 +702,39 @@ class TestMaskedGPU:
         np.testing.assert_allclose(gpu, cpu, rtol=1e-9, atol=1e-12)
 
 
+class TestMutantDiagGPU:
+    """Mutant self-kernels (ISM's normalization) on the device vs
+    _mutant_diag_numba: only the pairs touching a changed window."""
+
+    @pytest.mark.parametrize("kernel_type", ["gkm_cnt", "gkm_esttrunc", "wgkm"])
+    @pytest.mark.parametrize("padded", [False, True])
+    @pytest.mark.parametrize("include_rc", [True, False])
+    def test_matches_cpu(self, kernel_type, padded, include_rc):
+        from gkmsvm.ism import _mutants
+        from gkmsvm.kernels.direct import DirectGkmKernel
+        from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
+        from gkmsvm.kernels.weighted import CenterWeightedGkmKernel
+        from gkmsvm.svm import as_batch
+
+        cls, kw = {
+            "gkm_cnt": (DirectGkmKernel, {}),
+            "gkm_esttrunc": (EstTruncGkmKernel, {}),
+            "wgkm": (CenterWeightedGkmKernel, {"M": 20, "H": 6.0}),
+        }[kernel_type]
+        kernel = cls(8, 5, d=2, include_rc=include_rc, **kw)
+        rng = np.random.default_rng(7)
+        n = rng.integers(10, 70, 9) if padded else np.full(9, 61)
+        x, lengths = as_batch(["".join(rng.choice(list("ACGT"), k)) for k in n])
+        bx, bx_rc = kernel.pack(x, lengths), None
+        if include_rc:
+            bx, bx_rc = kernel.pack_both(x, lengths)
+        ref = _mutants(kernel, x, bx, bx_rc)[3]
+        dbx = cp.asarray(bx)
+        got = _mutants(kernel, x, dbx, None if bx_rc is None else cp.asarray(bx_rc))[3]
+        assert isinstance(got, cp.ndarray)
+        np.testing.assert_allclose(cp.asnumpy(got), ref, rtol=1e-12)
+
+
 class TestLmerTableGPU:
     def test_table_matches_kernel_path(self):
         model = _make_model(

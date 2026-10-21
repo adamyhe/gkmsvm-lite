@@ -22,7 +22,13 @@ import numpy as np
 from numba import njit, prange
 
 from gkmsvm.backend import get_array_module, to_cpu
-from gkmsvm.kernels.direct import _counts, _packed_mismatches, _rc_window, _spans
+from gkmsvm.kernels.direct import (
+    _counts,
+    _mutant_diag_device,
+    _packed_mismatches,
+    _rc_window,
+    _spans,
+)
 from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
 from gkmsvm.kernels.packed import device_of
 from gkmsvm.kernels.rbf import RbfKernel
@@ -484,9 +490,20 @@ class CenterWeightedGkmKernel(EstTruncGkmKernel):
         )
 
     def raw_diag_mutants(self, bx, bx_rc, new, new_rc, diag):
-        """See PackedGkmKernel.raw_diag_mutants; on CPU, only pairs touching a
-        changed window; the result is on bx's device."""
-        fwd = np.ascontiguousarray(to_cpu(bx))
+        """See PackedGkmKernel.raw_diag_mutants; only pairs touching a changed
+        window are visited."""
+        if device_of(bx) != "cpu":
+            return _mutant_diag_device(
+                bx,
+                bx_rc,
+                new,
+                new_rc,
+                diag,
+                self.row_weights(bx),
+                self._mismatch_table,
+                self.l,
+            )
+        fwd = np.ascontiguousarray(bx)
         B = fwd.shape[0]
         rc = (
             np.zeros((B, 0), np.uint32)
