@@ -29,6 +29,8 @@ from gkmsvm.svm import (
     _joint_lengths,
     _nan_rows,
     _per_position,
+    _progress,
+    _rows,
     _short_rows,
     as_batch,
 )
@@ -1318,23 +1320,12 @@ def _query_wts(base, packed):
     return np.zeros((1, 0)) if w is None else w.astype(np.float64)
 
 
-def _rows(lengths, start, n):
-    """lengths[start:start + n], or None."""
-    return None if lengths is None else lengths[start : start + n]
-
-
 def _batches(base, x, lengths, batch_size, verbose):
     """(b0, packed_x, packed_x_rc, wx) for each batch of x's rows: their packed
     windows (packed_x contiguous) and _query_wts, with a tqdm bar when verbose."""
     xp = get_array_module(x)
     B = x.shape[0]
-    starts = range(0, B, batch_size)
-    if verbose:
-        from tqdm import tqdm
-
-        starts = tqdm(
-            starts, desc="GkmExplain", total=(B + batch_size - 1) // batch_size
-        )
+    starts = _progress(range(0, B, batch_size), verbose, "GkmExplain")
     for b0 in starts:
         packed_x, packed_x_rc = base.pack_both(
             x[b0 : b0 + batch_size], _rows(lengths, b0, batch_size)
@@ -1856,11 +1847,7 @@ def mutation_impact(
 
     B = ref.shape[0]
     bs = B if batch_size is None else model._min_batch_size(batch_size)
-    starts = range(0, B, bs)
-    if verbose:
-        from tqdm import tqdm
-
-        starts = tqdm(starts, desc="Mutation impact", total=(B + bs - 1) // bs)
+    starts = _progress(range(0, B, bs), verbose, "Mutation impact")
 
     gamma = kernel.gamma if base is not kernel else np.nan  # RBF
     parts = []
