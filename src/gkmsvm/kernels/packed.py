@@ -5,8 +5,8 @@ and y packed 2 bits per base into uint32 (position k in bits 2k, 2k+1). Every
 device holds packed windows as [B, W] arrays on that device (MLX arrays are
 packed on the CPU). Reverse complements enter as a second column block.
 
-Subclasses provide the brute-force pair loop (`_brute`, `_brute_cross_diag`)
-and the mask plan for the masked join (`_join_plan`, kernels/masked.py).
+Subclasses provide the brute-force pair loop (`_brute`, `_brute_cross_diag`
+or their own `raw_diag_packed`) and the mask plan for the masked join (`_join_plan`, kernels/masked.py).
 
 Sequences of different lengths share one array: pack(x, lengths) writes
 PAD_WINDOW past each row's last window (RC rows, being reversed, hold their
@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from gkmsvm.backend import float_dtype, get_array_module, is_mlx, to_cpu, to_gpu, to_mlx
+from gkmsvm.backend import float_dtype, get_array_module, is_mlx, to_cpu
 from gkmsvm.kernels.base import GkmKernel
 
 # Below this many query or column sequences, the masked join's per-call index
@@ -69,15 +69,6 @@ def window_counts(packed) -> np.ndarray:
         packed = np.asarray(packed)
     n = (packed != PAD_WINDOW).sum(axis=1)
     return np.asarray(to_cpu(n)).astype(np.int64)
-
-
-def window_spans(packed) -> np.ndarray:
-    """[R, 2] int64 (start, end) of each row's windows, on CPU: forward rows
-    hold theirs first, RC rows last (a row with none gives an empty span)."""
-    valid = np.asarray(to_cpu(packed) != PAD_WINDOW)
-    n = valid.sum(axis=1)
-    start = np.where(n > 0, valid.argmax(axis=1), 0)
-    return np.stack([start, start + n], axis=1).astype(np.int64)
 
 
 def device_of(x) -> str:
@@ -206,12 +197,8 @@ class PackedGkmKernel(GkmKernel):
         small = min(bx.shape[0], by.shape[0]) < _MASKED_MIN_ROWS
         wx, wy = self.row_weights(bx), self.row_weights(by)
         wy_rc = self.row_weights(by_rc, rc=True)
-        if plan is not None and not (small and self._HAS_BRUTE):
+        if plan is not None and not small:
             return _masked(bx, by, plan, by_rc, diag_offset, dev, wx, wy, wy_rc)
-        if not self._HAS_BRUTE:
-            raise ValueError(
-                f"{type(self).__name__} needs the masked join (use_masked=True)"
-            )
         if wx is None:
             raw = self._brute(bx, by, dev)
             if by_rc is not None:
@@ -221,9 +208,6 @@ class PackedGkmKernel(GkmKernel):
         if by_rc is not None:
             raw = raw + self._brute(bx, by_rc, dev, wx, wy_rc)
         return raw
-
-    # Whether _brute exists; without it the masked join serves every size
-    _HAS_BRUTE = False
 
     def _brute(self, bx, by, dev):
         """Brute-force pair loop: [B, S] over all window pairs."""
@@ -246,27 +230,9 @@ class PackedGkmKernel(GkmKernel):
         substituting base v, padded with PAD_WINDOW (ism._packed_mutations).
         new_rc: the same for the RC windows covering L-1-p, indexed by the
         forward base v (None without RC). diag: K_raw(x, x) [B] of the
-        reference. This default builds every mutant's windows and calls
-        raw_diag_packed; the result is on bx's device.
+        reference. The result is on bx's device.
         """
-        fwd = to_cpu(bx)
-        B, W = fwd.shape
-        L = new.shape[1]
-        l = self.l
-
-        def mutate(ref, windows, flip):
-            mut = np.broadcast_to(ref, (4, L, B, W)).copy()
-            for p in range(L):
-                q = L - 1 - p if flip else p
-                a_s, a_e = max(0, q - l + 1), min(q + 1, W)
-                mut[:, p, :, a_s:a_e] = windows[:, p, :, : a_e - a_s]
-            return mut.reshape(4 * L * B, W)
-
-        dev = {"cpu": np.asarray, "cuda": to_gpu, "mlx": to_mlx}[device_of(bx)]
-        mut_rc = None if new_rc is None else dev(mutate(to_cpu(bx_rc), new_rc, True))
-        return self.raw_diag_packed(dev(mutate(fwd, new, False)), mut_rc).reshape(
-            4, L, B
-        )
+        raise NotImplementedError
 
     # -- GkmKernel interface --------------------------------------------------
 

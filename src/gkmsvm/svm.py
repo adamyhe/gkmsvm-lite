@@ -55,68 +55,38 @@ def _normalized_dot(raw, diag_x, diag_sv, norm, coef, gamma):
 #   -t 6  gkm_cnt_rbf   / direct_rbf      RBF on the gapped k-mer count kernel
 #                                         (kundajelab/lsgkm fork)
 
+
+def _kernel_args(p, d=3, **extra):
+    """The keyword arguments every kernel builder shares; d is d's default."""
+    return dict(
+        l=p["L"],
+        k=p["k"],
+        d=p.get("d", d),
+        normalize=True,
+        include_rc=p.get("include_rc", True),
+        **extra,
+    )
+
+
+def _gamma(p):
+    return {"gamma": p.get("gamma", 1.0)}
+
+
+def _weights(p):
+    return {"M": p.get("M", 50), "H": p.get("H", 50.0)}
+
+
 KERNEL_BUILDERS = {
     # No d: every pair counts (models saved before d applied to -t 0)
-    "gkm_cnt": lambda p: DirectGkmKernel(
-        l=p["L"],
-        k=p["k"],
-        d=p.get("d"),
-        normalize=True,
-        include_rc=p.get("include_rc", True),
-    ),
-    "gkm_esttrunc": lambda p: EstTruncGkmKernel(
-        l=p["L"],
-        k=p["k"],
-        d=p.get("d", 3),
-        normalize=True,
-        include_rc=p.get("include_rc", True),
-        truncate=True,
-    ),
-    "gkm_estfull": lambda p: EstTruncGkmKernel(
-        l=p["L"],
-        k=p["k"],
-        d=p.get("d", 3),
-        normalize=True,
-        include_rc=p.get("include_rc", True),
-        truncate=False,
-    ),
-    "gkmrbf": lambda p: RbfGkmKernel(
-        l=p["L"],
-        k=p["k"],
-        d=p.get("d", 3),
-        gamma=p.get("gamma", 1.0),
-        normalize=True,
-        include_rc=p.get("include_rc", True),
-    ),
-    "wgkm": lambda p: CenterWeightedGkmKernel(
-        l=p["L"],
-        k=p["k"],
-        d=p.get("d", 3),
-        M=p.get("M", 50),
-        H=p.get("H", 50.0),
-        normalize=True,
-        include_rc=p.get("include_rc", True),
-    ),
+    "gkm_cnt": lambda p: DirectGkmKernel(**_kernel_args(p, d=None)),
+    "gkm_esttrunc": lambda p: EstTruncGkmKernel(**_kernel_args(p, truncate=True)),
+    "gkm_estfull": lambda p: EstTruncGkmKernel(**_kernel_args(p, truncate=False)),
+    "gkmrbf": lambda p: RbfGkmKernel(**_kernel_args(p, **_gamma(p))),
+    "wgkm": lambda p: CenterWeightedGkmKernel(**_kernel_args(p, **_weights(p))),
     "wgkmrbf": lambda p: CenterWeightedRbfGkmKernel(
-        l=p["L"],
-        k=p["k"],
-        d=p.get("d", 3),
-        M=p.get("M", 50),
-        H=p.get("H", 50.0),
-        gamma=p.get("gamma", 1.0),
-        normalize=True,
-        include_rc=p.get("include_rc", True),
+        **_kernel_args(p, **_weights(p), **_gamma(p))
     ),
-    "gkm_cnt_rbf": lambda p: RbfKernel(
-        DirectGkmKernel(
-            l=p["L"],
-            k=p["k"],
-            d=p.get("d", 3),
-            normalize=True,
-            include_rc=p.get("include_rc", True),
-        ),
-        gamma=p.get("gamma", 1.0),
-    ),
+    "gkm_cnt_rbf": lambda p: RbfKernel(DirectGkmKernel(**_kernel_args(p)), **_gamma(p)),
 }
 
 KERNEL_ALIASES: dict[str | int, str] = {
@@ -246,6 +216,20 @@ def _joint_lengths(L, *parts):
     return np.concatenate(
         [np.full(rows, L, dtype=np.int64) if n is None else n for rows, n in parts]
     )
+
+
+def _rows(lengths, start, n):
+    """lengths[start:start + n], or None."""
+    return None if lengths is None else lengths[start : start + n]
+
+
+def _progress(chunks, verbose, desc):
+    """chunks, under a tqdm progress bar when verbose."""
+    if not verbose:
+        return chunks
+    from tqdm import tqdm
+
+    return tqdm(chunks, desc=desc)
 
 
 def _short_rows(lengths, l, what="scores"):
@@ -423,19 +407,12 @@ class GkmSVM(DeviceModel):
             raise ValueError(f"Unknown format {fmt!r}. Use 'npz' or 'lsgkm'.")
 
     def _sv_packed(self):
-        """(fwd, rc or None) packed SV windows, or None when the base kernel has
-        no packed path."""
+        """(fwd, rc or None) packed SV windows (cached)."""
         c = self._sv_cache
         if "packed" not in c:
-            base = self.kernel.base
-            sv = self.support_sequences
-            c["packed"] = (
-                base.pack_both(sv, self.sv_lengths)
-                if isinstance(base, PackedGkmKernel)
-                else None
+            c["packed"] = self.kernel.base.pack_both(
+                self.support_sequences, self.sv_lengths
             )
-            if c["packed"] is None and self.sv_lengths is not None:
-                raise ValueError("SVs of different lengths need a packed kernel")
         return c["packed"]
 
     def _inv_norms(self, diag_x, B):
@@ -453,12 +430,7 @@ class GkmSVM(DeviceModel):
         """Base-kernel K_raw(sv, sv) on the model's device (cached)."""
         c = self._sv_cache
         if "diag" not in c:
-            packed = self._sv_packed()
-            base = self.kernel.base
-            if packed is None:
-                diag = base._raw_diagonal(self.support_sequences, chunk_size=1000)
-            else:
-                diag = base.raw_diag_packed(*packed)
+            diag = self.kernel.base.raw_diag_packed(*self._sv_packed())
             c["diag"] = diag.astype(float_dtype(diag))
         return c["diag"]
 
@@ -473,9 +445,7 @@ class GkmSVM(DeviceModel):
 
             packed = self._sv_packed()
             base = self.kernel.base
-            n_windows = (
-                0 if packed is None else sum(p.size for p in packed if p is not None)
-            )
+            n_windows = sum(p.size for p in packed if p is not None)
             use = n_windows > 0 and lmer_index.applies(base, n_windows)
             c["index"] = lmer_index.LmerIndex(base, *packed) if use else None
         return c["index"]
@@ -492,10 +462,6 @@ class GkmSVM(DeviceModel):
         lengths: each row's length when they differ."""
         kernel = self.kernel
         base = kernel.base
-        if self._sv_packed() is None:
-            return (kernel.pairwise(x, self.support_sequences) * self.coefficients).sum(
-                axis=1, keepdims=True
-            )
         xp = get_array_module(x)
         bx, bx_rc = base.pack_both(x, lengths)
         diag_x = base.raw_diag_packed(bx, bx_rc) if base.normalize else None
@@ -562,19 +528,10 @@ class GkmSVM(DeviceModel):
         batch_size = self._min_batch_size(batch_size)
         if batch_size is not None and x.shape[0] > batch_size:
             chunks = range(0, x.shape[0], batch_size)
-            if verbose:
-                from tqdm import tqdm
-
-                chunks = tqdm(
-                    chunks,
-                    desc="Scoring",
-                    total=(x.shape[0] + batch_size - 1) // batch_size,
-                )
             parts = []
-            for start in chunks:
-                end = min(start + batch_size, x.shape[0])
-                batch = self._match_device(x[start:end])
-                lb = None if lengths is None else lengths[start:end]
+            for start in _progress(chunks, verbose, "Scoring"):
+                batch = self._match_device(x[start : start + batch_size])
+                lb = _rows(lengths, start, batch_size)
                 parts.append(to_cpu(self._score_unbatched(batch, lb)))
             return _nan_rows(np.concatenate(parts, axis=0), short)
 
@@ -590,18 +547,11 @@ class GkmSVM(DeviceModel):
     # Kernel scoring computes [rows, S] kernel values in blocks of at most this
     _MAX_SCORE_BYTES = 512 * 2**20
 
-    def _min_batch_size(
-        self, batch_size: int | None, *, table: bool = True
-    ) -> int | None:
-        """batch_size, raised when calls go through the masked join.
-
-        table: the caller scores through the l-mer table when it applies.
-        """
+    def _min_batch_size(self, batch_size: int | None) -> int | None:
+        """batch_size, raised when calls go through the masked join."""
         if batch_size is None:
             return None
-        if (
-            table and self._lmer_table_for(np) is not None
-        ) or self._sv_index() is not None:
+        if self._lmer_table_for(np) is not None or self._sv_index() is not None:
             return batch_size
         return max(batch_size, self._MIN_BATCH_BYTES // (8 * self.num_support_vectors))
 
@@ -644,13 +594,8 @@ class GkmSVM(DeviceModel):
             self._lmer_table_dev is None
             or get_array_module(self._lmer_table_dev) is not xp
         ):
-            # Metal has no float64: MLX gets a float32 copy (scores are float32 there)
-            table = (
-                self._lmer_table.astype(np.float32)
-                if getattr(xp, "__name__", "") == "mlx.core"
-                else self._lmer_table
-            )
-            self._lmer_table_dev = xp.asarray(table)
+            # (MLX's asarray makes it float32: scores are float32 there)
+            self._lmer_table_dev = xp.asarray(self._lmer_table)
         return self._lmer_table_dev
 
     def _table_raw(self, packed, table):
@@ -686,9 +631,7 @@ class GkmSVM(DeviceModel):
             return self._score_lmer_table(x, table, lengths)
         rows = max(1, self._MAX_SCORE_BYTES // (8 * self.num_support_vectors))
         parts = [
-            self._sv_scores(
-                x[s : s + rows], None if lengths is None else lengths[s : s + rows]
-            )
+            self._sv_scores(x[s : s + rows], _rows(lengths, s, rows))
             for s in range(0, x.shape[0], rows)
         ]
         scores = parts[0] if len(parts) == 1 else xp.concatenate(parts, axis=0)
@@ -869,11 +812,7 @@ class GkmSVM(DeviceModel):
         todo = idx_all[idx_all <= rc] if base.include_rc else idx_all
         weights = np.empty(4**l, dtype=np.float64)
         starts = range(0, len(todo), self._DELTASVM_CHUNK)
-        if verbose:
-            from tqdm import tqdm
-
-            starts = tqdm(starts, desc="to_deltasvm", total=len(starts))
-        for start in starts:
+        for start in _progress(starts, verbose, "to_deltasvm"):
             idx = todo[start : start + self._DELTASVM_CHUNK]
             x = np.eye(4, dtype=np.float32)[digits[idx]].transpose(0, 2, 1)
             x = self._match_device(np.ascontiguousarray(x))

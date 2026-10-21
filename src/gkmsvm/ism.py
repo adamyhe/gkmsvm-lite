@@ -14,7 +14,14 @@ import numpy as np
 from gkmsvm.backend import float_dtype, get_array_module, is_mlx, to_cpu
 from gkmsvm.kernels.packed import PAD_WINDOW, device_of
 from gkmsvm.kernels.rbf import RbfKernel
-from gkmsvm.svm import GkmSVM, _per_position, _short_rows, as_batch
+from gkmsvm.svm import (
+    GkmSVM,
+    _per_position,
+    _progress,
+    _rows,
+    _short_rows,
+    as_batch,
+)
 
 
 def ism(
@@ -45,19 +52,14 @@ def ism(
     x, lengths = as_batch(x, lengths)
     x = model._match_device(x)
     short = _short_rows(lengths, model.kernel.base.l, "ISM deltas")
-    fn = _ism_packed if model._sv_packed() is not None else _ism_mutants
 
     def rows(s, e):
-        return fn(model, x[s:e], None if lengths is None else lengths[s:e])
+        return _ism_packed(model, x[s:e], _rows(lengths, s, e - s))
 
     bs = batch_size if batch_size is not None else (1 if verbose else None)
     if bs is not None and x.shape[0] > bs:
-        from tqdm import tqdm
-
         xp = get_array_module(x)
-        chunks = range(0, x.shape[0], bs)
-        if verbose:
-            chunks = tqdm(chunks, desc="ISM", total=(x.shape[0] + bs - 1) // bs)
+        chunks = _progress(range(0, x.shape[0], bs), verbose, "ISM")
         out = xp.concatenate([rows(s, s + bs) for s in chunks], axis=0)
     else:
         out = rows(0, x.shape[0])
@@ -73,7 +75,7 @@ def _ism_packed(model, x, lengths=None):
     """ISM from the base kernel's packed windows (any kernel whose SVs pack).
 
     Kernels with an l-mer table add table weights over the windows covering
-    each position (_ism_table). On CPU with the l-mer index, a fused pass per
+    each position (_ism_table). With the l-mer index, a fused pass per
     (position, sequence) reduces each mutant over the SVs (_ism_index).
     Otherwise per-SV kernel values for each mutant are computed in blocks
     that hold at most ``GkmSVM._MAX_SCORE_BYTES`` of them (_ism_kernel).
@@ -83,7 +85,7 @@ def _ism_packed(model, x, lengths=None):
     base = model.kernel.base
     W = L - base.l + 1
     S = model.num_support_vectors
-    # ism() checked that x packs; a table exists only for non-RBF kernels
+    # A table exists only for non-RBF kernels
     table = model._lmer_table_for(xp)
     # Sequences per block: the mutant windows stay near _BLOCK_BYTES, and the
     # [rows, S] kernel values within _MAX_SCORE_BYTES (the reference rows for
@@ -103,7 +105,7 @@ def _ism_packed(model, x, lengths=None):
             model,
             x[s : s + rows],
             table,
-            None if lengths is None else lengths[s : s + rows],
+            _rows(lengths, s, rows),
         )
         for s in range(0, B, rows)
     ]
@@ -318,36 +320,3 @@ def _packed_mutations(bx, L, W, l):
                 pad, PAD_WINDOW, cleared | (np.uint32(v) << shift)
             )
     return old, new
-
-
-# -----------------------------------------------------------------------
-# Mutant-scoring path (inputs or SVs the packed path can't represent)
-# -----------------------------------------------------------------------
-
-# Mutants scored per model() call: caps the [batch, S] intermediates
-_MUTANT_BATCH = 1024
-
-
-def _ism_mutants(model, x, lengths=None):
-    """ISM by scoring all 4L single-base mutants through the model."""
-    xp = get_array_module(x)
-    B, C, L = x.shape
-    x_np = to_cpu(x)
-    mut = np.broadcast_to(x_np[:, None, None], (B, 4, L, C, L)).copy()
-    pos = np.arange(L)
-    mut[:, :, pos, :, pos] = 0
-    for v in range(4):
-        mut[:, v, pos, v, pos] = 1
-    mut_lengths = None if lengths is None else np.repeat(lengths, 4 * L)
-    scores = to_cpu(
-        model(
-            mut.reshape(B * 4 * L, C, L),
-            lengths=mut_lengths,
-            batch_size=_MUTANT_BATCH,
-        )
-    )
-    delta = scores.reshape(B, 4, L) - to_cpu(model(x_np, lengths=lengths)).reshape(
-        B, 1, 1
-    )
-    delta[x_np.astype(bool)] = 0  # the reference base itself
-    return xp.asarray(delta.astype(np.float32 if is_mlx(x) else np.float64))

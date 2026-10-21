@@ -13,11 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
-
-_BASES = "ACGT"
-_BASE_TO_IDX = {b: i for i, b in enumerate(_BASES)}
-_BASE_TO_IDX.update({b.lower(): i for i, b in enumerate(_BASES)})
-_IDX_TO_BASE = dict(enumerate(_BASES))
+from gkmsvm.codec import one_hot_decode, one_hot_encode
 
 
 def read_fasta(path: str | Path) -> list[tuple[str, str]]:
@@ -80,13 +76,10 @@ def _write_onehot_fasta(arr: np.ndarray, path: Path, headers: list[str] | None) 
     if headers is None:
         headers = [f"seq_{i}" for i in range(B)]
 
-    indices = arr.argmax(axis=1)  # [B, L]
-
     with open(path, "w") as f:
         for i in range(B):
             f.write(f">{headers[i]}\n")
-            seq = "".join(_IDX_TO_BASE[int(idx)] for idx in indices[i])
-            f.write(seq + "\n")
+            f.write(one_hot_decode(arr[i]) + "\n")
 
 
 def read_loci(path) -> dict:
@@ -189,18 +182,13 @@ def extract_loci(
         if start < 0 or end > len(sequences[chrom]):
             continue
 
-        seq = str(sequences[chrom][start:end]).upper()
-        arr = np.zeros((4, in_window), dtype=np.float32)
-        for j, base in enumerate(seq):
-            idx = _BASE_TO_IDX.get(base)
-            if idx is not None:
-                arr[idx, j] = 1.0
-
-        results.append(arr)
+        # Letters other than ACGT encode as all-zero (N)
+        seq = str(sequences[chrom][start:end])
+        results.append(one_hot_encode(seq, allow_n=True, allow_other=True))
         mask[i] = True
 
     if results:
-        X = np.stack(results)
+        X = np.ascontiguousarray(np.stack(results))
     else:
         X = np.zeros((0, 4, in_window), dtype=np.float32)
 

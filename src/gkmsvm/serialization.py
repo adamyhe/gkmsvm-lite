@@ -8,14 +8,12 @@ from pathlib import Path
 
 import numpy as np
 
+from gkmsvm.backend import to_cpu
 from gkmsvm.codec import one_hot_decode
-from gkmsvm.importers.lsgkm import KERNEL_TYPE_REVERSE
 
 
 def save_npz(model, path: str | Path) -> None:
     """Save a GkmSVM model in native npz format."""
-    from gkmsvm.backend import to_cpu
-
     metadata = {
         "bias": float(model.bias),
         "kernel_type": model.kernel_type,
@@ -36,8 +34,6 @@ def save_npz(model, path: str | Path) -> None:
 
 def save_deltasvm_npz(model, path: str | Path) -> None:
     """Save a DeltaSVM model in npz format."""
-    from gkmsvm.backend import to_cpu
-
     metadata = {
         "model_type": "deltasvm",
         "l": model.l,
@@ -52,12 +48,17 @@ def save_deltasvm_npz(model, path: str | Path) -> None:
     )
 
 
+def _read_npz(path):
+    """(the npz file, its metadata dict)."""
+    data = np.load(path, allow_pickle=False)
+    return data, json.loads(bytes(data["metadata"]))
+
+
 def load_deltasvm_npz(path: str | Path, *, device: str = "cpu"):
     """Load a DeltaSVM model from npz format."""
     from gkmsvm.deltasvm import DeltaSVM
 
-    data = np.load(path, allow_pickle=False)
-    metadata = json.loads(bytes(data["metadata"]))
+    data, metadata = _read_npz(path)
 
     return DeltaSVM(
         weights=data["weights"],
@@ -73,8 +74,7 @@ def load_npz(path: str | Path, *, device: str = "cpu"):
     """Load a GkmSVM model from native npz format."""
     from gkmsvm.svm import GkmSVM
 
-    data = np.load(path, allow_pickle=False)
-    metadata = json.loads(bytes(data["metadata"]))
+    data, metadata = _read_npz(path)
 
     return GkmSVM(
         support_sequences=data["support_sequences"],
@@ -91,8 +91,6 @@ def load_npz(path: str | Path, *, device: str = "cpu"):
 
 def save_lsgkm(model, path: str | Path) -> None:
     """Save a GkmSVM model in LS-GKM text format."""
-    from gkmsvm.backend import to_cpu
-
     path = Path(path)
     params = model._kernel_params
     coefs = to_cpu(model.coefficients)
@@ -157,8 +155,7 @@ def load_model(path: str | Path, *, device: str = "cpu"):
     name = path.name.lower()
 
     if name.endswith(".npz"):
-        data = np.load(path, allow_pickle=False)
-        metadata = json.loads(bytes(data["metadata"]))
+        data, metadata = _read_npz(path)
         data.close()
         if metadata.get("model_type") == "deltasvm":
             return load_deltasvm_npz(path, device=device)

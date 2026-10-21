@@ -17,13 +17,7 @@ from pathlib import Path
 import numpy as np
 
 from gkmsvm.importers import _open_auto, build_model, parse_header_value
-from gkmsvm.svm import KERNEL_ALIASES, GkmSVM
-
-KERNEL_TYPE_MAP = {
-    name: idx for idx, name in KERNEL_ALIASES.items() if isinstance(idx, int)
-}
-
-KERNEL_TYPE_REVERSE = {v: k for k, v in KERNEL_TYPE_MAP.items()}
+from gkmsvm.svm import GkmSVM
 
 
 def parse_lsgkm_header(path: str | Path) -> dict:

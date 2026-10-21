@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import functools
+
 import numpy as np
 
 from gkmsvm.backend import float_dtype, get_array_module, is_mlx, to_cpu
 from gkmsvm.kernels.base import GkmKernel
-from gkmsvm.kernels.packed import PackedGkmKernel
 
 
 class KernelColumnCache:
@@ -26,26 +27,17 @@ class KernelColumnCache:
         self._N = X.shape[0]
         self._mlx = is_mlx(X)
         base = kernel.base
-        self._use_fast = isinstance(base, PackedGkmKernel)
-        if lengths is not None and not self._use_fast:
-            raise ValueError("sequences of different lengths need a packed kernel")
-        if self._use_fast:
-            self._packed, self._packed_rc = base.pack_both(X, lengths)
-            self._X = None
-            diag = base.raw_diag_packed(self._packed, self._packed_rc).astype(
-                float_dtype(X)
-            )
-            from gkmsvm.kernels import lmer_index
+        self._packed, self._packed_rc = base.pack_both(X, lengths)
+        diag = base.raw_diag_packed(self._packed, self._packed_rc).astype(
+            float_dtype(X)
+        )
+        from gkmsvm.kernels import lmer_index
 
-            self._index = (
-                lmer_index.LmerIndex(base, self._packed, self._packed_rc)
-                if lmer_index.applies(base)
-                else None
-            )
-        else:
-            self._X = X
-            self._index = None
-            diag = base._raw_diagonal(X)
+        self._index = (
+            lmer_index.LmerIndex(base, self._packed, self._packed_rc)
+            if lmer_index.applies(base)
+            else None
+        )
         self._diag = to_cpu(diag).astype(np.float64)
         # The diagonal where the columns are normalized (CuPy: on the GPU)
         self._diag_xp = (
@@ -66,15 +58,6 @@ class KernelColumnCache:
         kernel = self._kernel
         base = kernel.base
         idx = np.asarray(indices, dtype=np.int64)
-        if not self._use_fast:
-            cols = kernel.pairwise(self._X, self._X[xp.asarray(idx)])
-            cols = to_cpu(cols) if self._mlx else cols
-            return {
-                i: xp.ascontiguousarray(cols[:, b])
-                if not self._mlx
-                else np.ascontiguousarray(cols[:, b])
-                for b, i in enumerate(indices)
-            }
         if self._mlx:
             import mlx.core as mx
 
@@ -208,8 +191,9 @@ def _check_solver(kernel):
 # ---------------------------------------------------------------------------
 
 
-def _load_csmo():
-    """Load the compiled C SMO solver. Returns None if unavailable."""
+@functools.cache
+def _get_csmo():
+    """The compiled C SMO solver (loaded once), or None if unavailable."""
     import ctypes
 
     try:
@@ -218,18 +202,6 @@ def _load_csmo():
         return ctypes.CDLL(_csmo_mod.__file__)
     except (ImportError, OSError):
         return None
-
-
-_csmo_lib = None
-_csmo_checked = False
-
-
-def _get_csmo():
-    global _csmo_lib, _csmo_checked
-    if not _csmo_checked:
-        _csmo_lib = _load_csmo()
-        _csmo_checked = True
-    return _csmo_lib
 
 
 import ctypes as _ct
@@ -294,12 +266,10 @@ def _smo_csolver(kernel, X, y, p, C, tol, max_iter, cache_size, verbose, lengths
 
     The C solver handles the optimization loop (WSS3, shrinking, gradient
     updates) while kernel columns are computed by our KernelColumnCache
-    (Numba CPU or CuPy GPU).
+    (Numba CPU, CuPy or Metal).
     """
     lib = _get_csmo()
     N = X.shape[0]
-    xp = get_array_module(X)
-    mlx_input = is_mlx(X)
 
     # Columns live in the C solver's cache; this object only computes them
     cache = KernelColumnCache(kernel, X, lengths)
@@ -314,7 +284,7 @@ def _smo_csolver(kernel, X, y, p, C, tol, max_iter, cache_size, verbose, lengths
     # 1.0 in state[2n:] for columns in its cache
     state = np.zeros(2 * n + N, dtype=np.float64)
     in_cache = state[2 * n :]
-    max_batch = max(1, _SMO_PREFETCH) if cache._use_fast else 1
+    max_batch = max(1, _SMO_PREFETCH)
     # With the l-mer index a column costs one query row, so prefetch only
     # fills empty slots: replacing unrequested prefetches would just churn
     capacity = min(cache_size, N)
@@ -329,9 +299,7 @@ def _smo_csolver(kernel, X, y, p, C, tol, max_iter, cache_size, verbose, lengths
     stats = {"batches": 0, "prefetched": 0}
 
     def _host(col):
-        if xp is not np or mlx_input:
-            col = to_cpu(col)
-        return np.ascontiguousarray(col, dtype=np.float64)
+        return np.ascontiguousarray(to_cpu(col), dtype=np.float64)
 
     def _columns(idx, c_cache):
         """{idx: column, plus prefetched columns that fit in the cache}."""

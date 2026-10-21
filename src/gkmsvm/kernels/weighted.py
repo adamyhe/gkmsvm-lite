@@ -18,19 +18,20 @@ position and the sequence length.
 
 from __future__ import annotations
 
+from functools import cache
+
 import numpy as np
 from numba import njit, prange
 
-from gkmsvm.backend import get_array_module, to_cpu
 from gkmsvm.kernels.direct import (
     _counts,
-    _mutant_diag_device,
     _packed_mismatches,
     _rc_window,
     _spans,
+    row_stride,
 )
 from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
-from gkmsvm.kernels.packed import device_of
+from gkmsvm.kernels.packed import _concat_windows, device_of
 from gkmsvm.kernels.rbf import RbfKernel
 
 
@@ -304,31 +305,40 @@ _METAL_BRUTE_W = """
     result[idx] = acc;
 """
 
-_cuda_weighted = None
-_metal_weighted = {}
+
+@cache
+def _cuda_weighted():
+    import cupy as cp
+
+    return cp.RawModule(code=_WEIGHTED_CUDA)
 
 
-def _stride(w, W):
-    return W if w.shape[0] > 1 else 0
+@cache
+def _metal_weighted(diag: bool):
+    import mlx.core as mx
+
+    return mx.fast.metal_kernel(
+        name="gkm_brute_weighted" + ("_diag" if diag else ""),
+        input_names=["bx", "wx", "by", "wy", "table", "params"],
+        output_names=["result"],
+        source=_METAL_BRUTE_W.replace("DIAG", "true" if diag else "false"),
+    )
 
 
 def _brute_weighted_gpu(bx, wx, by, wy, table, l, min_matches, diag=False):
     """CUDA [B, S] brute force (diag: [B], row b against row b of by)."""
     import cupy as cp
 
-    global _cuda_weighted
-    if _cuda_weighted is None:
-        _cuda_weighted = cp.RawModule(code=_WEIGHTED_CUDA)
     bx = cp.ascontiguousarray(bx, dtype=cp.uint32)
     B, Wx = bx.shape
     S, Wy = by.shape
-    args_w = (cp.asarray(wx, dtype=cp.float64), np.int32(_stride(wx, Wx)))
-    args_wy = (cp.asarray(wy, dtype=cp.float64), np.int32(_stride(wy, Wy)))
+    args_w = (cp.asarray(wx, dtype=cp.float64), np.int32(row_stride(wx, Wx)))
+    args_wy = (cp.asarray(wy, dtype=cp.float64), np.int32(row_stride(wy, Wy)))
     table_d = cp.asarray(table, dtype=cp.float64)
     block = 256
     if diag:
         result = cp.empty(B, dtype=cp.float64)
-        _cuda_weighted.get_function("cross_diag_weighted")(
+        _cuda_weighted().get_function("cross_diag_weighted")(
             ((B + block - 1) // block,),
             (block,),
             (bx, *args_w, cp.ascontiguousarray(by, dtype=cp.uint32), *args_wy)
@@ -339,7 +349,7 @@ def _brute_weighted_gpu(bx, wx, by, wy, table, l, min_matches, diag=False):
     total = B * S
     result = cp.empty(total, dtype=cp.float64)
     by_t = cp.ascontiguousarray(cp.asarray(by, dtype=cp.uint32).T)
-    _cuda_weighted.get_function("brute_weighted")(
+    _cuda_weighted().get_function("brute_weighted")(
         ((total + block - 1) // block,),
         (block,),
         (bx, *args_w, by_t, *args_wy, table_d, result, np.int64(total))
@@ -353,19 +363,12 @@ def _brute_weighted_mlx(bx, wx, by, wy, table, l, min_matches, diag=False):
     """Metal [B, S] brute force in float32 (diag: [B], row b against row b of by)."""
     import mlx.core as mx
 
-    if diag not in _metal_weighted:
-        _metal_weighted[diag] = mx.fast.metal_kernel(
-            name="gkm_brute_weighted" + ("_diag" if diag else ""),
-            input_names=["bx", "wx", "by", "wy", "table", "params"],
-            output_names=["result"],
-            source=_METAL_BRUTE_W.replace("DIAG", "true" if diag else "false"),
-        )
     B, Wx = bx.shape
     S, Wy = by.shape
     total = B if diag else B * S
-    params = [total, S, Wx, Wy, l, min_matches, _stride(wx, Wx), _stride(wy, Wy)]
+    params = [total, S, Wx, Wy, l, min_matches, row_stride(wx, Wx), row_stride(wy, Wy)]
     block = min(total, 256)
-    out = _metal_weighted[diag](
+    out = _metal_weighted(diag)(
         inputs=[
             mx.array(np.asarray(bx, dtype=np.uint32)),
             mx.array(np.asarray(wx, dtype=np.float32)),
@@ -381,26 +384,6 @@ def _brute_weighted_mlx(bx, wx, by, wy, table, l, min_matches, diag=False):
         output_dtypes=[mx.float32],
     )[0]
     return out if diag else out.reshape(B, S)
-
-
-def _mx_concat(arrays, axis):
-    import mlx.core as mx
-
-    return mx.concatenate(arrays, axis=axis)
-
-
-def _on_device(out: np.ndarray, like):
-    """CPU result out on like's device (float32 on MLX)."""
-    dev = device_of(like)
-    if dev == "mlx":
-        import mlx.core as mx
-
-        return mx.array(out.astype(np.float32))
-    if dev == "cuda":
-        import cupy as cp
-
-        return cp.asarray(out)
-    return out
 
 
 class CenterWeightedGkmKernel(EstTruncGkmKernel):
@@ -463,9 +446,7 @@ class CenterWeightedGkmKernel(EstTruncGkmKernel):
             # every pair of the forward and RC blocks: [W] or [2W] columns
             by, wy = bx, w
             if bx_rc is not None:
-                xp = get_array_module(bx) if dev == "cuda" else None
-                cat = xp.concatenate if xp is not None else _mx_concat
-                by = cat([bx, bx_rc], axis=1)
+                by = _concat_windows(bx, bx_rc)
                 w_rc = self.row_weights(bx_rc, rc=True)
                 rows = max(w.shape[0], w_rc.shape[0])
                 wy = np.concatenate(
@@ -480,7 +461,7 @@ class CenterWeightedGkmKernel(EstTruncGkmKernel):
                 bx, w, by, wy, self._mismatch_table, self.l, self._min_matches, True
             )
         fwd = np.ascontiguousarray(bx)
-        by = fwd if bx_rc is None else np.concatenate([fwd, bx_rc], axis=1)
+        by = fwd if bx_rc is None else _concat_windows(fwd, bx_rc)
         return _self_diagonal_weighted_numba(
             fwd,
             np.ascontiguousarray(by),
@@ -489,40 +470,9 @@ class CenterWeightedGkmKernel(EstTruncGkmKernel):
             self.l,
         )
 
-    def raw_diag_mutants(self, bx, bx_rc, new, new_rc, diag):
-        """See PackedGkmKernel.raw_diag_mutants; only pairs touching a changed
-        window are visited."""
-        if device_of(bx) != "cpu":
-            return _mutant_diag_device(
-                bx,
-                bx_rc,
-                new,
-                new_rc,
-                diag,
-                self.row_weights(bx),
-                self._mismatch_table,
-                self.l,
-            )
-        fwd = np.ascontiguousarray(bx)
-        B = fwd.shape[0]
-        rc = (
-            np.zeros((B, 0), np.uint32)
-            if bx_rc is None
-            else np.ascontiguousarray(to_cpu(bx_rc))
-        )
-        new_rc = np.zeros((4, 1, 1, 1), np.uint32) if new_rc is None else new_rc
-        return _on_device(
-            _mutant_diag_weighted_numba(
-                fwd,
-                rc,
-                np.ascontiguousarray(new),
-                np.ascontiguousarray(new_rc),
-                np.asarray(to_cpu(diag), dtype=np.float64),
-                self.row_weights(fwd).astype(np.float64),
-                self._mismatch_table,
-                self.l,
-            ),
-            bx,
+    def _mutant_diag_cpu(self, args, w):
+        return _mutant_diag_weighted_numba(
+            *args, w.astype(np.float64), self._mismatch_table, self.l
         )
 
 

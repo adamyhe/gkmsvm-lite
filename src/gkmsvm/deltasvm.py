@@ -16,6 +16,7 @@ from numba import njit, prange
 
 from gkmsvm.backend import DeviceModel, float_dtype, get_array_module, get_strides
 from gkmsvm.codec import reverse_complement
+from gkmsvm.svm import _progress, as_batch
 
 
 @njit(parallel=True, fastmath=True, cache=True)
@@ -129,7 +130,6 @@ class DeltaSVM(DeviceModel):
             [B, 1] scores.
         """
         from gkmsvm.backend import to_cpu
-        from gkmsvm.svm import as_batch
 
         x, lengths = as_batch(x, lengths)
         if lengths is not None:
@@ -177,27 +177,17 @@ class DeltaSVM(DeviceModel):
         B = x.shape[0]
         x64 = np.ascontiguousarray(x, dtype=np.float64)
         weights64 = np.asarray(self.weights, dtype=np.float64)
-        if verbose and B > 100:
-            from tqdm import tqdm
-
-            chunk = max(1, B // 20)
-            chunks = list(range(0, B, chunk))
-            parts = []
-            for i in tqdm(chunks, desc="DeltaSVM"):
-                parts.append(
-                    _score_strand_numba(
-                        x64[i : i + chunk],
-                        self._combos,
-                        self._powers,
-                        weights64,
-                        self.l,
-                    )
+        # One call, or 20 under a progress bar
+        bar = verbose and B > 100
+        chunk = max(1, B // 20 if bar else B)
+        scores = np.concatenate(
+            [
+                _score_strand_numba(
+                    x64[i : i + chunk], self._combos, self._powers, weights64, self.l
                 )
-            scores = np.concatenate(parts)
-        else:
-            scores = _score_strand_numba(
-                x64, self._combos, self._powers, weights64, self.l
-            )
+                for i in _progress(range(0, max(1, B), chunk), bar, "DeltaSVM")
+            ]
+        )
         return scores[:, None].astype(float_dtype(x))
 
     def _score_strand_array(
@@ -215,11 +205,7 @@ class DeltaSVM(DeviceModel):
         est_bytes = B * W * n_combos * self.k * 4
         if est_bytes > self._INTERMEDIATE_BUDGET:
             chunk = max(1, self._INTERMEDIATE_BUDGET // (W * n_combos * self.k * 4))
-            chunks = range(0, B, chunk)
-            if verbose:
-                from tqdm import tqdm
-
-                chunks = tqdm(chunks, desc="DeltaSVM", total=(B + chunk - 1) // chunk)
+            chunks = _progress(range(0, B, chunk), verbose, "DeltaSVM")
             parts = [self._score_strand_array(x[i : i + chunk]) for i in chunks]
             return xp.concatenate(parts)
 
@@ -255,6 +241,4 @@ class DeltaSVM(DeviceModel):
         Returns:
             [B, 1] score differences.
         """
-        ref = self._match_device(ref)
-        alt = self._match_device(alt)
         return self(alt, verbose=verbose) - self(ref, verbose=verbose)
