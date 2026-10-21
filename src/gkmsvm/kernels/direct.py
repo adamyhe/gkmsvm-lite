@@ -555,6 +555,195 @@ def _fused_cross_diagonal_packed_mlx(bx_packed, bx_rc_packed, table, l, min_matc
     )[0]
 
 
+# ---------------------------------------------------------------------------
+# CUDA and Metal: mutant self-kernels (_mutant_diag_numba on the GPU). One
+# thread block per (base, position, sequence); its threads stride over the
+# pairs touching a changed window: changed rows x every column, then
+# unchanged rows x changed columns, for the forward block and the RC block.
+# Window weights are [rows or 1, W] with a row stride (0 when shared; all
+# ones for the unweighted kernels).
+# ---------------------------------------------------------------------------
+
+_MUTANT_DIAG_BODY = """
+    long long item = BLOCK_ID;  // (v * L + p) * B + b
+    int b = (int)(item % B), p = (int)((item / B) % L);
+    int n = counts[b];
+    int a_s = max(0, p - l + 1), a_e = min(p + 1, n);
+    const REAL_W* wb = w + (long long)b * w_stride;
+    const unsigned int* f = fwd + (long long)b * W;
+    const unsigned int* nf = new_f + item * l - a_s;  // nf[i]: window i after
+    bool same = true;  // the reference base: nothing changes
+    for (int i = a_s; i < a_e; i++) same = same && nf[i] == f[i];
+    // RC block: the row's windows are W-n.., column j weighs forward window n-1-j
+    int q = L - 1 - p, r_s = max(0, q - l + 1), r_e = min(q + 1, W);
+    int o = W - n;
+    const unsigned int* c = rc + (long long)b * W + o;
+    const unsigned int* nc = new_rc + item * l + (o - r_s);
+    ACC d = 0;
+    for (int blk = 0; !same && blk < (has_rc ? 2 : 1); blk++) {
+        bool fw = blk == 0;
+        const unsigned int* cc = fw ? f : c;
+        const unsigned int* ncc = fw ? nf : nc;
+        int c_s = fw ? a_s : max(r_s, o) - o, c_e = fw ? a_e : r_e - o;
+        // changed rows, every column
+        for (int i = a_s; i < a_e; i++) {
+            unsigned int u = f[i], u2 = nf[i];
+            ACC row = 0;
+            for (int j = TID; j < n; j += NT) {
+                unsigned int cj = cc[j];
+                unsigned int c2 = (j >= c_s && j < c_e) ? ncc[j] : cj;
+                ACC wj = fw ? wb[j] : wb[n - 1 - j];
+                row += wj * ((ACC)table[n_mismatch(u2, c2)] - (ACC)table[n_mismatch(u, cj)]);
+            }
+            d += (ACC)wb[i] * row;
+        }
+        // unchanged rows, changed columns
+        for (int i = TID; i < n; i += NT) {
+            if (i >= a_s && i < a_e) continue;
+            unsigned int u = f[i];
+            ACC row = 0;
+            for (int j = c_s; j < c_e; j++) {
+                ACC wj = fw ? wb[j] : wb[n - 1 - j];
+                row += wj * ((ACC)table[n_mismatch(u, ncc[j])] - (ACC)table[n_mismatch(u, cc[j])]);
+            }
+            d += (ACC)wb[i] * row;
+        }
+    }
+"""
+
+_MUTANT_DIAG_CUDA = (
+    r"""
+__device__ __forceinline__ int n_mismatch(unsigned int a, unsigned int b)
+{
+    unsigned int x = a ^ b;
+    return __popc(((x >> 1) | x) & 0x55555555u);
+}
+
+extern "C" __global__ void mutant_diag(
+    const unsigned int* __restrict__ fwd, const unsigned int* __restrict__ rc,
+    const unsigned int* __restrict__ new_f, const unsigned int* __restrict__ new_rc,
+    const int* __restrict__ counts, const double* __restrict__ w, int w_stride,
+    const double* __restrict__ table, const double* __restrict__ diag,
+    double* __restrict__ out, int B, int L, int W, int l, int has_rc)
+{
+    __shared__ double partial[256];
+"""
+    + _MUTANT_DIAG_BODY.replace("BLOCK_ID", "blockIdx.x")
+    .replace("REAL_W", "double")
+    .replace("ACC", "double")
+    .replace("TID", "threadIdx.x")
+    .replace("NT", "blockDim.x")
+    + r"""
+    partial[threadIdx.x] = d;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) partial[threadIdx.x] += partial[threadIdx.x + s];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) out[item] = diag[b] + partial[0];
+}
+"""
+)
+
+_METAL_MUTANT_DIAG = (
+    """
+    int B = params[0], L = params[1], W = params[2], l = params[3];
+    int has_rc = params[4], w_stride = params[5];
+    uint tid = thread_position_in_threadgroup.x;
+    uint nt = threads_per_threadgroup.x;
+    threadgroup float partial[32];
+"""
+    + _MUTANT_DIAG_BODY.replace("BLOCK_ID", "threadgroup_position_in_grid.x")
+    .replace("const REAL_W*", "const device float*")
+    .replace("const unsigned int*", "const device uint*")
+    .replace("ACC", "float")
+    .replace("TID", "tid")
+    .replace("NT", "nt")
+    .replace("long long", "long")
+    + """
+    d = simd_sum(d);
+    if (thread_index_in_simdgroup == 0) partial[simdgroup_index_in_threadgroup] = d;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float s = 0.0f;
+        for (uint g = 0; g < (nt + 31) / 32; g++) s += partial[g];
+        out[item] = diag[b] + s;
+    }
+"""
+)
+
+_METAL_MUTANT_DIAG_HEADER = """
+inline int n_mismatch(uint a, uint b) {
+    uint x = a ^ b;
+    return popcount(((x >> 1) | x) & 0x55555555u);
+}
+"""
+
+_cuda_mutant_diag = None
+_metal_mutant_diag = None
+_MUTANT_DIAG_THREADS = 128
+
+
+def _mutant_diag_device(bx, bx_rc, new, new_rc, diag, w, table, l):
+    """K_raw(mutant, mutant) [4, L, B] on bx's device (CUDA or MLX); the
+    arguments as for _mutant_diag_numba, on bx's device or on CPU. w: [B or 1,
+    W] window weights, or None (all 1)."""
+    global _cuda_mutant_diag, _metal_mutant_diag
+    dev = device_of(bx)
+    B, W = bx.shape
+    L = new.shape[1]
+    has_rc = bx_rc is not None
+    w = np.ones((1, W)) if w is None else w
+    params = (B, L, W, l, int(has_rc), W if w.shape[0] > 1 else 0)
+    new = np.ascontiguousarray(new, dtype=np.uint32)
+    new_rc = new if new_rc is None else np.ascontiguousarray(new_rc, dtype=np.uint32)
+    if dev == "cuda":
+        import cupy as cp
+
+        if _cuda_mutant_diag is None:
+            _cuda_mutant_diag = cp.RawKernel(_MUTANT_DIAG_CUDA, "mutant_diag")
+        fwd = cp.ascontiguousarray(bx, dtype=cp.uint32)
+        rc = fwd if bx_rc is None else cp.ascontiguousarray(bx_rc, dtype=cp.uint32)
+        out = cp.empty(4 * L * B, dtype=cp.float64)
+        _cuda_mutant_diag(
+            (4 * L * B,),
+            (_MUTANT_DIAG_THREADS,),
+            (fwd, rc, cp.asarray(new), cp.asarray(new_rc))
+            + ((fwd != PAD_WINDOW).sum(axis=1, dtype=cp.int32),)
+            + (cp.asarray(w, dtype=cp.float64), np.int32(params[5]))
+            + (cp.asarray(table, dtype=cp.float64),)
+            + (cp.asarray(diag, dtype=cp.float64), out)
+            + tuple(np.int32(a) for a in params[:5]),
+        )
+        return out.reshape(4, L, B)
+    import mlx.core as mx
+
+    if _metal_mutant_diag is None:
+        _metal_mutant_diag = mx.fast.metal_kernel(
+            name="gkm_mutant_diag",
+            input_names=["fwd", "rc", "new_f", "new_rc", "counts", "w", "table"]
+            + ["diag", "params"],
+            output_names=["out"],
+            source=_METAL_MUTANT_DIAG,
+            header=_METAL_MUTANT_DIAG_HEADER,
+        )
+    fwd = mx.array(bx).astype(mx.uint32)
+    rc = fwd if bx_rc is None else mx.array(bx_rc).astype(mx.uint32)
+    out = _metal_mutant_diag(
+        inputs=[fwd, rc, mx.array(new), mx.array(new_rc)]
+        + [(fwd != PAD_WINDOW).astype(mx.int32).sum(axis=1)]
+        + [mx.array(np.asarray(w, dtype=np.float32))]
+        + [mx.array(np.asarray(table, dtype=np.float32))]
+        + [mx.array(diag).astype(mx.float32), mx.array(params, dtype=mx.int32)],
+        template=[],
+        grid=(4 * L * B * _MUTANT_DIAG_THREADS, 1, 1),
+        threadgroup=(_MUTANT_DIAG_THREADS, 1, 1),
+        output_shapes=[(4 * L * B,)],
+        output_dtypes=[mx.float32],
+    )[0]
+    return out.reshape(4, L, B)
+
+
 def _fused_pairwise_packed_gpu(bx_packed, by_packed, table, l, min_matches):
     """Fused pairwise CUDA kernel: bx [B, Wx], by [S, Wy] packed uint32.
 
@@ -667,10 +856,12 @@ class DirectGkmKernel(PackedGkmKernel):
         return _fused_pairwise_packed_mlx(bx, by, *args)
 
     def raw_diag_mutants(self, bx, bx_rc, new, new_rc, diag):
-        """See PackedGkmKernel.raw_diag_mutants; on CPU only pairs touching a
-        changed window are visited (about 4 l W per mutant instead of W^2)."""
+        """See PackedGkmKernel.raw_diag_mutants; only pairs touching a changed
+        window are visited (about 4 l W per mutant instead of W^2)."""
         if device_of(bx) != "cpu":
-            return super().raw_diag_mutants(bx, bx_rc, new, new_rc, diag)
+            return _mutant_diag_device(
+                bx, bx_rc, new, new_rc, diag, None, self._mismatch_table, self.l
+            )
         B = bx.shape[0]
         rc = (
             np.zeros((B, 0), np.uint32)

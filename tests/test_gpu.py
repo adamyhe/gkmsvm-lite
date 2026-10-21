@@ -702,6 +702,88 @@ class TestMaskedGPU:
         np.testing.assert_allclose(gpu, cpu, rtol=1e-9, atol=1e-12)
 
 
+class TestMutantDiagGPU:
+    """Mutant self-kernels (ISM's normalization) on the device vs
+    _mutant_diag_numba: only the pairs touching a changed window."""
+
+    @pytest.mark.parametrize("kernel_type", ["gkm_cnt", "gkm_esttrunc", "wgkm"])
+    @pytest.mark.parametrize("padded", [False, True])
+    @pytest.mark.parametrize("include_rc", [True, False])
+    def test_matches_cpu(self, kernel_type, padded, include_rc):
+        from gkmsvm.ism import _mutants
+        from gkmsvm.kernels.direct import DirectGkmKernel
+        from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
+        from gkmsvm.kernels.weighted import CenterWeightedGkmKernel
+        from gkmsvm.svm import as_batch
+
+        cls, kw = {
+            "gkm_cnt": (DirectGkmKernel, {}),
+            "gkm_esttrunc": (EstTruncGkmKernel, {}),
+            "wgkm": (CenterWeightedGkmKernel, {"M": 20, "H": 6.0}),
+        }[kernel_type]
+        kernel = cls(8, 5, d=2, include_rc=include_rc, **kw)
+        rng = np.random.default_rng(7)
+        n = rng.integers(10, 70, 9) if padded else np.full(9, 61)
+        x, lengths = as_batch(["".join(rng.choice(list("ACGT"), k)) for k in n])
+        bx, bx_rc = kernel.pack(x, lengths), None
+        if include_rc:
+            bx, bx_rc = kernel.pack_both(x, lengths)
+        ref = _mutants(kernel, x, bx, bx_rc)[3]
+        dbx = cp.asarray(bx)
+        got = _mutants(kernel, x, dbx, None if bx_rc is None else cp.asarray(bx_rc))[3]
+        assert isinstance(got, cp.ndarray)
+        np.testing.assert_allclose(cp.asnumpy(got), ref, rtol=1e-12)
+
+
+class TestIsmIndexGPU:
+    """ISM through the l-mer index on the device (LmerIndex.mutants) vs the
+    CPU's fused pass."""
+
+    @staticmethod
+    def _case(kernel_type, padded):
+        from gkmsvm.svm import as_batch
+
+        rng = np.random.default_rng(11)
+        params = {"L": 7, "k": 5, "d": 2, "gamma": 2.0, "M": 20, "H": 6.0}
+        n = rng.integers(20, 70, 40) if padded else np.full(40, 60)
+        sv, sv_len = as_batch(["".join(rng.choice(list("ACGT"), k)) for k in n])
+        model = GkmSVM(
+            sv, rng.normal(size=40), 0.3, kernel_type, params, sv_lengths=sv_len
+        )
+        model.use_lmer_table = False
+        q = rng.integers(15, 61, 5) if padded else np.full(5, 60)
+        x, lengths = as_batch(["".join(rng.choice(list("ACGT"), k)) for k in q])
+        return model, x, lengths
+
+    @pytest.mark.parametrize(
+        "kernel_type", ["gkmrbf", "wgkmrbf", "gkm_esttrunc", "wgkm"]
+    )
+    @pytest.mark.parametrize("padded", [False, True])
+    @pytest.mark.parametrize("chunked", [False, True])
+    def test_matches_cpu(self, kernel_type, padded, chunked, monkeypatch):
+        from gkmsvm.ism import ism
+        from gkmsvm.kernels import lmer_index
+
+        if chunked:  # several launches, a few items each
+            monkeypatch.setattr(lmer_index, "_MUTANTS_SCRATCH_BYTES", 5 * 40 * 8 * 7)
+        model, x, lengths = self._case(kernel_type, padded)
+        ref = ism(model, x, lengths=lengths)
+        model.cuda()
+        assert model._sv_index() is not None
+        calls = []
+        orig = lmer_index.LmerIndex._mutants_gpu
+        monkeypatch.setattr(
+            lmer_index.LmerIndex,
+            "_mutants_gpu",
+            lambda self, *a: calls.append(1) or orig(self, *a),
+        )
+        got = ism(model, cp.asarray(x), lengths=lengths)
+        assert calls and isinstance(got, cp.ndarray)
+        np.testing.assert_allclose(
+            cp.asnumpy(got), ref, rtol=0, atol=1e-10 * np.abs(ref).max()
+        )
+
+
 class TestLmerTableGPU:
     def test_table_matches_kernel_path(self):
         model = _make_model(
@@ -872,6 +954,24 @@ class TestWeightedGPU:
                 np.testing.assert_allclose(
                     cp.asnumpy(cols[i]), ref[:, i], rtol=1e-10, atol=1e-12
                 )
+
+    @pytest.mark.parametrize("padded", [False, True])
+    def test_brute_and_self_kernels_on_gpu(self, padded):
+        """Brute force (< 16 rows) and self-kernels run in CUDA (CuPy results)."""
+        from gkmsvm.kernels.weighted import CenterWeightedGkmKernel
+
+        kernel = CenterWeightedGkmKernel(8, 5, d=2, M=20, H=6.0)
+        rng = np.random.default_rng(6)
+        lengths = rng.integers(10, 62, 9) if padded else None
+        bx, bx_rc = kernel.pack_both(self._seqs(9, 61, 14), lengths)
+        gbx, grc = cp.asarray(bx), cp.asarray(bx_rc)
+        for got, ref in (
+            (kernel.raw_diag_packed(gbx, grc), kernel.raw_diag_packed(bx, bx_rc)),
+            (kernel.raw_diag_packed(gbx), kernel.raw_diag_packed(bx)),
+            (kernel.raw_packed(gbx, gbx, grc), kernel.raw_packed(bx, bx, bx_rc)),
+        ):
+            assert isinstance(got, cp.ndarray)
+            np.testing.assert_allclose(cp.asnumpy(got), ref, rtol=1e-12)
 
     def test_gram_matches_cpu(self):
         from gkmsvm.gram import compute_gram

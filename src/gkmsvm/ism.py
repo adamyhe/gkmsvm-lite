@@ -12,7 +12,7 @@ from __future__ import annotations
 import numpy as np
 
 from gkmsvm.backend import float_dtype, get_array_module, is_mlx, to_cpu
-from gkmsvm.kernels.packed import PAD_WINDOW
+from gkmsvm.kernels.packed import PAD_WINDOW, device_of
 from gkmsvm.kernels.rbf import RbfKernel
 from gkmsvm.svm import GkmSVM, _per_position, _short_rows, as_batch
 
@@ -91,7 +91,7 @@ def _ism_packed(model, x, lengths=None):
     rows = _BLOCK_BYTES // (8 * L * W * 4)
     if table is not None:
         fn = _ism_table
-    elif xp is np and model._sv_index() is not None:
+    elif model._sv_index() is not None:
         fn = _ism_index
         rows = min(rows, model._MAX_SCORE_BYTES // (8 * S))
     else:
@@ -145,26 +145,35 @@ def _ism_table(model, x, table, lengths=None):
 
 
 def _ism_index(model, x, _table=None, lengths=None):
-    """f(mutant) - f(x) on CPU through the l-mer index: [B, 4, L].
+    """f(mutant) - f(x) through the l-mer index: [B, 4, L].
 
     One fused pass per (position, sequence) adds the changed windows' hits to
-    the reference row and reduces over SVs, so no [mutants, S] block exists.
+    the reference row and reduces over SVs, so no [mutants, S] block exists
+    (on CPU a cache-resident length-S buffer, on CUDA/Metal a scratch slice
+    per thread block).
     """
     kernel = model.kernel
     base = kernel.base
     index = model._sv_index()
+    xp = get_array_module(x)
     bx, bx_rc = base.pack_both(x, lengths)
     old, new, diag_ref, mut_diag = _mutants(base, x, bx, bx_rc)
-    inv_dx, inv_ds = model._inv_norms(diag_ref, x.shape[0])
+    inv_dx, inv_ds = model._inv_norms(
+        None if diag_ref is None else to_cpu(diag_ref), x.shape[0]
+    )
     inv_dmut = (
         np.ones(new.shape[:3])
         if mut_diag is None
-        else 1 / np.sqrt(np.clip(np.asarray(mut_diag, dtype=np.float64), 1e-20, None))
+        else 1 / np.sqrt(np.clip(to_cpu(mut_diag).astype(np.float64), 1e-20, None))
     )
     gamma = kernel.gamma if isinstance(kernel, RbfKernel) else np.nan
     coef = model.coefficients
-    ref = index.pairwise(bx)  # [B, S]
-    ref_score = index.reduce(bx, inv_dx, inv_ds, coef, gamma)
+    host = xp is np or not index.mutants_on_device(device_of(bx))
+    if host:  # (MLX with a dense index: the CPU pass is faster)
+        bx = np.ascontiguousarray(to_cpu(bx))
+        coef = to_cpu(coef)
+    ref = index.pairwise(bx)  # [B, S], on the device mutants() runs on
+    ref_score = index.reduce(bx, inv_dx, inv_ds, coef, gamma) if host else None
     out = index.mutants(
         old,
         new,
@@ -177,6 +186,8 @@ def _ism_index(model, x, _table=None, lengths=None):
         gamma,
         _slot_weights(base, x.shape[2], lengths),
     )
+    if host and xp is not np:
+        out = xp.asarray(out.astype(np.float32 if is_mlx(x) else np.float64))
     return out.transpose(2, 0, 1)
 
 
