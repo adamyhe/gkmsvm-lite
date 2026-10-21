@@ -507,6 +507,11 @@ _metal_mutants = None
 _METAL_COUNT_BYTES = 256 * 2**20
 # Above this many distinct pair weights, MLX queries on CPU
 _METAL_MAX_LEVELS = 16
+# ... and above this many index entries per l-mer: the [levels, rows, S]
+# counts' scattered atomics lose to the CPU (200 x 300 bp queries, l = 10, on
+# an M4: 2.1x the CPU at 0.56 entries per l-mer, 1.08x at 2.2, 0.72x at 4.4,
+# 0.52x at 17.8, the dsQTL -t 3 model's)
+_METAL_QUERY_MAX_DENSITY = 2.5
 
 
 class LmerIndex:
@@ -775,9 +780,12 @@ class LmerIndex:
                 source=_METAL_SRC_W,
                 atomic_outputs=True,
             )
-        if len(self.table) > _METAL_MAX_LEVELS:
-            # One int32 [rows, S] block per level; with many levels, query on
-            # CPU, which shares memory with the GPU
+        if (
+            len(self.table) > _METAL_MAX_LEVELS
+            or self.offsets[-1] > _METAL_QUERY_MAX_DENSITY * self.n_lmers
+        ):
+            # One int32 [rows, S] block per level; with many levels or a dense
+            # index, query on CPU, which shares memory with the GPU
             out = self.pairwise(np.ascontiguousarray(to_cpu(bx)))
             return out if host else mx.array(out.astype(np.float32))
         if self.offsets[-1] >= 2**31:

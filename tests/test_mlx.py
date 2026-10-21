@@ -827,8 +827,11 @@ class TestLmerIndexMLX:
     """Cached l-mer index on the device vs the CPU index."""
 
     @pytest.mark.parametrize("which", ["t0", "t2_l9", "t2_l11"])
-    def test_index_matches_cpu(self, which):
+    @pytest.mark.parametrize("dense", [False, True])
+    def test_index_matches_cpu(self, which, dense, monkeypatch):
+        """dense: above _METAL_QUERY_MAX_DENSITY the query runs on CPU."""
         from gkmsvm.codec import reverse_complement
+        from gkmsvm.kernels import lmer_index
         from gkmsvm.kernels.direct import DirectGkmKernel
         from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
         from gkmsvm.kernels.lmer_index import LmerIndex
@@ -846,8 +849,17 @@ class TestLmerIndexMLX:
         bx = kernel.pack(X)
         bx[1, :3] = PAD_WINDOW
         ref = index.pairwise(bx)
-        got = np.array(index.pairwise(to_mlx(bx)))
-        np.testing.assert_allclose(got, ref, rtol=1e-6, atol=1e-6)
+        if dense:
+            monkeypatch.setattr(lmer_index, "_METAL_QUERY_MAX_DENSITY", 0.0)
+            monkeypatch.setattr(
+                lmer_index, "_metal_fn", lambda **k: pytest.fail("Metal")
+            )
+            monkeypatch.setattr(
+                lmer_index, "_metal_fn_w", lambda **k: pytest.fail("Metal")
+            )
+        got = index.pairwise(to_mlx(bx))
+        assert isinstance(got, mx.array)
+        np.testing.assert_allclose(np.array(got), ref, rtol=1e-6, atol=1e-6)
 
     def test_rbf_model_scores_match_cpu(self):
         model = _make_model(40, 60, "gkmrbf", {"L": 9, "k": 6, "d": 3, "gamma": 2.0})
