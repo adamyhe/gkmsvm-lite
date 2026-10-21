@@ -936,3 +936,47 @@ def test_gkmexplain_metal_matches_cpu(kernel_type, mode):
         model.cpu()
         score = np.asarray(model(q)).ravel() - model.bias
         np.testing.assert_allclose(imp, score, rtol=0, atol=1e-6 * np.abs(score).max())
+
+
+@pytest.mark.parametrize(
+    "kernel_type",
+    ["gkm_cnt", "gkm_esttrunc", "gkmrbf", "wgkm", "wgkmrbf", "gkm_cnt_rbf"],
+)
+@pytest.mark.parametrize("mode", ["hypothetical", "perturbation"])
+def test_gkmexplain_metal_per_sv_matches_cpu(kernel_type, mode):
+    """The Metal per-SV kernel (use_lmer_index = False) on mixed-length
+    queries and SVs with N: the CPU's attributions to 1e-6 of the largest,
+    NumPy float64, and importance sums to score - bias (non-RBF)."""
+    from gkmsvm.explain import gkmexplain
+    from gkmsvm.svm import as_batch
+
+    rng = np.random.default_rng(4)
+
+    def seqs(n, lo, hi):
+        out = []
+        for i in range(n):
+            s = list(rng.choice(list("ACGT"), int(rng.integers(lo, hi + 1))))
+            if i % 4 == 0:
+                s[3:7] = "NNNN"
+            out.append("".join(s))
+        return out
+
+    params = {"L": 7, "k": 5, "d": 2, "gamma": 2.0, "M": 20, "H": 6.0}
+    sv, sv_len = as_batch(seqs(60, 15, 70))
+    model = GkmSVM(sv, rng.normal(size=60), 0.3, kernel_type, params, sv_lengths=sv_len)
+    model.use_explain_table = False
+    model.use_lmer_index = False
+    model.sv_chunk_size = 25  # several SV chunks
+    q = seqs(9, 9, 80)
+    expected = gkmexplain(model, q, mode=mode)
+    model.mlx()
+    got = gkmexplain(model, q, mode=mode)
+    assert isinstance(got, np.ndarray) and got.dtype == np.float64
+    np.testing.assert_allclose(
+        got, expected, rtol=0, atol=1e-6 * np.abs(expected).max()
+    )
+    if mode == "hypothetical" and "rbf" not in kernel_type:
+        imp = gkmexplain(model, q, mode="importance").sum(axis=(1, 2))
+        model.cpu()
+        score = np.asarray(model(q)).ravel() - model.bias
+        np.testing.assert_allclose(imp, score, rtol=0, atol=1e-6 * np.abs(score).max())
