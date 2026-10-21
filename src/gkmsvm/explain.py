@@ -298,6 +298,9 @@ _cupy_explain_lmer_kernel = None
 # SVs) breaks even near 1,000 SVs on CPU (Apple M4, Xeon) and 2,000 on a Titan
 # Xp, and is 3.6-4.7x faster at 10,000 (benchmarks/dev/explain_lmer_gpu.py)
 _EXPLAIN_SV_WINDOWS_PER_NEIGHBOR = 6
+# Metal (an M4): the per-SV kernel (_explain_sv_metal) keeps up to about 2,900
+# such SVs (32 x 300 bp: 0.57 s vs 0.81 s at 2,000 SVs, 2.3 s vs 0.83 s at 8,000)
+_EXPLAIN_SV_WINDOWS_PER_NEIGHBOR_METAL = 12
 # Threads to aim for per launch; mask slices (grid.y) make up for few windows
 _EXPLAIN_LMER_THREADS = 1 << 18
 
@@ -1607,7 +1610,12 @@ def _explain_lmer(
         sv_windows = (
             0 if packed is None else sum(p.size for p in packed if p is not None)
         )
-        if n_neighbors * _EXPLAIN_SV_WINDOWS_PER_NEIGHBOR > sv_windows:
+        per_neighbor = (
+            _EXPLAIN_SV_WINDOWS_PER_NEIGHBOR_METAL
+            if metal
+            else _EXPLAIN_SV_WINDOWS_PER_NEIGHBOR
+        )
+        if n_neighbors * per_neighbor > sv_windows:
             return None
     coef, inv_ds = _sv_weights(model)
     index = V = None
@@ -1855,6 +1863,7 @@ def mutation_impact(
         (with a warning).
     """
     from gkmsvm.backend import to_cpu
+    from gkmsvm.kernels.packed import device_of
 
     kernel = model.kernel
     base = kernel.base
@@ -1883,6 +1892,7 @@ def mutation_impact(
 
         starts = tqdm(starts, desc="Mutation impact", total=(B + bs - 1) // bs)
 
+    gamma = kernel.gamma if base is not kernel else np.nan  # RBF
     parts = []
     for s in starts:
         r = model._match_device(ref[s : s + bs])
@@ -1909,11 +1919,22 @@ def mutation_impact(
                     dk = dk / xp.sqrt(xp.clip(diag_r.astype(dk.dtype), 1e-10, None))
                 parts.append(to_cpu(dk)[:, None])
                 continue
+            index = model._sv_index()
+            if index is not None and (
+                xp is np or not index.queries_on_device(device_of(bx))
+            ):
+                # RBF through the index on CPU: one fused pass per variant, the
+                # alt row visiting only the windows that differ from ref
+                inv_dr, inv_ds = model._inv_norms(
+                    to_cpu(diag_r) if base.normalize else None, n
+                )
+                out = index.impact(to_cpu(bx), inv_dr, inv_ds, to_cpu(coef), gamma)
+                parts.append(out[:, None])
+                continue
             k_both = model._sv_raw(bx)
         else:
             k_both = base._raw_pairwise(both, model.support_sequences)
             diag_r = base._raw_diagonal(r)
-        gamma = kernel.gamma if base is not kernel else np.nan  # RBF
         if xp is np:
             parts.append(
                 _impact_cpu(

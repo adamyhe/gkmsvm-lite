@@ -205,6 +205,76 @@ def _query_reduce_cpu(
     return out
 
 
+@njit(parallel=True, cache=True, fastmath={"nsz", "arcp", "contract", "reassoc"})
+def _query_impact_cpu(
+    bx,
+    offsets,
+    ids,
+    vals,
+    masks,
+    weights,
+    n_lmers,
+    wx,
+    inv_dr,
+    inv_ds,
+    coef,
+    gamma,
+    n_tasks,
+):
+    """[n] mutation impact (explain.mutation_impact) of rows bx = [ref; alt].
+
+    Each task accumulates K_raw(ref) and K_raw(alt) - K_raw(ref) in two length-S
+    buffers; the difference visits only window slots where the alleles differ
+    (all of them past an indel), so a SNP costs about one query. With gamma
+    (not NaN) each SV's dK scales by (exp(gamma (k - 1)) - exp(-gamma)) / k of
+    its normalized k (0 when k <= 0), else by 1.
+    """
+    W = bx.shape[1]
+    n = bx.shape[0] // 2
+    S = inv_ds.shape[0]
+    rbf = not np.isnan(gamma)
+    floor = np.exp(-gamma) if rbf else 0.0
+    out = np.zeros(n)
+    for task in prange(n_tasks):
+        acc = np.zeros(S)
+        delta = np.zeros(S)
+        for b in range(task, n, n_tasks):
+            wr = wx[min(np.int64(b), wx.shape[0] - 1)]
+            wa = wx[min(np.int64(n + b), wx.shape[0] - 1)]
+            for i in range(W):
+                r = bx[b, i]
+                a = bx[n + b, i]
+                ar = wr[i] if wr.shape[0] > 0 else 1.0
+                aa = wa[i] if wa.shape[0] > 0 else 1.0
+                _add_window(acc, r, ar, offsets, ids, vals, masks, weights, n_lmers)
+                if r != a or ar != aa:
+                    _add_window(
+                        delta, r, -ar, offsets, ids, vals, masks, weights, n_lmers
+                    )
+                    _add_window(
+                        delta, a, aa, offsets, ids, vals, masks, weights, n_lmers
+                    )
+            scale = inv_dr[b]
+            total = 0.0
+            for j in range(S):
+                dk = delta[j]
+                if dk != 0.0:
+                    z = scale * inv_ds[j]
+                    dk *= z
+                    if rbf:
+                        k = acc[j] * z
+                        dk = (
+                            dk * (np.exp(gamma * (k - 1.0)) - floor) / k
+                            if k > 0
+                            else 0.0
+                        )
+                    total += coef[j] * dk
+                    delta[j] = 0.0
+                acc[j] = 0.0
+            out[b] = total
+    return out
+
+
 @njit(inline="always")
 def _add_hits(acc, row, sign, rowwt, offsets, ids, vals, masks, weights, n_lmers):
     """acc[s] += sign * K_raw(row, s) for the packed windows in row; rowwt: their
@@ -568,6 +638,17 @@ class LmerIndex:
             return self.offsets[-1] <= _METAL_MUTANTS_MAX_DENSITY * self.n_lmers
         return dev == "cuda"
 
+    def queries_on_device(self, dev: str) -> bool:
+        """Whether pairwise() queries on dev (CUDA, MLX) rather than on CPU: MLX
+        queries on CPU above _METAL_MAX_LEVELS distinct weights or
+        _METAL_QUERY_MAX_DENSITY entries per l-mer."""
+        if dev == "mlx":
+            return (
+                len(self.table) <= _METAL_MAX_LEVELS
+                and self.offsets[-1] <= _METAL_QUERY_MAX_DENSITY * self.n_lmers
+            )
+        return dev == "cuda"
+
     def nbytes(self) -> int:
         return self.offsets.nbytes + self.ids.nbytes + self.vals.nbytes
 
@@ -624,6 +705,28 @@ class LmerIndex:
             np.ascontiguousarray(coef, dtype=np.float64),
             float(gamma),
             max(1, min(bx.shape[0], 4 * numba.get_num_threads())),
+        )
+
+    def impact(self, bx, inv_dr, inv_ds, coef, gamma=np.nan):
+        """Mutation impact [n] of CPU rows bx = [ref (n rows); alt (n rows)]
+        (see _query_impact_cpu); inv_dr: 1 / sqrt(K_raw(ref, ref)) [n]."""
+        import numba
+
+        bx = np.ascontiguousarray(bx)
+        return _query_impact_cpu(
+            bx,
+            self.offsets,
+            self.ids,
+            self.vals,
+            self.masks,
+            self.weights,
+            self.n_lmers,
+            self._wx(bx),
+            np.ascontiguousarray(inv_dr, dtype=np.float64),
+            np.ascontiguousarray(inv_ds, dtype=np.float64),
+            np.ascontiguousarray(coef, dtype=np.float64),
+            float(gamma),
+            max(1, min(bx.shape[0] // 2, 4 * numba.get_num_threads())),
         )
 
     def mutants(
@@ -780,10 +883,7 @@ class LmerIndex:
                 source=_METAL_SRC_W,
                 atomic_outputs=True,
             )
-        if (
-            len(self.table) > _METAL_MAX_LEVELS
-            or self.offsets[-1] > _METAL_QUERY_MAX_DENSITY * self.n_lmers
-        ):
+        if not self.queries_on_device("mlx"):
             # One int32 [rows, S] block per level; with many levels or a dense
             # index, query on CPU, which shares memory with the GPU
             out = self.pairwise(np.ascontiguousarray(to_cpu(bx)))

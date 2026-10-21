@@ -822,6 +822,29 @@ class TestIsmIndexMLX:
             np.array(got), ref, rtol=0, atol=1e-5 * np.abs(ref).max()
         )
 
+    @pytest.mark.parametrize("kernel_type", ["gkmrbf", "wgkmrbf"])
+    @pytest.mark.parametrize("dense", [False, True])
+    def test_mutation_impact_matches_cpu(self, kernel_type, dense, monkeypatch):
+        """RBF mutation impact through the index: queried in Metal, or (dense)
+        the CPU's fused pass; SNPs and indels."""
+        from gkmsvm.explain import mutation_impact
+        from gkmsvm.kernels import lmer_index
+
+        if dense:
+            monkeypatch.setattr(lmer_index, "_METAL_QUERY_MAX_DENSITY", 0.0)
+        model, _, _ = self._case(kernel_type, True)
+        rng = np.random.default_rng(5)
+        ref = ["".join(rng.choice(list("ACGT"), k)) for k in rng.integers(20, 61, 8)]
+        alt = [s[:9] + ("A" if s[9] != "A" else "C") + s[10:] for s in ref[:5]]
+        alt += [s[:9] + s[11:] for s in ref[5:7]] + [ref[7][:9] + "GT" + ref[7][9:]]
+        expected = mutation_impact(model, ref, alt)
+        model.mlx()
+        assert model._sv_index().queries_on_device("mlx") != dense
+        got = mutation_impact(model, ref, alt)
+        np.testing.assert_allclose(
+            got, expected, rtol=0, atol=1e-5 * np.abs(expected).max()
+        )
+
 
 class TestLmerIndexMLX:
     """Cached l-mer index on the device vs the CPU index."""

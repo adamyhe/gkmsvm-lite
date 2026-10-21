@@ -80,6 +80,8 @@
 - [x] GkmExplain's per-SV kernel in Metal: per-window float32 partials folded in float64 on CPU, a ballot over the lanes holding a pair; 2.3-5.7x the CPU on an M4, no CPU fallback left for GkmExplain on MLX
 - [x] Mutation impact through the l-mer table (`-t 0/1/2/4`): alt minus ref table sums over the ref norm, as prediction. dsQTL `-t 2` model, 500 variants: 7.0 s -> 0.01 s on CPU, 13.8 s -> 0.03 s on MLX
 - [x] MLX queries a dense l-mer index (> 2.5 entries per l-mer) on CPU: dsQTL `-t 3` model, 500 x 300 bp: prediction 11.7 s -> 5.3 s (CPU 4.9 s), mutation impact 23.0 s -> 10.1 s (CPU 9.8 s)
+- [x] RBF mutation impact in one fused CPU pass per variant through the l-mer index (the alt row visits only the windows that differ from ref): dsQTL `-t 3` model, 500 variants: 9.8 s -> 5.1 s on CPU, 10.1 s -> 5.0 s on MLX
+- [x] GkmExplain on Metal takes the l-mer path from 12 SV windows per neighbor (6 elsewhere): Metal's per-SV kernel is faster up to ~2,900 300 bp SVs for `-t 0` without d (0.57 s vs 0.81 s at 2,000)
 - [x] GkmExplain on MLX: the l-mer path in Metal, per-window float32 partials folded in float64 on CPU (`docs/design/mlx-gkmexplain.md`); within 6e-7 of the CPU's largest attribution, 1.2-5x the CPU on an M4
 - [x] SMO SVR: `train_gkmsvr(solver="smo")` (and `"auto"` when the Gram doesn't fit), the C SMO over LIBSVM's 2N epsilon-SVR dual variables with N cached columns; lsgkm-svr's models to 2e-7, LIBSVM's on mixed lengths, KKT conditions to the tolerance, on CPU, CUDA and MLX
 - [x] Training oracle: `train_gkmsvm` (LIBSVM and SMO) gives gkmtrain's support vectors for `-t 0` to `-t 5` on fixed- and mixed-length sets with N, coefficients to the solvers' 1e-3 tolerance and gkmpredict's scores to 5e-4; gkmtrain's solutions meet our KKT conditions (`tests/test_train_oracle.py`)
@@ -93,7 +95,7 @@ Gaps found by checking against LS-GKM (2026-10-19), most important first:
 
 Performance gaps:
 
-- None open. RBF (`-t 3`/`-t 5`) has no explain table by construction: the table sums the SVs into one 4^l vector V before any query, and an RBF SV's weight depends on the query through exp(γ(K(x, sv) − 1)), so V would be per query and cost as much as the index path's query.
+- None open. Dense RBF ISM on MLX (the dsQTL `-t 3` model, 18 index entries per l-mer) runs the CPU pass: Metal is 0.5x the CPU there, and running both at once on split positions gained nothing (each half alone 2.0 s, together 3.4 s). RBF (`-t 3`/`-t 5`) has no explain table by construction: the table sums the SVs into one 4^l vector V before any query, and an RBF SV's weight depends on the query through exp(γ(K(x, sv) − 1)), so V would be per query and cost as much as the index path's query.
 
 Features:
 
