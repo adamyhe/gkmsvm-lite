@@ -735,6 +735,55 @@ class TestMutantDiagGPU:
         np.testing.assert_allclose(cp.asnumpy(got), ref, rtol=1e-12)
 
 
+class TestIsmIndexGPU:
+    """ISM through the l-mer index on the device (LmerIndex.mutants) vs the
+    CPU's fused pass."""
+
+    @staticmethod
+    def _case(kernel_type, padded):
+        from gkmsvm.svm import as_batch
+
+        rng = np.random.default_rng(11)
+        params = {"L": 7, "k": 5, "d": 2, "gamma": 2.0, "M": 20, "H": 6.0}
+        n = rng.integers(20, 70, 40) if padded else np.full(40, 60)
+        sv, sv_len = as_batch(["".join(rng.choice(list("ACGT"), k)) for k in n])
+        model = GkmSVM(
+            sv, rng.normal(size=40), 0.3, kernel_type, params, sv_lengths=sv_len
+        )
+        model.use_lmer_table = False
+        q = rng.integers(15, 61, 5) if padded else np.full(5, 60)
+        x, lengths = as_batch(["".join(rng.choice(list("ACGT"), k)) for k in q])
+        return model, x, lengths
+
+    @pytest.mark.parametrize(
+        "kernel_type", ["gkmrbf", "wgkmrbf", "gkm_esttrunc", "wgkm"]
+    )
+    @pytest.mark.parametrize("padded", [False, True])
+    @pytest.mark.parametrize("chunked", [False, True])
+    def test_matches_cpu(self, kernel_type, padded, chunked, monkeypatch):
+        from gkmsvm.ism import ism
+        from gkmsvm.kernels import lmer_index
+
+        if chunked:  # several launches, a few items each
+            monkeypatch.setattr(lmer_index, "_MUTANTS_SCRATCH_BYTES", 5 * 40 * 8 * 7)
+        model, x, lengths = self._case(kernel_type, padded)
+        ref = ism(model, x, lengths=lengths)
+        model.cuda()
+        assert model._sv_index() is not None
+        calls = []
+        orig = lmer_index.LmerIndex._mutants_gpu
+        monkeypatch.setattr(
+            lmer_index.LmerIndex,
+            "_mutants_gpu",
+            lambda self, *a: calls.append(1) or orig(self, *a),
+        )
+        got = ism(model, cp.asarray(x), lengths=lengths)
+        assert calls and isinstance(got, cp.ndarray)
+        np.testing.assert_allclose(
+            cp.asnumpy(got), ref, rtol=0, atol=1e-10 * np.abs(ref).max()
+        )
+
+
 class TestLmerTableGPU:
     def test_table_matches_kernel_path(self):
         model = _make_model(

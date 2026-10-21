@@ -366,9 +366,143 @@ _METAL_SRC_W = """
             atomic_fetch_add_explicit(&hi[base + ids[e]], 1u, memory_order_relaxed);
     }
 """
+# ISM through the index on the GPU (LmerIndex.mutants): one thread block per
+# (position, sequence). Its threads scatter the hits of the windows covering
+# the position, before (slot 0) and after each substitution (slots 1-4), into
+# a [5, S] scratch slice, then reduce sum_s coef_s (f(mutant) - f(reference))
+# over the SVs, so no [mutants, S] block leaves the GPU. old [L, B, l], new
+# [4, L, B, l]; slot_wt [L, R, l] the windows' weights (weighted only).
+_MUTANTS_BODY = """
+    long long it = item0 + GROUP;  // p * B + b
+    int p = (int)(it / B), b = (int)(it % B);
+    long long LB = (long long)L * B, sbase = (long long)GROUP * 5 * S;
+    long long o = it * l;  // old[o + j]: window j before
+    REAL dx = inv_dx[b];
+    bool skip[4];  // the reference base: its windows and norm
+    for (int v = 0; v < 4; v++)
+        skip[v] = nw[(v * LB + it) * l] == old[o] && inv_dmut[v * LB + it] == dx;
+    long long sw = ((long long)p * R + min(b, R - 1)) * l;  // slot_wt[sw + j]
+    for (int slot = 0; slot < 5 * l; slot++) {
+        int tgt = slot / l, j = slot - tgt * l;
+        if (tgt > 0 && skip[tgt - 1]) continue;
+        unsigned int u = tgt == 0 ? old[o + j] : nw[((tgt - 1) * LB + it) * l + j];
+        if (u >= (unsigned int)n_lmers) continue;  // padding
+        REAL a = weighted ? slot_wt[sw + j] : (REAL)1;
+        long long dst = sbase + (long long)tgt * S;
+        for (int t = TID; t < n_masks; t += NT) {
+            unsigned int x = u ^ masks[t];
+            REAL wt = a * weights[t];
+            for (OFF e = offsets[x]; e < offsets[x + 1]; e++)
+                SCR_ADD(dst + ids[e], weighted ? wt * (REAL)vals[e] : wt);
+        }
+    }
+    BARRIER;
+    REAL acc[4] = {0, 0, 0, 0};
+    REAL sm[4];
+    for (int v = 0; v < 4; v++) sm[v] = inv_dmut[v * LB + it];
+    for (int s = TID; s < S; s += NT) {
+        REAL r = ref[(long long)b * S + s], r0 = SCR(sbase + s), ds = inv_ds[s];
+        REAL kref = r * dx * ds;
+        REAL fref = rbf ? exp(gamma * kref) : kref;
+        for (int v = 0; v < 4; v++) {
+            if (skip[v]) continue;
+            REAL k = (r + SCR(sbase + (long long)(1 + v) * S + s) - r0) * sm[v] * ds;
+            acc[v] += coef[s] * ((rbf ? exp(gamma * k) : k) - fref);
+        }
+    }
+"""
+
+_MUTANTS_CUDA = (
+    r"""
+#define SCR_ADD(i, x) atomicAdd(&scratch[i], x)
+#define SCR(i) scratch[i]
+#define BARRIER __syncthreads()
+extern "C" __global__ void lmer_index_mutants(
+    const unsigned int* __restrict__ old, const unsigned int* __restrict__ nw,
+    const double* __restrict__ ref, const long long* __restrict__ offsets,
+    const int* __restrict__ ids, const unsigned char* __restrict__ vals,
+    const unsigned int* __restrict__ masks, const double* __restrict__ weights,
+    const double* __restrict__ slot_wt, const double* __restrict__ inv_dx,
+    const double* __restrict__ inv_dmut, const double* __restrict__ inv_ds,
+    const double* __restrict__ coef, double* __restrict__ scratch,
+    double* __restrict__ out, long long item0, int L, int B, int l, int S,
+    int n_masks, long long n_lmers, int R, int weighted, int rbf, double gamma,
+    double floor_)
+{
+    __shared__ double red[4][128];
+"""
+    + _MUTANTS_BODY.replace("GROUP", "blockIdx.x")
+    .replace("REAL", "double")
+    .replace("OFF", "long long")
+    .replace("TID", "threadIdx.x")
+    .replace("NT", "blockDim.x")
+    + r"""
+    for (int v = 0; v < 4; v++) red[v][threadIdx.x] = acc[v];
+    __syncthreads();
+    for (int h = blockDim.x / 2; h > 0; h >>= 1) {
+        if (threadIdx.x < h)
+            for (int v = 0; v < 4; v++) red[v][threadIdx.x] += red[v][threadIdx.x + h];
+        __syncthreads();
+    }
+    if (threadIdx.x < 4) {
+        int v = threadIdx.x;
+        out[v * LB + it] = skip[v] ? 0.0 : (rbf ? floor_ : 1.0) * red[v][0];
+    }
+}
+"""
+)
+
+_METAL_MUTANTS_HEADER = """
+#define SCR_ADD(i, x) atomic_fetch_add_explicit(&scratch[i], x, memory_order_relaxed)
+#define SCR(i) atomic_load_explicit(&scratch[i], memory_order_relaxed)
+#define BARRIER threadgroup_barrier(mem_flags::mem_device)
+"""
+
+_METAL_MUTANTS = (
+    """
+    long item0 = params[0];
+    int L = params[1], B = params[2], l = params[3], S = params[4];
+    int n_masks = params[5], n_lmers = params[6], R = params[7];
+    int weighted = params[8], rbf = params[9];
+    float gamma = fparams[0], floor_ = fparams[1];
+    uint tid = thread_position_in_threadgroup.x;
+    uint nt = threads_per_threadgroup.x;
+    threadgroup float red[4][32];
+"""
+    + _MUTANTS_BODY.replace("GROUP", "threadgroup_position_in_grid.x")
+    .replace("REAL", "float")
+    .replace("OFF", "int")
+    .replace("TID", "tid")
+    .replace("NT", "nt")
+    .replace("long long", "long")
+    + """
+    for (int v = 0; v < 4; v++) {
+        float a = simd_sum(acc[v]);
+        if (thread_index_in_simdgroup == 0) red[v][simdgroup_index_in_threadgroup] = a;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid < 4) {
+        float t = 0.0f;
+        for (uint g = 0; g < (nt + 31) / 32; g++) t += red[tid][g];
+        float val = skip[tid] ? 0.0f : (rbf ? floor_ : 1.0f) * t;
+        atomic_store_explicit(&out[tid * LB + it], val, memory_order_relaxed);
+    }
+"""
+)
+_MUTANTS_THREADS = 128
+# Scratch per launch: [items, 5, S]
+_MUTANTS_SCRATCH_BYTES = 256 * 2**20
+# Above this many index entries per l-mer, MLX runs ISM's index pass on CPU:
+# the scatter is device-memory float atomics, which an M4 does at ~1G/s (RBF,
+# 4 x 300 bp: 2.5x the CPU at 1.1 entries per l-mer, 1.65x at 4.4, 0.83x at
+# 8.9; the dsQTL -t 3 model has 18)
+_METAL_MUTANTS_MAX_DENSITY = 6.0
+
 _cuda_fn = None
+_cuda_mutants = None
 _metal_fn = None
 _metal_fn_w = None
+_metal_mutants = None
 # Rows per Metal launch: caps the int32 [levels, rows, S] counts
 _METAL_COUNT_BYTES = 256 * 2**20
 # Above this many distinct pair weights, MLX queries on CPU
@@ -422,6 +556,12 @@ class LmerIndex:
         unweighted)."""
         wx = self.row_weights(bx)
         return np.zeros((1, 0)) if wx is None else wx.astype(np.float64)
+
+    def mutants_on_device(self, dev: str) -> bool:
+        """Whether mutants() runs on dev (CUDA, MLX) rather than on CPU."""
+        if dev == "mlx":
+            return self.offsets[-1] <= _METAL_MUTANTS_MAX_DENSITY * self.n_lmers
+        return dev == "cuda"
 
     def nbytes(self) -> int:
         return self.offsets.nbytes + self.ids.nbytes + self.vals.nbytes
@@ -494,17 +634,24 @@ class LmerIndex:
         gamma=np.nan,
         slot_wt=None,
     ):
-        """ISM deltas [4, L, B] on CPU (see _query_mutants_cpu), without [rows, S] blocks.
+        """ISM deltas [4, L, B] (see _query_mutants_cpu), without [rows, S] blocks.
 
         slot_wt [L, 1 or B, l]: with window weights, those of the windows in
         old/new (window sets, not sequences, so their weights can't follow
-        from length; ism._slot_weights).
+        from length; ism._slot_weights). ref [B, S] on the device to run on
+        (CUDA, MLX: _MUTANTS_BODY; ref_score unused), the rest on CPU.
         """
         import numba
+
+        from gkmsvm.kernels.packed import device_of
 
         L, B = old.shape[:2]
         if len(self.vals) and slot_wt is None:
             raise ValueError("weighted windows need slot_wt")
+        if device_of(ref) != "cpu":
+            return self._mutants_gpu(
+                old, new, ref, inv_dx, inv_dmut, inv_ds, coef, gamma, slot_wt
+            )
 
         def f64(a):
             return np.ascontiguousarray(a, dtype=np.float64)
@@ -687,3 +834,123 @@ class LmerIndex:
             for m in range(n_lev):
                 out[b0 : b0 + nb] += self.table[m] * counts[m].astype(np.float64)
         return out if host else mx.array(out.astype(np.float32))
+
+    def _mutants_gpu(
+        self, old, new, ref, inv_dx, inv_dmut, inv_ds, coef, gamma, slot_wt
+    ):
+        """mutants() on ref's device (CUDA or MLX): [4, L, B] there."""
+        from gkmsvm.kernels.packed import device_of
+
+        global _cuda_mutants, _metal_mutants
+        L, B, l = old.shape
+        S = self.S
+        weighted = len(self.vals) > 0
+        rbf = not np.isnan(gamma)
+        R = 1 if slot_wt is None else slot_wt.shape[1]
+        # (a 1-element MLX input would be a constant, not a device pointer)
+        slot_wt = np.zeros(2) if slot_wt is None else slot_wt
+        n_items = L * B
+        per_launch = max(1, _MUTANTS_SCRATCH_BYTES // (5 * S * 8))
+        ints = (L, B, l, S, len(self.masks), self.n_lmers, R, int(weighted), int(rbf))
+        floats = (float(gamma) if rbf else 0.0, float(np.exp(-gamma)) if rbf else 1.0)
+        if device_of(ref) == "cuda":
+            import cupy as cp
+
+            if _cuda_mutants is None:
+                _cuda_mutants = cp.RawKernel(_MUTANTS_CUDA, "lmer_index_mutants")
+            offsets, ids, masks, weights, vals = self._arrays("cuda")
+            if vals is None:
+                vals = cp.zeros(1, dtype=cp.uint8)
+
+            def f64(a):
+                return cp.ascontiguousarray(cp.asarray(a, dtype=cp.float64))
+
+            arrays = (
+                cp.asarray(np.ascontiguousarray(old, dtype=np.uint32)),
+                cp.asarray(np.ascontiguousarray(new, dtype=np.uint32)),
+                f64(ref),
+                offsets,
+                ids,
+                vals,
+                masks,
+                weights,
+                f64(slot_wt),
+                f64(inv_dx),
+                f64(inv_dmut),
+                f64(inv_ds),
+                f64(coef),
+            )
+            out = cp.empty(4 * n_items, dtype=cp.float64)
+            scratch = cp.empty(min(per_launch, n_items) * 5 * S, dtype=cp.float64)
+            for i0 in range(0, n_items, per_launch):
+                n = min(per_launch, n_items - i0)
+                scratch[: n * 5 * S] = 0
+                _cuda_mutants(
+                    (n,),
+                    (_MUTANTS_THREADS,),
+                    arrays
+                    + (scratch, out, np.int64(i0))
+                    + tuple(np.int32(a) for a in ints[:5])
+                    + (np.int64(ints[5]),)
+                    + tuple(np.int32(a) for a in ints[6:])
+                    + tuple(np.float64(a) for a in floats),
+                )
+            return out.reshape(4, L, B)
+        import mlx.core as mx
+
+        if self.offsets[-1] >= 2**31:
+            raise ValueError("l-mer index too large for the Metal kernel")
+        if _metal_mutants is None:
+            _metal_mutants = mx.fast.metal_kernel(
+                name="gkm_lmer_index_mutants",
+                input_names=["old", "nw", "ref", "offsets", "ids", "vals", "masks"]
+                + ["weights", "slot_wt", "inv_dx", "inv_dmut", "inv_ds", "coef"]
+                + ["params", "fparams"],
+                output_names=["scratch", "out"],
+                source=_METAL_MUTANTS,
+                header=_METAL_MUTANTS_HEADER,
+                atomic_outputs=True,
+            )
+        offsets, ids, masks, _, vals = self._arrays("mlx")
+        if "mlx_weights" not in self._dev:
+            self._dev["mlx_weights"] = mx.array(self.weights.astype(np.float32))
+        vals = mx.zeros(2, dtype=mx.uint32) if vals is None else vals
+
+        def f32(a):
+            return mx.array(np.asarray(to_cpu(a), dtype=np.float32))
+
+        inputs = [
+            mx.array(np.ascontiguousarray(old, dtype=np.uint32)),
+            mx.array(np.ascontiguousarray(new, dtype=np.uint32)),
+            ref.astype(mx.float32),
+            offsets,
+            ids,
+            vals,
+            masks,
+            self._dev["mlx_weights"],
+            f32(slot_wt),
+            f32(inv_dx),
+            f32(inv_dmut),
+            f32(inv_ds),
+            f32(coef),
+        ]
+        parts = []
+        for i0 in range(0, n_items, per_launch):
+            n = min(per_launch, n_items - i0)
+            _, part = _metal_mutants(
+                inputs=inputs
+                + [mx.array((i0,) + ints, dtype=mx.int64).astype(mx.int32)]
+                + [mx.array(floats, dtype=mx.float32)],
+                template=[],
+                grid=(n * _MUTANTS_THREADS, 1, 1),
+                threadgroup=(_MUTANTS_THREADS, 1, 1),
+                output_shapes=[(n * 5 * S,), (4 * n_items,)],
+                output_dtypes=[mx.float32, mx.float32],
+                init_value=0,
+            )
+            parts.append(part)
+        # Each launch writes only its items (the rest stay 0)
+        out = parts[0]
+        for part in parts[1:]:
+            out = out + part
+        return out.reshape(4, L, B)
