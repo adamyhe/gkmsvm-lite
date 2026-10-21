@@ -9,7 +9,7 @@ from __future__ import annotations
 import numba
 import numpy as np
 
-from gkmsvm.backend import get_array_module
+from gkmsvm.backend import get_array_module, to_cpu
 
 BASES = "ACGT"
 _BASE_TO_INDEX = {b: i for i, b in enumerate(BASES)}
@@ -71,10 +71,7 @@ def one_hot_decode(arr: np.ndarray) -> str:
     """Decode a [4, L] one-hot array to a DNA string."""
     if arr.ndim != 2 or arr.shape[0] != 4:
         raise ValueError(f"Expected shape [4, L], got {list(arr.shape)}")
-    xp = get_array_module(arr)
-    indices = xp.argmax(arr, axis=0)
-    if xp is not np:
-        indices = indices.get()
+    indices = np.argmax(to_cpu(arr), axis=0)
     return "".join(BASES[i] for i in indices)
 
 

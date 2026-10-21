@@ -1625,8 +1625,12 @@ def _explain_lmer(
             return None
     else:
         V = _explain_V(model)
-    nonzero = np.maximum(np.abs(table_a), np.abs(table_b))
-    masks, levels = lmer_index.neighbor_masks(l, nonzero, dmax)
+    # Cached so the Metal path's device copies (keyed by the masks) are reused
+    key = ("explain_masks", perturbation, dmax)
+    if key not in model._sv_cache:
+        nonzero = np.maximum(np.abs(table_a), np.abs(table_b))
+        model._sv_cache[key] = lmer_index.neighbor_masks(l, nonzero, dmax)
+    masks, levels = model._sv_cache[key]
 
     xp = get_array_module(x)
     if xp is not np and not is_mlx(x):

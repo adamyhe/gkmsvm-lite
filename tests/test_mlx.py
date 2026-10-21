@@ -82,6 +82,11 @@ class TestMLXDeviceTransfer:
         result = direct_model.mlx()
         assert result is direct_model
 
+    def test_one_hot_decode_mlx(self):
+        from gkmsvm.codec import one_hot_decode
+
+        assert one_hot_decode(to_mlx(one_hot_encode("ACGTTGCA"))) == "ACGTTGCA"
+
 
 # ---------------------------------------------------------------------------
 # Forward pass (scoring)
@@ -918,9 +923,13 @@ def test_gkmexplain_mlx_reuses_cpu_model():
         first = gkmexplain(model, to_mlx(x), mode="hypothetical")
         cpu_model = model._sv_cache["cpu_model"]
         second = gkmexplain(model, to_mlx(x), mode="importance")
+        gkmexplain(model, to_mlx(x), mode="hypothetical")
     # Window partials folded on CPU in float64, so NumPy float64
     assert isinstance(first, np.ndarray) and first.dtype == np.float64
     assert model._sv_cache["cpu_model"] is cpu_model
+    # One copy of the neighbor masks on the device, however many calls
+    metal = [k for k in cpu_model._sv_cache if k[0] == "explain_lmer_metal"]
+    assert len(metal) == 1
     tol = 1e-6 * np.abs(expected).max()  # float32 sums within each window
     np.testing.assert_allclose(first, expected, rtol=0, atol=tol)
     np.testing.assert_allclose(second, expected * x, rtol=0, atol=tol)
