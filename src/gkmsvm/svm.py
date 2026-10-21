@@ -423,19 +423,12 @@ class GkmSVM(DeviceModel):
             raise ValueError(f"Unknown format {fmt!r}. Use 'npz' or 'lsgkm'.")
 
     def _sv_packed(self):
-        """(fwd, rc or None) packed SV windows, or None when the base kernel has
-        no packed path."""
+        """(fwd, rc or None) packed SV windows (cached)."""
         c = self._sv_cache
         if "packed" not in c:
-            base = self.kernel.base
-            sv = self.support_sequences
-            c["packed"] = (
-                base.pack_both(sv, self.sv_lengths)
-                if isinstance(base, PackedGkmKernel)
-                else None
+            c["packed"] = self.kernel.base.pack_both(
+                self.support_sequences, self.sv_lengths
             )
-            if c["packed"] is None and self.sv_lengths is not None:
-                raise ValueError("SVs of different lengths need a packed kernel")
         return c["packed"]
 
     def _inv_norms(self, diag_x, B):
@@ -453,12 +446,7 @@ class GkmSVM(DeviceModel):
         """Base-kernel K_raw(sv, sv) on the model's device (cached)."""
         c = self._sv_cache
         if "diag" not in c:
-            packed = self._sv_packed()
-            base = self.kernel.base
-            if packed is None:
-                diag = base._raw_diagonal(self.support_sequences, chunk_size=1000)
-            else:
-                diag = base.raw_diag_packed(*packed)
+            diag = self.kernel.base.raw_diag_packed(*self._sv_packed())
             c["diag"] = diag.astype(float_dtype(diag))
         return c["diag"]
 
@@ -473,9 +461,7 @@ class GkmSVM(DeviceModel):
 
             packed = self._sv_packed()
             base = self.kernel.base
-            n_windows = (
-                0 if packed is None else sum(p.size for p in packed if p is not None)
-            )
+            n_windows = sum(p.size for p in packed if p is not None)
             use = n_windows > 0 and lmer_index.applies(base, n_windows)
             c["index"] = lmer_index.LmerIndex(base, *packed) if use else None
         return c["index"]
@@ -492,10 +478,6 @@ class GkmSVM(DeviceModel):
         lengths: each row's length when they differ."""
         kernel = self.kernel
         base = kernel.base
-        if self._sv_packed() is None:
-            return (kernel.pairwise(x, self.support_sequences) * self.coefficients).sum(
-                axis=1, keepdims=True
-            )
         xp = get_array_module(x)
         bx, bx_rc = base.pack_both(x, lengths)
         diag_x = base.raw_diag_packed(bx, bx_rc) if base.normalize else None
@@ -590,18 +572,11 @@ class GkmSVM(DeviceModel):
     # Kernel scoring computes [rows, S] kernel values in blocks of at most this
     _MAX_SCORE_BYTES = 512 * 2**20
 
-    def _min_batch_size(
-        self, batch_size: int | None, *, table: bool = True
-    ) -> int | None:
-        """batch_size, raised when calls go through the masked join.
-
-        table: the caller scores through the l-mer table when it applies.
-        """
+    def _min_batch_size(self, batch_size: int | None) -> int | None:
+        """batch_size, raised when calls go through the masked join."""
         if batch_size is None:
             return None
-        if (
-            table and self._lmer_table_for(np) is not None
-        ) or self._sv_index() is not None:
+        if self._lmer_table_for(np) is not None or self._sv_index() is not None:
             return batch_size
         return max(batch_size, self._MIN_BATCH_BYTES // (8 * self.num_support_vectors))
 
@@ -644,13 +619,8 @@ class GkmSVM(DeviceModel):
             self._lmer_table_dev is None
             or get_array_module(self._lmer_table_dev) is not xp
         ):
-            # Metal has no float64: MLX gets a float32 copy (scores are float32 there)
-            table = (
-                self._lmer_table.astype(np.float32)
-                if getattr(xp, "__name__", "") == "mlx.core"
-                else self._lmer_table
-            )
-            self._lmer_table_dev = xp.asarray(table)
+            # (MLX's asarray makes it float32: scores are float32 there)
+            self._lmer_table_dev = xp.asarray(self._lmer_table)
         return self._lmer_table_dev
 
     def _table_raw(self, packed, table):

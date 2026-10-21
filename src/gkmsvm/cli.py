@@ -182,12 +182,6 @@ def _load_model(path: str, device: str = "cpu"):
     return load_model(path, device=device)
 
 
-def _read_seqs(path: str) -> list[tuple[str, str]]:
-    from gkmsvm.fasta import read_fasta
-
-    return read_fasta(path)
-
-
 def _write_tsv(path: str | None, columns: tuple[str, str], names, values) -> None:
     """Two-column TSV to `path`, or stdout when None."""
     import contextlib
@@ -447,9 +441,9 @@ def cmd_import(args: argparse.Namespace) -> None:
         from gkmsvm.importers.lsgkm import load_lsgkm_model
 
         model = load_lsgkm_model(inp, device="cpu")
-    elif fmt in ("classic", "r_gkmsvm"):
-        # gkmsvm_train's files (C++ and R write the same), which don't record
-        # the kernel
+    else:
+        # classic, r_gkmsvm: gkmsvm_train's files (C++ and R write the same),
+        # which don't record the kernel
         from gkmsvm.importers.classic import load_classic_model
 
         model = load_classic_model(
@@ -462,9 +456,6 @@ def cmd_import(args: argparse.Namespace) -> None:
             include_rc=not args.no_rc,
             device="cpu",
         )
-    else:
-        print(f"Unknown format: {fmt}", file=sys.stderr)
-        sys.exit(1)
 
     from gkmsvm.serialization import save_npz
 

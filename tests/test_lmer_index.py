@@ -127,7 +127,7 @@ def test_gram_and_columns_match_pairwise(name):
         compute_gram(kernel, X, chunk_size=16), expected, rtol=1e-10, atol=1e-12
     )
     cache = KernelColumnCache(kernel, X)
-    assert cache._use_fast and cache._index is not None
+    assert cache._index is not None
     for use_index in (True, False):  # one query row each; the masked join
         if not use_index:
             cache._index = None

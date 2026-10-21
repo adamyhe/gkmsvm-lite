@@ -12,8 +12,6 @@ import numpy as np
 from gkmsvm.backend import get_array_module, to_cpu
 
 BASES = "ACGT"
-_BASE_TO_INDEX = {b: i for i, b in enumerate(BASES)}
-_BASE_TO_INDEX.update({b.lower(): i for i, b in enumerate(BASES)})
 
 _OHE_MAPPING = np.full(256, -2, dtype=np.int8)
 for _i, _b in enumerate(BASES):

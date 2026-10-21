@@ -197,17 +197,14 @@ class _MlxShim:
     """Wraps mlx.core to provide numpy-compatible operations.
 
     Forwards most attributes to mlx.core. Overrides operations where
-    the API differs: rint, ascontiguousarray, as_strided, einsum
-    argument order, etc.
+    the API differs (ascontiguousarray, asarray, as_strided) and the 64-bit
+    dtypes, which Metal lacks (float64 -> float32, int64 -> int32).
     """
 
     def __getattr__(self, name: str) -> Any:
         return getattr(mx, name)
 
     # --- numpy-compatible aliases ---
-
-    def rint(self, x: Any) -> Any:
-        return mx.round(x)
 
     def ascontiguousarray(self, x: Any, dtype: Any = None) -> Any:
         if dtype is not None:
@@ -224,13 +221,6 @@ class _MlxShim:
         if dtype is not None:
             arr = arr.astype(dtype)
         return arr
-
-    def asnumpy(self, x: Any) -> np.ndarray:
-        return np.array(x)
-
-    @property
-    def newaxis(self) -> None:
-        return None
 
     # --- stride tricks ---
 
@@ -251,24 +241,8 @@ class _MlxShim:
         return mx.float32
 
     @property
-    def float32(self) -> Any:
-        return mx.float32
-
-    @property
     def int64(self) -> Any:
         return mx.int32
-
-    @property
-    def int8(self) -> Any:
-        return mx.int8
-
-    @property
-    def uint32(self) -> Any:
-        return mx.uint32
-
-    @property
-    def bool_(self) -> Any:
-        return mx.bool_
 
     # --- module identity ---
 

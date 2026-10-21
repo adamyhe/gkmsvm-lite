@@ -9,7 +9,6 @@ from pathlib import Path
 import numpy as np
 
 from gkmsvm.codec import one_hot_decode
-from gkmsvm.importers.lsgkm import KERNEL_TYPE_REVERSE
 
 
 def save_npz(model, path: str | Path) -> None:

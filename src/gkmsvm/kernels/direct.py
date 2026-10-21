@@ -843,8 +843,6 @@ class DirectGkmKernel(PackedGkmKernel):
                 return self.l - m
         return self.l + 1
 
-    _HAS_BRUTE = True
-
     def _brute(self, bx, by, dev):
         args = (self._mismatch_table, self.l, self._min_matches)
         if dev == "cpu":
@@ -858,9 +856,10 @@ class DirectGkmKernel(PackedGkmKernel):
     def raw_diag_mutants(self, bx, bx_rc, new, new_rc, diag):
         """See PackedGkmKernel.raw_diag_mutants; only pairs touching a changed
         window are visited (about 4 l W per mutant instead of W^2)."""
+        w = self.row_weights(bx)
         if device_of(bx) != "cpu":
             return _mutant_diag_device(
-                bx, bx_rc, new, new_rc, diag, None, self._mismatch_table, self.l
+                bx, bx_rc, new, new_rc, diag, w, self._mismatch_table, self.l
             )
         B = bx.shape[0]
         rc = (
@@ -869,15 +868,19 @@ class DirectGkmKernel(PackedGkmKernel):
             else np.ascontiguousarray(bx_rc)
         )
         new_rc = np.zeros((4, 1, 1, 1), np.uint32) if new_rc is None else new_rc
-        return _mutant_diag_numba(
+        args = (
             np.ascontiguousarray(bx),
             rc,
             np.ascontiguousarray(new),
             np.ascontiguousarray(new_rc),
             np.asarray(diag, dtype=np.float64),
-            self._mismatch_table,
-            self.l,
         )
+        return self._mutant_diag_cpu(args, w)
+
+    def _mutant_diag_cpu(self, args, w):
+        """raw_diag_mutants on CPU: args (bx, bx_rc, new, new_rc, diag); w the
+        rows' window weights (None here)."""
+        return _mutant_diag_numba(*args, self._mismatch_table, self.l)
 
     def _brute_cross_diag(self, bx, by, dev):
         args = (self._mismatch_table, self.l, self._min_matches)

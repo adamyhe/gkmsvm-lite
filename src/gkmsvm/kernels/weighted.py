@@ -21,16 +21,14 @@ from __future__ import annotations
 import numpy as np
 from numba import njit, prange
 
-from gkmsvm.backend import get_array_module, to_cpu
 from gkmsvm.kernels.direct import (
     _counts,
-    _mutant_diag_device,
     _packed_mismatches,
     _rc_window,
     _spans,
 )
 from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
-from gkmsvm.kernels.packed import device_of
+from gkmsvm.kernels.packed import _concat_windows, device_of
 from gkmsvm.kernels.rbf import RbfKernel
 
 
@@ -383,26 +381,6 @@ def _brute_weighted_mlx(bx, wx, by, wy, table, l, min_matches, diag=False):
     return out if diag else out.reshape(B, S)
 
 
-def _mx_concat(arrays, axis):
-    import mlx.core as mx
-
-    return mx.concatenate(arrays, axis=axis)
-
-
-def _on_device(out: np.ndarray, like):
-    """CPU result out on like's device (float32 on MLX)."""
-    dev = device_of(like)
-    if dev == "mlx":
-        import mlx.core as mx
-
-        return mx.array(out.astype(np.float32))
-    if dev == "cuda":
-        import cupy as cp
-
-        return cp.asarray(out)
-    return out
-
-
 class CenterWeightedGkmKernel(EstTruncGkmKernel):
     """Center-weighted gapped k-mer kernel (LS-GKM -t 4 / wgkm).
 
@@ -463,9 +441,7 @@ class CenterWeightedGkmKernel(EstTruncGkmKernel):
             # every pair of the forward and RC blocks: [W] or [2W] columns
             by, wy = bx, w
             if bx_rc is not None:
-                xp = get_array_module(bx) if dev == "cuda" else None
-                cat = xp.concatenate if xp is not None else _mx_concat
-                by = cat([bx, bx_rc], axis=1)
+                by = _concat_windows(bx, bx_rc)
                 w_rc = self.row_weights(bx_rc, rc=True)
                 rows = max(w.shape[0], w_rc.shape[0])
                 wy = np.concatenate(
@@ -480,7 +456,7 @@ class CenterWeightedGkmKernel(EstTruncGkmKernel):
                 bx, w, by, wy, self._mismatch_table, self.l, self._min_matches, True
             )
         fwd = np.ascontiguousarray(bx)
-        by = fwd if bx_rc is None else np.concatenate([fwd, bx_rc], axis=1)
+        by = fwd if bx_rc is None else _concat_windows(fwd, bx_rc)
         return _self_diagonal_weighted_numba(
             fwd,
             np.ascontiguousarray(by),
@@ -489,40 +465,9 @@ class CenterWeightedGkmKernel(EstTruncGkmKernel):
             self.l,
         )
 
-    def raw_diag_mutants(self, bx, bx_rc, new, new_rc, diag):
-        """See PackedGkmKernel.raw_diag_mutants; only pairs touching a changed
-        window are visited."""
-        if device_of(bx) != "cpu":
-            return _mutant_diag_device(
-                bx,
-                bx_rc,
-                new,
-                new_rc,
-                diag,
-                self.row_weights(bx),
-                self._mismatch_table,
-                self.l,
-            )
-        fwd = np.ascontiguousarray(bx)
-        B = fwd.shape[0]
-        rc = (
-            np.zeros((B, 0), np.uint32)
-            if bx_rc is None
-            else np.ascontiguousarray(to_cpu(bx_rc))
-        )
-        new_rc = np.zeros((4, 1, 1, 1), np.uint32) if new_rc is None else new_rc
-        return _on_device(
-            _mutant_diag_weighted_numba(
-                fwd,
-                rc,
-                np.ascontiguousarray(new),
-                np.ascontiguousarray(new_rc),
-                np.asarray(to_cpu(diag), dtype=np.float64),
-                self.row_weights(fwd).astype(np.float64),
-                self._mismatch_table,
-                self.l,
-            ),
-            bx,
+    def _mutant_diag_cpu(self, args, w):
+        return _mutant_diag_weighted_numba(
+            *args, w.astype(np.float64), self._mismatch_table, self.l
         )
 
 

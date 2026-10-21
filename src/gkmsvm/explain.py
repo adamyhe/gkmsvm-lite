@@ -1170,18 +1170,12 @@ def _gkmexplain(model, x, lengths, resolved, batch_size, verbose, metal=False):
 
     kernel = model.kernel
     base = kernel.base
-    if getattr(base, "_mismatch_table", None) is None:
-        raise ValueError(
-            f"GkmExplain attribution needs a gapped k-mer kernel, not {model.kernel_type!r}; "
-            "use mutation_impact() or ism()"
-        )
     # RBF (-t 3/-t 5): each SV's contributions scale by _rbf_scale of its kernel value
     gamma = kernel.gamma if base is not kernel else None
     xp = get_array_module(x)
     B, _, seqlen = x.shape
     l = base.l
-    d = getattr(base, "d", None)
-    d = l if d is None else d  # -t 0 without d counts every pair
+    d = l if base.d is None else base.d  # -t 0 without d counts every pair
     if is_perturbation:
         table_a, table_b = _build_perturbation_tables(base._mismatch_table, l, d)
     else:
@@ -1590,12 +1584,11 @@ def _explain_lmer(
     RBF models (gamma given) scale each SV by _rbf_scale of its kernel value
     with the query, so V depends on the query: each neighbor sums the
     per-query SV weights over the l-mer index's entries instead (about one
-    more index query per call). Runs on CPU (in Metal with metal, x on CPU);
-    results go back to x's device.
+    more index query per call). CuPy input runs in CUDA (_explain_lmer_cuda),
+    NumPy on CPU, or in Metal with metal (MLX input arrives as NumPy).
     """
     import numba
 
-    from gkmsvm.backend import to_cpu
     from gkmsvm.kernels import lmer_index
 
     base = model.kernel.base
@@ -1607,9 +1600,7 @@ def _explain_lmer(
         # A query window visits n_neighbors l-mers here and every SV window
         # in the per-SV kernel
         packed = model._sv_packed()
-        sv_windows = (
-            0 if packed is None else sum(p.size for p in packed if p is not None)
-        )
+        sv_windows = sum(p.size for p in packed if p is not None)
         per_neighbor = (
             _EXPLAIN_SV_WINDOWS_PER_NEIGHBOR_METAL
             if metal
@@ -1632,8 +1623,7 @@ def _explain_lmer(
         model._sv_cache[key] = lmer_index.neighbor_masks(l, nonzero, dmax)
     masks, levels = model._sv_cache[key]
 
-    xp = get_array_module(x)
-    if xp is not np and not is_mlx(x):
+    if get_array_module(x) is not np:  # (MLX reaches here as NumPy, metal=True)
         return _explain_lmer_cuda(
             model,
             x,
@@ -1651,8 +1641,7 @@ def _explain_lmer(
             verbose,
             perturbation,
         )
-    x_cpu = to_cpu(x)
-    B, _, seqlen = x_cpu.shape
+    B, _, seqlen = x.shape
     starts = range(0, B, batch_size)
     if verbose:
         from tqdm import tqdm
@@ -1662,7 +1651,7 @@ def _explain_lmer(
         )
     parts = []
     for b0 in starts:
-        x_b = x_cpu[b0 : b0 + batch_size]
+        x_b = x[b0 : b0 + batch_size]
         packed_x, packed_x_rc = base.pack_both(x_b, _rows(lengths, b0, batch_size))
         packed_x = np.ascontiguousarray(packed_x)
         inv_dx = (
@@ -1739,8 +1728,7 @@ def _explain_lmer(
                 index.vals,
             )
         )
-    out = np.concatenate(parts)
-    return out if xp is np else xp.asarray(out)
+    return np.concatenate(parts)
 
 
 def _explain_lmer_cuda(
@@ -1872,15 +1860,12 @@ def mutation_impact(
     kernel = model.kernel
     base = kernel.base
     coef = model.coefficients
-    packed_svs = model._sv_packed() is not None
     ref, alt, ref_lengths, alt_lengths = _allele_arrays(
         ref, alt, ref_lengths, alt_lengths
     )
     L = ref.shape[2]
     short = None
     if ref_lengths is not None or alt_lengths is not None:
-        if not packed_svs:
-            raise ValueError("sequences of different lengths need a packed kernel")
         both_lengths = _joint_lengths(
             L, (ref.shape[0], ref_lengths), (ref.shape[0], alt_lengths)
         )
@@ -1904,41 +1889,37 @@ def mutation_impact(
         xp = get_array_module(r)
         n = r.shape[0]
         both = xp.concatenate([r, a])
-        if packed_svs:
-            # One call for both alleles (the masked join builds its SV index once)
-            bx, bx_rc = base.pack_both(
-                both,
-                _joint_lengths(
-                    L, (n, _rows(ref_lengths, s, bs)), (n, _rows(alt_lengths, s, bs))
-                ),
+        # One call for both alleles (the masked join builds its SV index once)
+        bx, bx_rc = base.pack_both(
+            both,
+            _joint_lengths(
+                L, (n, _rows(ref_lengths, s, bs)), (n, _rows(alt_lengths, s, bs))
+            ),
+        )
+        diag_r = base.raw_diag_packed(bx[:n], None if bx_rc is None else bx_rc[:n])
+        table = model._lmer_table_for(xp)
+        if table is not None:
+            # Non-RBF: linear in the SVs, so sum_s coef_s dK_raw / sqrt(K(sv, sv))
+            # is the l-mer table's alt minus ref (the table holds the SV norms)
+            raw = model._table_raw(bx, table)
+            dk = raw[n:] - raw[:n]
+            if base.normalize:
+                dk = dk / xp.sqrt(xp.clip(diag_r.astype(dk.dtype), 1e-10, None))
+            parts.append(to_cpu(dk)[:, None])
+            continue
+        index = model._sv_index()
+        if index is not None and (
+            xp is np or not index.queries_on_device(device_of(bx))
+        ):
+            # RBF through the index on CPU: one fused pass per variant, the
+            # alt row visiting only the windows that differ from ref
+            inv_dr, inv_ds = model._inv_norms(
+                to_cpu(diag_r) if base.normalize else None, n
             )
-            diag_r = base.raw_diag_packed(bx[:n], None if bx_rc is None else bx_rc[:n])
-            table = model._lmer_table_for(xp)
-            if table is not None:
-                # Non-RBF: linear in the SVs, so sum_s coef_s dK_raw / sqrt(K(sv, sv))
-                # is the l-mer table's alt minus ref (the table holds the SV norms)
-                raw = model._table_raw(bx, table)
-                dk = raw[n:] - raw[:n]
-                if base.normalize:
-                    dk = dk / xp.sqrt(xp.clip(diag_r.astype(dk.dtype), 1e-10, None))
-                parts.append(to_cpu(dk)[:, None])
-                continue
-            index = model._sv_index()
-            if index is not None and (
-                xp is np or not index.queries_on_device(device_of(bx))
-            ):
-                # RBF through the index on CPU: one fused pass per variant, the
-                # alt row visiting only the windows that differ from ref
-                inv_dr, inv_ds = model._inv_norms(
-                    to_cpu(diag_r) if base.normalize else None, n
-                )
-                out = index.impact(to_cpu(bx), inv_dr, inv_ds, to_cpu(coef), gamma)
-                parts.append(out[:, None])
-                continue
-            k_both = model._sv_raw(bx)
-        else:
-            k_both = base._raw_pairwise(both, model.support_sequences)
-            diag_r = base._raw_diagonal(r)
+            out = index.impact(to_cpu(bx), inv_dr, inv_ds, to_cpu(coef), gamma)
+            parts.append(out[:, None])
+            continue
+        k_both = model._sv_raw(bx)
         if xp is np:
             parts.append(
                 _impact_cpu(

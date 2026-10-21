@@ -45,10 +45,9 @@ def ism(
     x, lengths = as_batch(x, lengths)
     x = model._match_device(x)
     short = _short_rows(lengths, model.kernel.base.l, "ISM deltas")
-    fn = _ism_packed if model._sv_packed() is not None else _ism_mutants
 
     def rows(s, e):
-        return fn(model, x[s:e], None if lengths is None else lengths[s:e])
+        return _ism_packed(model, x[s:e], None if lengths is None else lengths[s:e])
 
     bs = batch_size if batch_size is not None else (1 if verbose else None)
     if bs is not None and x.shape[0] > bs:
@@ -318,36 +317,3 @@ def _packed_mutations(bx, L, W, l):
                 pad, PAD_WINDOW, cleared | (np.uint32(v) << shift)
             )
     return old, new
-
-
-# -----------------------------------------------------------------------
-# Mutant-scoring path (inputs or SVs the packed path can't represent)
-# -----------------------------------------------------------------------
-
-# Mutants scored per model() call: caps the [batch, S] intermediates
-_MUTANT_BATCH = 1024
-
-
-def _ism_mutants(model, x, lengths=None):
-    """ISM by scoring all 4L single-base mutants through the model."""
-    xp = get_array_module(x)
-    B, C, L = x.shape
-    x_np = to_cpu(x)
-    mut = np.broadcast_to(x_np[:, None, None], (B, 4, L, C, L)).copy()
-    pos = np.arange(L)
-    mut[:, :, pos, :, pos] = 0
-    for v in range(4):
-        mut[:, v, pos, v, pos] = 1
-    mut_lengths = None if lengths is None else np.repeat(lengths, 4 * L)
-    scores = to_cpu(
-        model(
-            mut.reshape(B * 4 * L, C, L),
-            lengths=mut_lengths,
-            batch_size=_MUTANT_BATCH,
-        )
-    )
-    delta = scores.reshape(B, 4, L) - to_cpu(model(x_np, lengths=lengths)).reshape(
-        B, 1, 1
-    )
-    delta[x_np.astype(bool)] = 0  # the reference base itself
-    return xp.asarray(delta.astype(np.float32 if is_mlx(x) else np.float64))

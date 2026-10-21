@@ -6,7 +6,6 @@ import numpy as np
 
 from gkmsvm.backend import float_dtype, get_array_module, is_mlx, to_cpu
 from gkmsvm.kernels.base import GkmKernel
-from gkmsvm.kernels.packed import PackedGkmKernel
 
 
 def compute_gram(
@@ -52,16 +51,13 @@ def compute_gram(
     gram = np.zeros((N, M), dtype=np.float64) if out is None else out
 
     # Tiles come from the base kernel's packed path (the base of -t 3/-t 5,
-    # then finish() applies the RBF), unless it can't pack these inputs
+    # then finish() applies the RBF)
     base = kernel.base
-    packed = isinstance(base, PackedGkmKernel)
-    if not packed and (lengths is not None or y_lengths is not None):
-        raise ValueError("sequences of different lengths need a packed kernel")
 
     # The masked join builds an index of the column sequences on every call,
     # so compute whole column panels (all rows, or all rows up to the
     # diagonal) to build each column tile's index once
-    panels = packed and base._masked_plan() is not None
+    panels = base._masked_plan() is not None
     row_ranges = range(0, N, chunk_size)
     col_ranges = range(0, M, chunk_size)
     if panels:
@@ -75,47 +71,39 @@ def compute_gram(
 
         tiles = tqdm(tiles, desc="Gram matrix")
 
-    if packed:
-        bx, bx_rc = base.pack_both(X, lengths)
-        by, by_rc = (bx, bx_rc) if symmetric else base.pack_both(Y, y_lengths)
-        # MLX tiles are normalized on the host in float64 (Metal has no float64)
-        txp = np if xp is not np and is_mlx(X) else xp
+    bx, bx_rc = base.pack_both(X, lengths)
+    by, by_rc = (bx, bx_rc) if symmetric else base.pack_both(Y, y_lengths)
+    # MLX tiles are normalized on the host in float64 (Metal has no float64)
+    txp = np if xp is not np and is_mlx(X) else xp
 
-        def tile_float(a):
-            return (
-                to_cpu(a).astype(np.float64) if txp is np else a.astype(float_dtype(a))
-            )
+    def tile_float(a):
+        return to_cpu(a).astype(np.float64) if txp is np else a.astype(float_dtype(a))
 
-        if base.normalize:
-            diag_x = tile_float(base.raw_diag_packed(bx, bx_rc))
-            diag_y = (
-                diag_x if symmetric else tile_float(base.raw_diag_packed(by, by_rc))
-            )
+    if base.normalize:
+        diag_x = tile_float(base.raw_diag_packed(bx, bx_rc))
+        diag_y = diag_x if symmetric else tile_float(base.raw_diag_packed(by, by_rc))
 
     for r_start, c_start in tiles:
         c_end = min(c_start + chunk_size, M)
         r_end = (c_end if symmetric else N) if panels else min(r_start + chunk_size, N)
 
-        if packed:
-            diag_offset = (
-                c_start if symmetric and panels and get_array_module(bx) is np else None
+        diag_offset = (
+            c_start if symmetric and panels and get_array_module(bx) is np else None
+        )
+        tile = tile_float(
+            base.raw_packed(
+                bx[r_start:r_end],
+                by[c_start:c_end],
+                None if by_rc is None else by_rc[c_start:c_end],
+                diag_offset=diag_offset,
             )
-            tile = tile_float(
-                base.raw_packed(
-                    bx[r_start:r_end],
-                    by[c_start:c_end],
-                    None if by_rc is None else by_rc[c_start:c_end],
-                    diag_offset=diag_offset,
-                )
+        )
+        if base.normalize:
+            norm = txp.sqrt(
+                diag_x[r_start:r_end, None] * diag_y[c_start:c_end][None, :]
             )
-            if base.normalize:
-                norm = txp.sqrt(
-                    diag_x[r_start:r_end, None] * diag_y[c_start:c_end][None, :]
-                )
-                tile = tile / txp.clip(norm, 1e-10, None)
-            tile = kernel.finish(tile)
-        else:
-            tile = kernel.pairwise(X[r_start:r_end], Y[c_start:c_end])
+            tile = tile / txp.clip(norm, 1e-10, None)
+        tile = kernel.finish(tile)
 
         tile_np = to_cpu(tile)
         gram[r_start:r_end, c_start:c_end] = tile_np
