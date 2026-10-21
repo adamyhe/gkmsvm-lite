@@ -6,6 +6,7 @@ import numpy as np
 
 from gkmsvm.backend import float_dtype, get_array_module, is_mlx, to_cpu
 from gkmsvm.kernels.base import GkmKernel
+from gkmsvm.svm import _progress
 
 
 def compute_gram(
@@ -66,10 +67,7 @@ def compute_gram(
         tiles = [(r, c) for r in row_ranges for c in col_ranges if r <= c]
     else:
         tiles = [(r, c) for r in row_ranges for c in col_ranges]
-    if verbose:
-        from tqdm import tqdm
-
-        tiles = tqdm(tiles, desc="Gram matrix")
+    tiles = _progress(tiles, verbose, "Gram matrix")
 
     bx, bx_rc = base.pack_both(X, lengths)
     by, by_rc = (bx, bx_rc) if symmetric else base.pack_both(Y, y_lengths)

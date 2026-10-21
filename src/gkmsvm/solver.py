@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import functools
+
 import numpy as np
 
 from gkmsvm.backend import float_dtype, get_array_module, is_mlx, to_cpu
@@ -189,8 +191,9 @@ def _check_solver(kernel):
 # ---------------------------------------------------------------------------
 
 
-def _load_csmo():
-    """Load the compiled C SMO solver. Returns None if unavailable."""
+@functools.cache
+def _get_csmo():
+    """The compiled C SMO solver (loaded once), or None if unavailable."""
     import ctypes
 
     try:
@@ -199,18 +202,6 @@ def _load_csmo():
         return ctypes.CDLL(_csmo_mod.__file__)
     except (ImportError, OSError):
         return None
-
-
-_csmo_lib = None
-_csmo_checked = False
-
-
-def _get_csmo():
-    global _csmo_lib, _csmo_checked
-    if not _csmo_checked:
-        _csmo_lib = _load_csmo()
-        _csmo_checked = True
-    return _csmo_lib
 
 
 import ctypes as _ct

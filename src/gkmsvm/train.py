@@ -100,10 +100,7 @@ def train_gkmsvm(
     _check_lengths(X, lengths, l)
     X = _move_to_device(X, device, verbose)
     y = np.array([1] * pos[0].shape[0] + [-1] * neg[0].shape[0])
-    if solver not in ("auto", "libsvm", "nystrom", "smo"):
-        raise ValueError(
-            f"Unknown solver {solver!r}. Use 'auto', 'libsvm', 'nystrom', or 'smo'."
-        )
+    _check_solver(solver)
     if solver == "auto":
         solver = _auto_solver(X.shape[0], max_gram_gb)
     return _fit(
@@ -195,10 +192,7 @@ def train_gkmsvr(
     Returns:
         A trained GkmSVM model. Scores are predicted continuous values.
     """
-    if solver not in ("auto", "libsvm", "nystrom", "smo"):
-        raise ValueError(
-            f"Unknown solver {solver!r}. Use 'auto', 'libsvm', 'nystrom', or 'smo'."
-        )
+    _check_solver(solver)
     X, lengths = _to_onehot(sequences, allow_other_bases)
     _check_lengths(X, lengths, l)
     X = _move_to_device(X, device, verbose)
@@ -238,6 +232,13 @@ def train_gkmsvr(
 # ---------------------------------------------------------------------------
 
 
+def _check_solver(solver: str) -> None:
+    if solver not in ("auto", "libsvm", "nystrom", "smo"):
+        raise ValueError(
+            f"Unknown solver {solver!r}. Use 'auto', 'libsvm', 'nystrom', or 'smo'."
+        )
+
+
 def _auto_solver(N: int, max_gram_gb: float | None) -> str:
     """ "libsvm" when the N x N Gram fits in RAM and under max_gram_gb, else "smo"."""
     gram_gb = N * N * 8 / 1024**3
@@ -262,22 +263,12 @@ def _move_to_device(X: np.ndarray, device: str, verbose: bool) -> np.ndarray:
     training data fits within 25% of available system RAM, to avoid pressure
     on unified memory (macOS users are typically running other applications).
     """
-    if device == "cpu":
-        return X
-    if device in ("cuda", "gpu"):
-        if not HAS_CUPY:
-            raise RuntimeError(
-                "CuPy is not installed. Install with: pip install cupy-cuda12x[ctk]"
-            )
-        if verbose:
-            print("Moving training data to CUDA GPU")
-        return to_gpu(X)
     if device == "auto":
         if cuda_available():
-            if verbose:
-                print("Moving training data to CUDA GPU")
-            return to_gpu(X)
-        if HAS_MLX:
+            device = "cuda"
+        elif not HAS_MLX:
+            return X
+        else:
             data_bytes = X.nbytes
             available = _available_memory(np)
             if data_bytes > available * 0.25:
@@ -289,10 +280,17 @@ def _move_to_device(X: np.ndarray, device: str, verbose: bool) -> np.ndarray:
                         f"available memory ({avail_mb:.0f} MB) — staying on CPU"
                     )
                 return X
-            if verbose:
-                print("Moving training data to MLX")
-            return to_mlx(X)
+            device = "mlx"
+    if device == "cpu":
         return X
+    if device in ("cuda", "gpu"):
+        if not HAS_CUPY:
+            raise RuntimeError(
+                "CuPy is not installed. Install with: pip install cupy-cuda12x[ctk]"
+            )
+        if verbose:
+            print("Moving training data to CUDA GPU")
+        return to_gpu(X)
     if device == "mlx":
         if not HAS_MLX:
             raise RuntimeError("MLX is not installed. Install with: pip install mlx")
