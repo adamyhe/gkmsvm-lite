@@ -765,10 +765,10 @@ def test_matches_lsgkm_gkmexplain(name, lsgkm_mode, mode):
         "ragged_t5_85",
     ],
 )
-@pytest.mark.parametrize("path", ["index", "join", "brute"])
+@pytest.mark.parametrize("path", ["table", "index", "join", "brute"])
 def test_matches_lsgkm_mode5_fixture_models(name, path):
-    """Mutation impact equals gkmexplain -m 5 through the l-mer index, the
-    masked join and the brute-force kernel."""
+    """Mutation impact equals gkmexplain -m 5 through the l-mer table (non-RBF),
+    the l-mer index, the masked join and the brute-force kernel."""
     from gkmsvm.explain import mutation_impact
     from gkmsvm.fasta import read_fasta
     from gkmsvm.importers.lsgkm import load_lsgkm_model
@@ -778,6 +778,9 @@ def test_matches_lsgkm_mode5_fixture_models(name, path):
     if not oracle.exists():
         pytest.skip("gkmexplain fixtures not generated")
     model = load_lsgkm_model(_FIXTURES / model_file)
+    model.use_lmer_table = path == "table"
+    if path == "table" and model._lmer_table_for(np) is None:
+        pytest.skip("no l-mer table for RBF kernels")
     model.use_lmer_index = path == "index"
     model.kernel.base.use_masked = path != "brute"
     seqs = [s for _, s in read_fasta(str(_FIXTURES / fasta))]
@@ -861,7 +864,7 @@ def test_matches_lsgkm_gkmexplain_on_mixed_queries(name, lsgkm_mode, mode):
 
 
 @pytest.mark.parametrize("name", _LSGKM_QUERY_MODELS)
-@pytest.mark.parametrize("path", ["index", "join", "brute"])
+@pytest.mark.parametrize("path", ["table", "index", "join", "brute"])
 def test_matches_lsgkm_mode5_on_mixed_queries(name, path):
     """Mutation impact at each query's central base ((L - 1) / 2), queries of
     different lengths in one call, equals gkmexplain -m 5."""
@@ -872,6 +875,9 @@ def test_matches_lsgkm_mode5_on_mixed_queries(name, path):
     if not oracle.exists():
         pytest.skip("gkmexplain fixtures not generated")
     model = load_lsgkm_model(_FIXTURES / f"{name}.model.txt.gz")
+    model.use_lmer_table = path == "table"
+    if path == "table" and model._lmer_table_for(np) is None:
+        pytest.skip("no l-mer table for RBF kernels")
     model.use_lmer_index = path == "index"
     model.kernel.base.use_masked = path != "brute"
     seqs = _query_seqs()

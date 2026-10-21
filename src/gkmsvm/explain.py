@@ -628,8 +628,7 @@ def _explain_lmer_metal(
 # [S_c, Wy] SV windows; the pair's delta u ^ y and its weights go round the
 # group as the l-mer path's neighbors do. Most pairs fall below min_matches,
 # so only the lanes holding a pair (a ballot) go round.
-_EXPLAIN_SV_METAL = (
-    """
+_EXPLAIN_SV_METAL = """
     uint tid = thread_position_in_threadgroup.x;
     uint tg = threads_per_threadgroup.x;
     uint lane = tid % 16;
@@ -669,16 +668,14 @@ _EXPLAIN_SV_METAL = (
         // Only the lanes holding a pair go round (the same set for the 16 lanes)
         ulong vote = (ulong)(simd_vote::vote_t)simd_ballot(my_a != 0.0f || my_b != 0.0f);
         uint pending = (uint)(vote >> src) & 0xFFFFu;
-"""
-    + _EXPLAIN_METAL_ROUND.replace(
-        """        uint n = min(16u, t_end - t0);
+""" + _EXPLAIN_METAL_ROUND.replace(
+    """        uint n = min(16u, t_end - t0);
         for (uint j = 0; j < n; j++) {
 """,
-        """        while (pending != 0u) {
+    """        while (pending != 0u) {
             uint j = ctz(pending);
             pending &= pending - 1u;
 """,
-    )
 )
 _metal_explain_sv = None
 
@@ -1879,7 +1876,7 @@ def mutation_impact(
             short = short.reshape(2, -1).any(axis=0)
 
     B = ref.shape[0]
-    bs = B if batch_size is None else model._min_batch_size(batch_size, table=False)
+    bs = B if batch_size is None else model._min_batch_size(batch_size)
     starts = range(0, B, bs)
     if verbose:
         from tqdm import tqdm
@@ -1901,8 +1898,18 @@ def mutation_impact(
                     L, (n, _rows(ref_lengths, s, bs)), (n, _rows(alt_lengths, s, bs))
                 ),
             )
-            k_both = model._sv_raw(bx)
             diag_r = base.raw_diag_packed(bx[:n], None if bx_rc is None else bx_rc[:n])
+            table = model._lmer_table_for(xp)
+            if table is not None:
+                # Non-RBF: linear in the SVs, so sum_s coef_s dK_raw / sqrt(K(sv, sv))
+                # is the l-mer table's alt minus ref (the table holds the SV norms)
+                raw = model._table_raw(bx, table)
+                dk = raw[n:] - raw[:n]
+                if base.normalize:
+                    dk = dk / xp.sqrt(xp.clip(diag_r.astype(dk.dtype), 1e-10, None))
+                parts.append(to_cpu(dk)[:, None])
+                continue
+            k_both = model._sv_raw(bx)
         else:
             k_both = base._raw_pairwise(both, model.support_sequences)
             diag_r = base._raw_diagonal(r)
