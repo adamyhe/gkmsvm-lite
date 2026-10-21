@@ -32,21 +32,11 @@ import numpy as np
 MAX_TABLE_L = 12
 
 
-def build_lmer_table(kernel, sv_packed, sv_rc_packed, sv_weights) -> np.ndarray | None:
-    """Table w over all 4^l packed l-mers, or None if the kernel has no plan.
-
-    sv_packed, sv_rc_packed: [S, W] uint32 packed SV windows (forward and RC;
-        sv_rc_packed is None when the kernel has no RC term).
-    sv_weights: [S] c_sv as above.
-    """
-    l = kernel.l
-    if l > MAX_TABLE_L or not hasattr(kernel, "_join_plan"):
-        return None
-    plan = kernel._join_plan()
-    if plan is None:
-        return None
-
-    n = 4**l
+def sv_lmer_weights(kernel, sv_packed, sv_rc_packed, sv_weights) -> np.ndarray:
+    """V [4^l] float64: V[v] = sum_sv c_sv (window-weighted occurrences of l-mer v
+    in the SV's forward windows and, with sv_rc_packed, its RC ones), from
+    packed SV windows on CPU and sv_weights [S] c_sv."""
+    n = 4**kernel.l
     coef = np.asarray(sv_weights, dtype=np.float64)[:, None]
     # Window weights follow each SV's own windows; an RC window carries the
     # weight of the forward window it came from (row_weights, rc=True). PAD
@@ -62,10 +52,26 @@ def build_lmer_table(kernel, sv_packed, sv_rc_packed, sv_weights) -> np.ndarray 
         wt = np.broadcast_to(wt, packed.shape).ravel()
         keep = keys < n
         V += np.bincount(keys[keep], weights=wt[keep], minlength=n)
+    return V
+
+
+def build_lmer_table(kernel, sv_packed, sv_rc_packed, sv_weights) -> np.ndarray | None:
+    """Table w over all 4^l packed l-mers, or None if the kernel has no plan.
+
+    sv_packed, sv_rc_packed: [S, W] uint32 packed SV windows (forward and RC;
+        sv_rc_packed is None when the kernel has no RC term).
+    sv_weights: [S] c_sv as above.
+    """
+    l = kernel.l
+    if l > MAX_TABLE_L or not hasattr(kernel, "_join_plan"):
+        return None
+    plan = kernel._join_plan()
+    if plan is None:
+        return None
 
     # Packed index = sum_k base_k 4^k, so in a C-order (4,)*l view axis a holds
     # position l - 1 - a
-    V = V.reshape((4,) * l)
+    V = sv_lmer_weights(kernel, sv_packed, sv_rc_packed, sv_weights).reshape((4,) * l)
 
     def marginal(S):
         keep = {l - 1 - int(p) for p in S}
