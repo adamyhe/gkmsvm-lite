@@ -20,12 +20,14 @@ lookups return many hits (see applies()), with l <= MAX_L.
 
 from __future__ import annotations
 
+from functools import cache
 from itertools import combinations, product
 
 import numpy as np
 from numba import njit, prange
 
 from gkmsvm.backend import to_cpu
+from gkmsvm.kernels.direct import row_stride
 
 # Neighbors per query window above which the masked join is used instead
 MAX_NEIGHBORS = 8192
@@ -568,11 +570,6 @@ _MUTANTS_SCRATCH_BYTES = 256 * 2**20
 # 8.9; the dsQTL -t 3 model has 18)
 _METAL_MUTANTS_MAX_DENSITY = 6.0
 
-_cuda_fn = None
-_cuda_mutants = None
-_metal_fn = None
-_metal_fn_w = None
-_metal_mutants = None
 # Rows per Metal launch: caps the int32 [levels, rows, S] counts
 _METAL_COUNT_BYTES = 256 * 2**20
 # Above this many distinct pair weights, MLX queries on CPU
@@ -582,6 +579,52 @@ _METAL_MAX_LEVELS = 16
 # an M4: 2.1x the CPU at 0.56 entries per l-mer, 1.08x at 2.2, 0.72x at 4.4,
 # 0.52x at 17.8, the dsQTL -t 3 model's)
 _METAL_QUERY_MAX_DENSITY = 2.5
+
+
+@cache
+def _cuda_fn(source, name):
+    import cupy as cp
+
+    return cp.RawKernel(source, name)
+
+
+@cache
+def _metal_query(weighted: bool):
+    """The Metal query kernel (_METAL_SRC, or _METAL_SRC_W with window weights)."""
+    import mlx.core as mx
+
+    if weighted:
+        return mx.fast.metal_kernel(
+            name="gkm_lmer_index_query_w",
+            input_names=["bx", "wx", "offsets", "ids", "vals", "masks", "levels"]
+            + ["params"],
+            output_names=["lo", "hi"],
+            source=_METAL_SRC_W,
+            atomic_outputs=True,
+        )
+    return mx.fast.metal_kernel(
+        name="gkm_lmer_index_query",
+        input_names=["bx", "offsets", "ids", "masks", "levels", "params"],
+        output_names=["counts"],
+        source=_METAL_SRC,
+        atomic_outputs=True,
+    )
+
+
+@cache
+def _metal_mutants():
+    import mlx.core as mx
+
+    return mx.fast.metal_kernel(
+        name="gkm_lmer_index_mutants",
+        input_names=["old", "nw", "ref", "offsets", "ids", "vals", "masks"]
+        + ["weights", "slot_wt", "inv_dx", "inv_dmut", "inv_ds", "coef"]
+        + ["params", "fparams"],
+        output_names=["scratch", "out"],
+        source=_METAL_MUTANTS,
+        header=_METAL_MUTANTS_HEADER,
+        atomic_outputs=True,
+    )
 
 
 class LmerIndex:
@@ -649,6 +692,18 @@ class LmerIndex:
             )
         return dev == "cuda"
 
+    @property
+    def _csr(self):
+        """The index arguments of the numba queries (see _add_window)."""
+        return (
+            self.offsets,
+            self.ids,
+            self.vals,
+            self.masks,
+            self.weights,
+            self.n_lmers,
+        )
+
     def nbytes(self) -> int:
         return self.offsets.nbytes + self.ids.nbytes + self.vals.nbytes
 
@@ -668,12 +723,7 @@ class LmerIndex:
             n_split = min(bx.shape[1], -(-numba.get_num_threads() // bx.shape[0]))
             return _query_cpu(
                 bx,
-                self.offsets,
-                self.ids,
-                self.vals,
-                self.masks,
-                self.weights,
-                self.n_lmers,
+                *self._csr,
                 self.S,
                 max(1, n_split),
                 self._wx(bx),
@@ -693,12 +743,7 @@ class LmerIndex:
         bx = np.ascontiguousarray(bx)
         return _query_reduce_cpu(
             bx,
-            self.offsets,
-            self.ids,
-            self.vals,
-            self.masks,
-            self.weights,
-            self.n_lmers,
+            *self._csr,
             self._wx(bx),
             np.ascontiguousarray(inv_dx, dtype=np.float64),
             np.ascontiguousarray(inv_ds, dtype=np.float64),
@@ -715,12 +760,7 @@ class LmerIndex:
         bx = np.ascontiguousarray(bx)
         return _query_impact_cpu(
             bx,
-            self.offsets,
-            self.ids,
-            self.vals,
-            self.masks,
-            self.weights,
-            self.n_lmers,
+            *self._csr,
             self._wx(bx),
             np.ascontiguousarray(inv_dr, dtype=np.float64),
             np.ascontiguousarray(inv_ds, dtype=np.float64),
@@ -769,12 +809,7 @@ class LmerIndex:
             np.ascontiguousarray(new),
             f64(ref),
             f64(ref_score),
-            self.offsets,
-            self.ids,
-            self.vals,
-            self.masks,
-            self.weights,
-            self.n_lmers,
+            *self._csr,
             np.zeros((L, 1, 0)) if slot_wt is None else f64(slot_wt),
             f64(inv_dx),
             f64(inv_dmut),
@@ -811,9 +846,6 @@ class LmerIndex:
     def _pairwise_cuda(self, bx):
         import cupy as cp
 
-        global _cuda_fn
-        if _cuda_fn is None:
-            _cuda_fn = cp.RawKernel(_CUDA_SRC, "lmer_index_query")
         offsets, ids, masks, weights, vals = self._arrays("cuda")
         bx = cp.ascontiguousarray(bx, dtype=cp.uint32)
         B, W = bx.shape
@@ -822,7 +854,7 @@ class LmerIndex:
         if weighted:
             wx_np = np.ascontiguousarray(self.row_weights(bx))
             wx = cp.asarray(wx_np)
-            wx_stride = W if wx_np.shape[0] > 1 else 0
+            wx_stride = row_stride(wx_np, W)
         else:
             wx = vals = cp.zeros(1, dtype=cp.uint8)
         out = cp.zeros((B, self.S), dtype=cp.float64)
@@ -830,7 +862,7 @@ class LmerIndex:
         block = 256
         for b0 in range(0, B, 65535):  # grid.y limit
             nb = min(65535, B - b0)
-            _cuda_fn(
+            _cuda_fn(_CUDA_SRC, "lmer_index_query")(
                 ((n_items + block - 1) // block, nb),
                 (block,),
                 (
@@ -857,31 +889,6 @@ class LmerIndex:
         """pairwise() in Metal: float32 on the device, combined from exact counts."""
         import mlx.core as mx
 
-        global _metal_fn, _metal_fn_w
-        if _metal_fn is None:
-            _metal_fn = mx.fast.metal_kernel(
-                name="gkm_lmer_index_query",
-                input_names=["bx", "offsets", "ids", "masks", "levels", "params"],
-                output_names=["counts"],
-                source=_METAL_SRC,
-                atomic_outputs=True,
-            )
-            _metal_fn_w = mx.fast.metal_kernel(
-                name="gkm_lmer_index_query_w",
-                input_names=[
-                    "bx",
-                    "wx",
-                    "offsets",
-                    "ids",
-                    "vals",
-                    "masks",
-                    "levels",
-                    "params",
-                ],
-                output_names=["lo", "hi"],
-                source=_METAL_SRC_W,
-                atomic_outputs=True,
-            )
         if not self.queries_on_device("mlx"):
             # One int32 [rows, S] block per level; with many levels or a dense
             # index, query on CPU, which shares memory with the GPU
@@ -893,9 +900,10 @@ class LmerIndex:
         bx_np = np.ascontiguousarray(to_cpu(bx), dtype=np.uint32)
         B, W = bx_np.shape
         weighted = vals is not None
+        query = _metal_query(weighted)
         if weighted:  # the query windows' weights (row_weights)
             wx_np = np.ascontiguousarray(self.row_weights(bx_np), dtype=np.uint32)
-            wx_stride = W if wx_np.shape[0] > 1 else 0
+            wx_stride = row_stride(wx_np, W)
         n_lev = len(self.table)
         words = 2 if weighted else 1
         rows = max(1, _METAL_COUNT_BYTES // (4 * words * n_lev * self.S))
@@ -916,7 +924,7 @@ class LmerIndex:
                     dtype=mx.int32,
                 )
                 wq = wx_np[b0 : b0 + nb] if wx_stride else wx_np
-                lo, hi = _metal_fn_w(
+                lo, hi = query(
                     inputs=[q, mx.array(wq.ravel()), offsets, ids, vals, masks]
                     + [levels, params],
                     output_shapes=[(n_lev * nb * self.S,)] * 2,
@@ -930,7 +938,7 @@ class LmerIndex:
                 params = mx.array(
                     [W, len(self.masks), self.S, self.n_lmers, nb], dtype=mx.int32
                 )
-                counts = _metal_fn(
+                counts = query(
                     inputs=[q, offsets, ids, masks, levels, params],
                     output_shapes=[(n_lev * nb * self.S,)],
                     output_dtypes=[mx.int32],
@@ -948,7 +956,6 @@ class LmerIndex:
         """mutants() on ref's device (CUDA or MLX): [4, L, B] there."""
         from gkmsvm.kernels.packed import device_of
 
-        global _cuda_mutants, _metal_mutants
         L, B, l = old.shape
         S = self.S
         weighted = len(self.vals) > 0
@@ -963,8 +970,6 @@ class LmerIndex:
         if device_of(ref) == "cuda":
             import cupy as cp
 
-            if _cuda_mutants is None:
-                _cuda_mutants = cp.RawKernel(_MUTANTS_CUDA, "lmer_index_mutants")
             offsets, ids, masks, weights, vals = self._arrays("cuda")
             if vals is None:
                 vals = cp.zeros(1, dtype=cp.uint8)
@@ -992,7 +997,7 @@ class LmerIndex:
             for i0 in range(0, n_items, per_launch):
                 n = min(per_launch, n_items - i0)
                 scratch[: n * 5 * S] = 0
-                _cuda_mutants(
+                _cuda_fn(_MUTANTS_CUDA, "lmer_index_mutants")(
                     (n,),
                     (_MUTANTS_THREADS,),
                     arrays
@@ -1007,17 +1012,6 @@ class LmerIndex:
 
         if self.offsets[-1] >= 2**31:
             raise ValueError("l-mer index too large for the Metal kernel")
-        if _metal_mutants is None:
-            _metal_mutants = mx.fast.metal_kernel(
-                name="gkm_lmer_index_mutants",
-                input_names=["old", "nw", "ref", "offsets", "ids", "vals", "masks"]
-                + ["weights", "slot_wt", "inv_dx", "inv_dmut", "inv_ds", "coef"]
-                + ["params", "fparams"],
-                output_names=["scratch", "out"],
-                source=_METAL_MUTANTS,
-                header=_METAL_MUTANTS_HEADER,
-                atomic_outputs=True,
-            )
         offsets, ids, masks, _, vals = self._arrays("mlx")
         if "mlx_weights" not in self._dev:
             self._dev["mlx_weights"] = mx.array(self.weights.astype(np.float32))
@@ -1044,7 +1038,7 @@ class LmerIndex:
         parts = []
         for i0 in range(0, n_items, per_launch):
             n = min(per_launch, n_items - i0)
-            _, part = _metal_mutants(
+            _, part = _metal_mutants()(
                 inputs=inputs
                 + [mx.array((i0,) + ints, dtype=mx.int64).astype(mx.int32)]
                 + [mx.array(floats, dtype=mx.float32)],

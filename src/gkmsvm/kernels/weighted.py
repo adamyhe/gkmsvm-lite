@@ -18,6 +18,8 @@ position and the sequence length.
 
 from __future__ import annotations
 
+from functools import cache
+
 import numpy as np
 from numba import njit, prange
 
@@ -26,6 +28,7 @@ from gkmsvm.kernels.direct import (
     _packed_mismatches,
     _rc_window,
     _spans,
+    row_stride,
 )
 from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
 from gkmsvm.kernels.packed import _concat_windows, device_of
@@ -302,31 +305,40 @@ _METAL_BRUTE_W = """
     result[idx] = acc;
 """
 
-_cuda_weighted = None
-_metal_weighted = {}
+
+@cache
+def _cuda_weighted():
+    import cupy as cp
+
+    return cp.RawModule(code=_WEIGHTED_CUDA)
 
 
-def _stride(w, W):
-    return W if w.shape[0] > 1 else 0
+@cache
+def _metal_weighted(diag: bool):
+    import mlx.core as mx
+
+    return mx.fast.metal_kernel(
+        name="gkm_brute_weighted" + ("_diag" if diag else ""),
+        input_names=["bx", "wx", "by", "wy", "table", "params"],
+        output_names=["result"],
+        source=_METAL_BRUTE_W.replace("DIAG", "true" if diag else "false"),
+    )
 
 
 def _brute_weighted_gpu(bx, wx, by, wy, table, l, min_matches, diag=False):
     """CUDA [B, S] brute force (diag: [B], row b against row b of by)."""
     import cupy as cp
 
-    global _cuda_weighted
-    if _cuda_weighted is None:
-        _cuda_weighted = cp.RawModule(code=_WEIGHTED_CUDA)
     bx = cp.ascontiguousarray(bx, dtype=cp.uint32)
     B, Wx = bx.shape
     S, Wy = by.shape
-    args_w = (cp.asarray(wx, dtype=cp.float64), np.int32(_stride(wx, Wx)))
-    args_wy = (cp.asarray(wy, dtype=cp.float64), np.int32(_stride(wy, Wy)))
+    args_w = (cp.asarray(wx, dtype=cp.float64), np.int32(row_stride(wx, Wx)))
+    args_wy = (cp.asarray(wy, dtype=cp.float64), np.int32(row_stride(wy, Wy)))
     table_d = cp.asarray(table, dtype=cp.float64)
     block = 256
     if diag:
         result = cp.empty(B, dtype=cp.float64)
-        _cuda_weighted.get_function("cross_diag_weighted")(
+        _cuda_weighted().get_function("cross_diag_weighted")(
             ((B + block - 1) // block,),
             (block,),
             (bx, *args_w, cp.ascontiguousarray(by, dtype=cp.uint32), *args_wy)
@@ -337,7 +349,7 @@ def _brute_weighted_gpu(bx, wx, by, wy, table, l, min_matches, diag=False):
     total = B * S
     result = cp.empty(total, dtype=cp.float64)
     by_t = cp.ascontiguousarray(cp.asarray(by, dtype=cp.uint32).T)
-    _cuda_weighted.get_function("brute_weighted")(
+    _cuda_weighted().get_function("brute_weighted")(
         ((total + block - 1) // block,),
         (block,),
         (bx, *args_w, by_t, *args_wy, table_d, result, np.int64(total))
@@ -351,19 +363,12 @@ def _brute_weighted_mlx(bx, wx, by, wy, table, l, min_matches, diag=False):
     """Metal [B, S] brute force in float32 (diag: [B], row b against row b of by)."""
     import mlx.core as mx
 
-    if diag not in _metal_weighted:
-        _metal_weighted[diag] = mx.fast.metal_kernel(
-            name="gkm_brute_weighted" + ("_diag" if diag else ""),
-            input_names=["bx", "wx", "by", "wy", "table", "params"],
-            output_names=["result"],
-            source=_METAL_BRUTE_W.replace("DIAG", "true" if diag else "false"),
-        )
     B, Wx = bx.shape
     S, Wy = by.shape
     total = B if diag else B * S
-    params = [total, S, Wx, Wy, l, min_matches, _stride(wx, Wx), _stride(wy, Wy)]
+    params = [total, S, Wx, Wy, l, min_matches, row_stride(wx, Wx), row_stride(wy, Wy)]
     block = min(total, 256)
-    out = _metal_weighted[diag](
+    out = _metal_weighted(diag)(
         inputs=[
             mx.array(np.asarray(bx, dtype=np.uint32)),
             mx.array(np.asarray(wx, dtype=np.float32)),

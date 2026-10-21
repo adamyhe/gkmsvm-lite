@@ -880,10 +880,7 @@ class TestLmerIndexMLX:
         if dense:
             monkeypatch.setattr(lmer_index, "_METAL_QUERY_MAX_DENSITY", 0.0)
             monkeypatch.setattr(
-                lmer_index, "_metal_fn", lambda **k: pytest.fail("Metal")
-            )
-            monkeypatch.setattr(
-                lmer_index, "_metal_fn_w", lambda **k: pytest.fail("Metal")
+                lmer_index, "_metal_query", lambda weighted: pytest.fail("Metal")
             )
         got = index.pairwise(to_mlx(bx))
         assert isinstance(got, mx.array)
