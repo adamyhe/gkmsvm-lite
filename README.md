@@ -9,10 +9,12 @@ A Python implementation of gapped k-mer SVMs (gkm-SVMs) for DNA sequence analysi
 ## Install
 
 ```bash
-pip install gkmsvm-lite              # CPU (NumPy + Numba)
-pip install gkmsvm-lite[gpu]         # NVIDIA GPU (+ CuPy)
-pip install gkmsvm-lite[mlx]         # Apple Silicon GPU (+ MLX)
+uv pip install gkmsvm-lite              # CPU (NumPy + Numba)
+uv pip install "gkmsvm-lite[gpu]"       # NVIDIA GPU (+ CuPy)
+uv pip install "gkmsvm-lite[mlx]"       # Apple Silicon GPU (+ MLX)
 ```
+
+With pip, drop the `uv` (`pip install "gkmsvm-lite[gpu]"`).
 
 For development installation from source, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
