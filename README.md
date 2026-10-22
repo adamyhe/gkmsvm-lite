@@ -14,7 +14,7 @@ uv pip install "gkmsvm-lite[gpu]"       # NVIDIA GPU (+ CuPy)
 uv pip install "gkmsvm-lite[mlx]"       # Apple Silicon GPU (+ MLX)
 ```
 
-With pip, drop the `uv` (`pip install "gkmsvm-lite[gpu]"`).
+With pip, drop the `uv` (`pip install "gkmsvm-lite[gpu]"`). In a uv project, instead use `uv add "gkmsvm-lite[gpu]"`
 
 For development installation from source, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -94,27 +94,27 @@ See [docs/models.md](docs/models.md) for format details, training options, and e
 
 All six LS-GKM kernel types are supported:
 
-| `-t` | Name | Description |
-|------|------|-------------|
-| 0 | gkm_cnt | Direct gapped k-mer count |
-| 1 | gkm_estfull | Estimated full l-mer |
-| 2 | gkm_esttrunc | Estimated truncated l-mer (LS-GKM default) |
-| 3 | gkmrbf | RBF-transformed estimated |
-| 4 | wgkm | Center-weighted gapped k-mer |
-| 5 | wgkmrbf | Center-weighted RBF |
+| `-t` | Name         | Description                                |
+| ---- | ------------ | ------------------------------------------ |
+| 0    | gkm_cnt      | Direct gapped k-mer count                  |
+| 1    | gkm_estfull  | Estimated full l-mer                       |
+| 2    | gkm_esttrunc | Estimated truncated l-mer (LS-GKM default) |
+| 3    | gkmrbf       | RBF-transformed estimated                  |
+| 4    | wgkm         | Center-weighted gapped k-mer               |
+| 5    | wgkmrbf      | Center-weighted RBF                        |
 
 ## Documentation
 
-| Guide | Contents |
-|---|---|
-| [CLI reference](docs/cli.md) | All `gkmsvm` subcommands, flags, and usage examples |
-| [Loading and training models](docs/models.md) | Importing from all formats, training SVC/SVR, solver selection, kernel types |
-| [Scoring and variant effects](docs/scoring.md) | Inference, batch scoring, VEP, GPU acceleration, memory management |
-| [Interpretation](docs/interpretation.md) | GkmExplain, ISM, when to use each, why gradients don't work |
-| [Performance](docs/performance.md) | Benchmarks, optimization details, tuning guidance |
-| [Validation](docs/validation.md) | Oracle tests against LS-GKM, GkmExplain paper dsQTL reproduction |
-| [Design decisions](docs/design.md) | Architecture, kernel math, format specifications |
-| [Roadmap](docs/roadmap.md) | Completed features and what's next |
+| Guide                                          | Contents                                                                     |
+| ---------------------------------------------- | ---------------------------------------------------------------------------- |
+| [CLI reference](docs/cli.md)                   | All `gkmsvm` subcommands, flags, and usage examples                          |
+| [Loading and training models](docs/models.md)  | Importing from all formats, training SVC/SVR, solver selection, kernel types |
+| [Scoring and variant effects](docs/scoring.md) | Inference, batch scoring, VEP, GPU acceleration, memory management           |
+| [Interpretation](docs/interpretation.md)       | GkmExplain, ISM, when to use each, why gradients don't work                  |
+| [Performance](docs/performance.md)             | Benchmarks, optimization details, tuning guidance                            |
+| [Validation](docs/validation.md)               | Oracle tests against LS-GKM, GkmExplain paper dsQTL reproduction             |
+| [Design decisions](docs/design.md)             | Architecture, kernel math, format specifications                             |
+| [Roadmap](docs/roadmap.md)                     | Completed features and what's next                                           |
 
 ## Citation
 
