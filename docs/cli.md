@@ -89,7 +89,7 @@ Accepts the same kernel and device options as `train`.
 
 ## explain
 
-Compute GkmExplain hypothetical attribution scores (any kernel type). Outputs two `.npz` files directly usable with [TF-MoDISco](https://github.com/kundajelab/tfmodisco) (`pip install modisco`; tfmodisco-lite was merged into it).
+Compute GkmExplain hypothetical attribution scores (any kernel type). Outputs two `.npz` files directly usable with [TF-MoDISco](https://github.com/kundajelab/tfmodisco) (`uv pip install modisco`; tfmodisco-lite was merged into it).
 
 ```bash
 gkmsvm explain -m model.npz -i sequences.fa -o attr.npz -s seqs.npz --device cuda
