@@ -6,8 +6,8 @@ transparently.
 
 Install extras for GPU support::
 
-    pip install gkmsvm-lite[gpu]   # NVIDIA (CuPy)
-    pip install gkmsvm-lite[mlx]   # Apple Silicon (MLX)
+    uv pip install "gkmsvm-lite[gpu]"   # NVIDIA (CuPy)
+    uv pip install "gkmsvm-lite[mlx]"   # Apple Silicon (MLX)
 """
 
 from __future__ import annotations
@@ -61,7 +61,7 @@ def to_gpu(x: np.ndarray) -> Any:
     """Move a numpy array to GPU (CuPy)."""
     if not HAS_CUPY:
         raise RuntimeError(
-            "CuPy is not installed. Install with: pip install gkmsvm-lite[gpu]"
+            'CuPy is not installed. Install with: uv pip install "gkmsvm-lite[gpu]"'
         )
     return cp.asarray(x)
 
@@ -70,7 +70,7 @@ def to_mlx(x: np.ndarray) -> Any:
     """Move a numpy array to MLX."""
     if not HAS_MLX:
         raise RuntimeError(
-            "MLX is not installed. Install with: pip install gkmsvm-lite[mlx]"
+            'MLX is not installed. Install with: uv pip install "gkmsvm-lite[mlx]"'
         )
     return mx.array(x)
 
