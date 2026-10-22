@@ -6,9 +6,10 @@
 git clone https://github.com/adamyhe/gkmsvm-lite.git
 cd gkmsvm-lite
 
-uv pip install -e ".[dev]"          # CPU + test dependencies
-uv pip install -e ".[dev,gpu]"      # + CuPy GPU support
-uv pip install -e ".[dev,bench]"    # + benchmark dependencies (scikit-learn, py2bit)
+uv pip install -e "." --group dev              # CPU + test dependencies
+uv pip install -e ".[gpu]" --group dev         # + CuPy (NVIDIA GPU)
+uv pip install -e ".[mlx]" --group dev         # + MLX (Apple Silicon GPU)
+uv pip install -e ".[examples]" --group dev    # + notebook and benchmark dependencies
 ```
 
 ## Run tests

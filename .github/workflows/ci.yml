@@ -21,8 +21,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install uv
-        run: pip install uv
+      - uses: astral-sh/setup-uv@v6
 
       - name: Install dependencies
         run: uv pip install -e "." --group dev --system
@@ -39,14 +38,13 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install build tools
-        run: pip install build twine
+      - uses: astral-sh/setup-uv@v6
 
       - name: Build sdist and wheel
-        run: python -m build
+        run: uv build
 
       - name: Check package metadata
-        run: twine check dist/*
+        run: uvx twine check dist/*
 
       - uses: actions/upload-artifact@v4
         with:

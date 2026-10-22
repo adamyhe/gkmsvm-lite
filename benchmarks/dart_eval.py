@@ -47,7 +47,7 @@ Data:
   Download from Synapse (syn59522070). Each task directory includes a
   pre-exported data.h5 with one-hot sequences and labels.
 
-    pip install synapseclient && synapse login
+    uv pip install synapseclient && synapse login
     export DART_WORK_DIR=/path/to/dart-eval
     synapse get -r syn60581044 --downloadLocation $DART_WORK_DIR/refs
     synapse get -r syn60581041 --downloadLocation $DART_WORK_DIR/task_4_chromatin_activity
