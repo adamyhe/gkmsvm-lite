@@ -19,9 +19,11 @@ and the 28,309 dsQTL variants, timing the three scoring methods of Fig. 1D:
               this with the Beer lab's deltasvm.pl, not an LS-GKM binary, so
               there is no LS-GKM row. Uses the table from the deltaSVM run.
 
-Every run is a separate process. wall_s includes model loading and, for
-gkmsvm-lite, JIT compilation; compute_s excludes both (for LS-GKM it equals
-wall_s). peak_rss_mb is that process's peak RSS, gpu_pool_mb the CuPy memory
+Every run is a separate process. wall_s includes process start-up and model
+loading, never compiling: an untimed rehearsal process first compiles every
+kernel the timed one uses into the disk caches, and jit_compiles counts cache
+files a timed run wrote anyway (expected 0). compute_s excludes start-up and
+loading (for LS-GKM it equals wall_s). peak_rss_mb is that process's peak RSS, gpu_pool_mb the CuPy memory
 pool size at the end of the run. max_abs_diff compares each gkmsvm-lite result
 with LS-GKM's output from the same run set.
 
@@ -41,6 +43,11 @@ With --mlsgkm-bin, mLS-GKM (a multithreaded LS-GKM fork; gkmpredict -t N -T 1
 rows' max_abs_diff compare it with the first C run (LS-GKM). Build it with:
   git clone https://github.com/harmstonlab/mLS-GKM
   cd mLS-GKM/src && make clean && make && make install   # binaries in mLS-GKM/bin
+
+To run the CPU and GPU halves on different machines (benchmarks/sherlock/),
+run --device cpu on one and --device cuda --gpu-only on the other, both with
+the same --arrays directory, then --merge-parts CPU_TSV GPU_TSV --arrays DIR,
+which also fills the GPU rows' max_abs_diff.
 
 Usage:
   python benchmarks/timing_variants.py --device cuda
@@ -68,14 +75,18 @@ from _common import (
     emit_result,
     gpu_pool_mb,
     gpu_sync,
+    jit_cache_files,
     lsgkm_binary,
     lsgkm_default_threads,
     lsgkm_has_option,
-    lsgkm_version,
+    lsgkm_sources,
+    merge_parts,
     mlsgkm_binary,
     mlsgkm_version,
+    rewrite_table,
     run_measured,
     set_cpu_threads,
+    warm_binaries,
     warm_jit_cache,
     worker_result,
     write_seqs,
@@ -130,6 +141,10 @@ def _prepare(args, work: Path) -> dict:
     bench._load_paper_model(tag, args.negset)  # downloads the model file
     model_path = bench.MODEL_DIR / f"gkmsvm_{tag}_negset{args.negset}.model.txt"
 
+    # Every run reads the model from the work dir (node-local under Slurm),
+    # not from the shared filesystem the download landed on
+    shutil.copy(model_path, work / model_path.name)
+    model_path = work / model_path.name
     np.savez(work / "variants.npz", ref=ref, alt=alt, ref19=ref19, alt19=alt19)
     write_seqs(work / "ref.fa", _decode(ref), "v")
     write_seqs(work / "alt.fa", _decode(alt), "v")
@@ -159,7 +174,15 @@ def _score_deltasvm(spec: dict) -> None:
 
     work = Path(spec["work"])
     t0 = time.perf_counter()
-    table = work / "lite_deltaSVM_cpu.npy"
+    # The deltaSVM run's table: CPU's, or CUDA's in a --gpu-only part
+    table = next(
+        (
+            p
+            for p in (work / f"lite_deltaSVM_{d}.npy" for d in ("cpu", "cuda"))
+            if p.exists()
+        ),
+        work / "lite_deltaSVM_cpu.npy",
+    )
     if table.exists():  # gkmpredict scale: weight + bias
         weights = np.load(table) - float(load_lsgkm_model(spec["model"]).bias)
     else:
@@ -175,6 +198,8 @@ def _score_deltasvm(spec: dict) -> None:
     ref, alt = data["ref19"], data["alt19"]
     _ = dsvm.score_variants(ref[:WARMUP], alt[:WARMUP])  # JIT
     gpu_sync()
+    if spec.get("rehearsal"):
+        return
     load_s = time.perf_counter() - t0
 
     t0 = time.perf_counter()
@@ -204,6 +229,11 @@ def _worker(spec: dict) -> None:
     # Warm up JIT / kernel compilation and packed-SV caches on a few variants
     if method == "deltaSVM":
         _ = model(ref[:WARMUP], batch_size=bs)
+        if spec.get("rehearsal"):
+            # The whole build: to_deltasvm scores l-mers in blocks whose size
+            # sets CuPy reductions' launch configuration, compiled per
+            # configuration, so a smaller warm-up misses some of its kernels
+            model.to_deltasvm(device="cpu", query_norm=True)
     else:
         _ = model.score_variants(
             ref[:WARMUP],
@@ -212,6 +242,8 @@ def _worker(spec: dict) -> None:
             method="kernel" if method == "ISM" else "gkmexplain",
         )
     gpu_sync()
+    if spec.get("rehearsal"):  # untimed: fills the kernel caches, then exits
+        return
     load_s = time.perf_counter() - t0
 
     t0 = time.perf_counter()
@@ -295,6 +327,35 @@ def _lsgkm_scores(method: str, work: Path, alt_base: np.ndarray) -> np.ndarray:
     return impacts[np.arange(len(impacts)), alt_base]
 
 
+def _comparable(method: str, scores: np.ndarray) -> np.ndarray:
+    """A gkmsvm-lite result on the items LS-GKM scored (deltaSVM: canonical l-mers)."""
+    return scores[_nonredundant_lmers()] if method == "deltaSVM" else scores
+
+
+def _merge(args) -> None:
+    """Merge a CPU and a GPU part, filling the GPU rows' max_abs_diff against
+    the CPU part's LS-GKM reference scores (both parts saved to --arrays)."""
+    import pandas as pd
+
+    out = merge_parts(dict(zip(("cpu", "gpu"), args.merge_parts)), args.output)
+    if not args.arrays:
+        return
+    arrays = Path(args.arrays)
+    df = pd.read_csv(out, sep="\t", comment="#")
+    for i, r in df.iterrows():
+        ref = arrays / f"reference_{r['method']}.npy"
+        ours = arrays / f"lite_{r['method']}_{r['device']}.npy"
+        if (
+            r["implementation"] == "gkmsvm-lite"
+            and pd.isna(r["max_abs_diff"])
+            and r["status"] == "ok"
+            and ref.exists()
+            and ours.exists()
+        ):
+            df.loc[i, "max_abs_diff"] = float(np.abs(np.load(ours) - np.load(ref)).max())
+    rewrite_table(out, df.astype({"threads": "Int64"}))
+
+
 # ── Main ───────────────────────────────────────────────────────────
 
 
@@ -370,6 +431,25 @@ def main():
         action="store_true",
         help="Keep the temporary directory with inputs and outputs",
     )
+    parser.add_argument(
+        "--gpu-only",
+        action="store_true",
+        help="Time only gkmsvm-lite on CUDA (no LS-GKM, mLS-GKM or gkmsvm-lite "
+        "CPU), for a GPU part merged with a CPU part's file",
+    )
+    parser.add_argument(
+        "--arrays",
+        default=None,
+        help="Directory to save each run's scores in, so --merge-parts can "
+        "compare a GPU part's with the CPU part's LS-GKM scores",
+    )
+    parser.add_argument(
+        "--merge-parts",
+        nargs=2,
+        metavar=("CPU_TSV", "GPU_TSV"),
+        help="Write --output from a --device cpu file and a --gpu-only file, "
+        "filling max_abs_diff of the GPU rows from --arrays",
+    )
     parser.add_argument("--output", default=str(RESULTS / "timing_variants.tsv"))
     parser.add_argument("--worker", default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -377,6 +457,11 @@ def main():
     if args.worker:
         _worker(json.loads(args.worker))
         return
+    if args.merge_parts:
+        _merge(args)
+        return
+    if args.gpu_only and args.device != "cuda":
+        parser.error("--gpu-only needs --device cuda")
     # Workers inherit this through the environment
     lite_threads = set_cpu_threads(args.threads)
     if not args.no_warm_jit:
@@ -398,7 +483,7 @@ def main():
     # C implementations: name -> (binaries, CPU thread counts for each binary)
     need = {"gkmpredict"} | ({"gkmexplain"} if "GkmExplain" in args.methods else set())
     c_impls = {}
-    if not args.no_lsgkm:
+    if not args.no_lsgkm and not args.gpu_only:
         bins = {
             n: lsgkm_binary(n, args.conda_env, args.lsgkm_bin)
             for n in ("gkmpredict", "gkmexplain")
@@ -420,7 +505,7 @@ def main():
                 for n, b in bins.items()
             },
         )
-    if args.mlsgkm_bin:
+    if args.mlsgkm_bin and not args.gpu_only:
         bins = {
             n: mlsgkm_binary(n, args.mlsgkm_bin) for n in ("gkmpredict", "gkmexplain")
         }
@@ -430,6 +515,8 @@ def main():
         c_impls[MLSGKM] = (bins, {n: cpu_threads for n in bins})
     for impl, (bins, thr) in c_impls.items():
         print(f"{impl}: {bins}  threads: {thr}")
+    # Untimed: page in the C binaries before their first timed run
+    warm_binaries(*(b for bins, _ in c_impls.values() for b in bins.values()))
 
     work = Path(tempfile.mkdtemp(prefix="timing_variants_"))
     print(f"Work dir: {work}")
@@ -441,9 +528,12 @@ def main():
     if MLSGKM in c_impls and "GkmExplain" in args.methods and not rbf_model:
         print(f"{MLSGKM} gkmexplain skipped: wrong for non-RBF models")
     # (device, CPU threads) for each gkmsvm-lite run
-    lite_runs = [("cpu", t) for t in cpu_threads] + (
+    lite_runs = ([] if args.gpu_only else [("cpu", t) for t in cpu_threads]) + (
         [("cuda", lite_threads)] if args.device == "cuda" else []
     )
+    arrays = Path(args.arrays) if args.arrays else None
+    if arrays:
+        arrays.mkdir(parents=True, exist_ok=True)
     n_items = {
         "ISM": info["n_variants"],
         "GkmExplain": info["n_variants"],
@@ -485,6 +575,8 @@ def main():
                 scores = _lsgkm_scores(method, work, info["alt_base"])
                 if ref_scores is None:  # the first C run is the reference
                     ref_scores = scores
+                    if arrays:
+                        np.save(arrays / f"reference_{method}.npy", scores)
                 else:
                     diff = float(np.abs(scores - ref_scores).max())
             n = (
@@ -514,26 +606,43 @@ def main():
                 + f"  [{status}]"
             )
 
+        base = {
+            "method": method,
+            "model": info["model"],
+            "work": str(work),
+            "batch_size": args.batch_size,
+        }
+        # Untimed rehearsal per device: a worker that makes the timed one's
+        # warm-up call and exits, so every kernel the timed process runs is
+        # compiled into the disk caches first (wall_s includes start-up and
+        # loading those caches, never compiling)
+        for device in dict.fromkeys(d for d, _ in lite_runs):
+            spec = {**base, "device": device, "threads": lite_threads, "rehearsal": True}
+            r = run_measured([sys.executable, __file__, "--worker", json.dumps(spec)])
+            if r.status != "ok":
+                print(f"  rehearsal {device} {r.status}: {r.stderr[-300:]}")
         for device, n_thr in lite_runs:
-            spec = {
-                "method": method,
-                "device": device,
-                "model": info["model"],
-                "work": str(work),
-                "batch_size": args.batch_size,
-                "threads": n_thr,
-            }
+            spec = {**base, "device": device, "threads": n_thr}
+            cached = jit_cache_files()
             m = run_measured(
                 [sys.executable, __file__, "--worker", json.dumps(spec)],
                 timeout=args.timeout,
             )
+            # Kernels the timed run compiled (cache files it wrote): should be 0
+            compiled = len(jit_cache_files() - cached)
+            if compiled:
+                print(
+                    f"  WARNING: gkmsvm-lite {device} compiled {compiled} kernel "
+                    "cache file(s) during its timed run; wall_s includes compiling"
+                )
             res = worker_result(m.stdout) or {}
             diff = None
-            if m.status == "ok" and ref_scores is not None:
-                ours = np.load(work / f"lite_{method}_{device}.npy")
-                if method == "deltaSVM":
-                    ours = ours[np.load(work / "lmers.npy")]
-                diff = float(np.abs(ours - ref_scores).max())
+            if m.status == "ok":
+                ours = _comparable(method, np.load(work / f"lite_{method}_{device}.npy"))
+                if arrays:
+                    np.save(arrays / f"lite_{method}_{device}.npy", ours)
+                if ref_scores is not None:
+                    diff = float(np.abs(ours - ref_scores).max())
             if m.status != "ok":
                 print(f"  gkmsvm-lite {device} {m.status}: {m.stderr[-300:]}")
             rows.append(
@@ -549,6 +658,7 @@ def main():
                     "peak_rss_mb": m.peak_rss_mb,
                     "gpu_pool_mb": res.get("gpu_pool_mb"),
                     "max_abs_diff": diff,
+                    "jit_compiles": compiled,
                 }
             )
             r = rows[-1]
@@ -574,9 +684,13 @@ def main():
         n_variants=info["n_variants"],
         batch_size=args.batch_size,
         lite_cpu_threads=",".join(str(t) for t in cpu_threads),
-        lsgkm=None if args.no_lsgkm else lsgkm_version(args.conda_env),
-        mlsgkm=mlsgkm_version(args.mlsgkm_bin),
-        binaries=json.dumps({impl: bins for impl, (bins, _) in c_impls.items()}),
+        lsgkm=lsgkm_sources(c_impls["LS-GKM"][0], args.conda_env)
+        if "LS-GKM" in c_impls
+        else None,
+        mlsgkm=None if args.gpu_only else mlsgkm_version(args.mlsgkm_bin),
+        binaries=json.dumps({impl: bins for impl, (bins, _) in c_impls.items()})
+        if c_impls
+        else None,
     )
     if args.keep_work:
         print(f"Kept {work}")

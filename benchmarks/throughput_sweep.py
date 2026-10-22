@@ -49,11 +49,13 @@ from _common import (
     lsgkm_binary,
     lsgkm_default_threads,
     lsgkm_has_option,
+    merge_parts,
     mlsgkm_binary,
     mlsgkm_version,
     read_seqs,
     run_measured,
     set_cpu_threads,
+    warm_binaries,
     worker_result,
     write_seqs,
     write_tsv,
@@ -153,6 +155,18 @@ def main():
         "(-t --threads -T 1)",
     )
     parser.add_argument("--timeout", type=float, default=6 * 3600)
+    parser.add_argument(
+        "--gpu-only",
+        action="store_true",
+        help="Time only gkmsvm-lite on CUDA (no LS-GKM, mLS-GKM or gkmsvm-lite "
+        "CPU), for a GPU part merged with a CPU part's file",
+    )
+    parser.add_argument(
+        "--merge-parts",
+        nargs=2,
+        metavar=("CPU_TSV", "GPU_TSV"),
+        help="Write --output from a --device cpu file and a --gpu-only file",
+    )
     parser.add_argument("--output", default=str(RESULTS / "throughput.tsv"))
     parser.add_argument("--worker", default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -160,6 +174,11 @@ def main():
     if args.worker:
         _worker(json.loads(args.worker))
         return
+    if args.merge_parts:
+        merge_parts(dict(zip(("cpu", "gpu"), args.merge_parts)), args.output)
+        return
+    if args.gpu_only and args.device != "cuda":
+        parser.error("--gpu-only needs --device cuda")
 
     import pandas as pd
     from gkmsvm import load_lsgkm_model
@@ -167,7 +186,7 @@ def main():
     lite_threads = set_cpu_threads(args.threads)
     # C gkmpredict runs: (implementation, binary, CPU threads)
     c_runs = []
-    if not args.no_lsgkm:
+    if not args.no_lsgkm and not args.gpu_only:
         gkmpredict = lsgkm_binary("gkmpredict", args.conda_env, args.lsgkm_bin)
         if gkmpredict is None:
             sys.exit("gkmpredict not found; pass --lsgkm-bin or --no-lsgkm")
@@ -179,7 +198,7 @@ def main():
                 args.threads if lsgkm_has_option(gkmpredict, "-T") else 1,
             )
         )
-    if args.mlsgkm_bin:
+    if args.mlsgkm_bin and not args.gpu_only:
         gkmpredict = mlsgkm_binary("gkmpredict", args.mlsgkm_bin)
         if gkmpredict is None:
             sys.exit(f"gkmpredict not found in {args.mlsgkm_bin}")
@@ -190,7 +209,15 @@ def main():
     sizes = sorted({S if s == "max" else min(int(s), S) for s in args.sizes.split(",")})
     order = np.random.default_rng(0).permutation(S)
     kernels = args.kernels.split(",")
-    devices = ["cpu", "cuda"] if args.device == "cuda" else ["cpu"]
+    devices = (
+        ["cuda"]
+        if args.gpu_only
+        else ["cpu", "cuda"]
+        if args.device == "cuda"
+        else ["cpu"]
+    )
+    # Untimed: page in the C binaries before their first timed run
+    warm_binaries(*(b for _, b, _ in c_runs))
 
     work = Path(tempfile.mkdtemp(prefix="throughput_"))
     queries = work / "queries.fa"
@@ -291,7 +318,8 @@ def main():
         args.device,
         model=MODEL_PATH.name,
         c_threads=",".join(f"{impl}:{t}" for impl, _, t in c_runs) or None,
-        mlsgkm=mlsgkm_version(args.mlsgkm_bin),
+        c_binaries=",".join(f"{impl}:{b}" for impl, b, _ in c_runs) or None,
+        mlsgkm=None if args.gpu_only else mlsgkm_version(args.mlsgkm_bin),
         lite_cpu_threads=lite_threads,
     )
 
