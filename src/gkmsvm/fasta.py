@@ -155,7 +155,7 @@ def extract_loci(
         import pyfaidx
     except ImportError as e:
         raise ImportError(
-            "extract_loci requires pyfaidx. Install with: pip install pyfaidx"
+            "extract_loci requires pyfaidx. Install with: uv pip install pyfaidx"
         ) from e
 
     if isinstance(sequences, (str, Path)):

@@ -58,11 +58,14 @@ conda run -n "$LSGKM_ENV" which gkmtrain >/dev/null \
 
 if ! conda env list 2>/dev/null | grep -q "^${LITE_ENV} "; then
     echo ">>> Creating gkmsvm-lite env '$LITE_ENV'"
-    $CONDA create -n "$LITE_ENV" python=3.11 -y
+    $CONDA create -n "$LITE_ENV" -c conda-forge python=3.11 uv -y
 fi
+# uv, not pip (it also ignores pip.conf and PIP_* settings)
+conda run -n "$LITE_ENV" which uv >/dev/null 2>&1 \
+    || $CONDA install -n "$LITE_ENV" -c conda-forge uv -y
 EXTRAS="examples"
 [[ "$DEVICE" == "cuda" ]] && EXTRAS="examples,gpu"
-conda run -n "$LITE_ENV" pip install --quiet -e "$REPO[$EXTRAS]"
+conda run -n "$LITE_ENV" uv pip install --quiet -e "$REPO[$EXTRAS]"
 
 if [[ "$DEVICE" == "cuda" ]] && \
    ! conda run -n "$LITE_ENV" python -c "import cupy; cupy.cuda.Device(0).compute_capability" 2>/dev/null; then

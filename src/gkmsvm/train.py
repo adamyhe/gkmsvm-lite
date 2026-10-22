@@ -286,14 +286,16 @@ def _move_to_device(X: np.ndarray, device: str, verbose: bool) -> np.ndarray:
     if device in ("cuda", "gpu"):
         if not HAS_CUPY:
             raise RuntimeError(
-                "CuPy is not installed. Install with: pip install cupy-cuda12x[ctk]"
+                'CuPy is not installed. Install with: uv pip install "gkmsvm-lite[gpu]"'
             )
         if verbose:
             print("Moving training data to CUDA GPU")
         return to_gpu(X)
     if device == "mlx":
         if not HAS_MLX:
-            raise RuntimeError("MLX is not installed. Install with: pip install mlx")
+            raise RuntimeError(
+                'MLX is not installed. Install with: uv pip install "gkmsvm-lite[mlx]"'
+            )
         if verbose:
             print("Moving training data to MLX")
         return to_mlx(X)

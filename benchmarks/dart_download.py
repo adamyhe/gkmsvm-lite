@@ -4,7 +4,7 @@ Shared helper for DART-Eval benchmark scripts. Downloads only the
 specific files needed (data.h5 and input_data/) from each task folder,
 not the entire Synapse tree.
 
-Requires: pip install synapseclient
+Requires: uv pip install synapseclient
 Auth: synapse login (or ~/.synapseConfig)
 """
 
@@ -70,7 +70,7 @@ def download_dart_data(work_dir: str, tasks: tuple[str, ...] = ("task_4",)):
     except ImportError:
         print(
             "Error: synapseclient required for auto-download.\n"
-            "  pip install synapseclient\n"
+            "  uv pip install synapseclient\n"
             "  synapse login\n"
             "Or download manually and set DART_WORK_DIR.",
             file=sys.stderr,
