@@ -37,7 +37,6 @@ def parse_lsgkm_header(path: str | Path) -> dict:
 def load_lsgkm_model(
     path: str | Path,
     *,
-    dtype: np.dtype | type = np.float32,
     sv_chunk_size: int | None = None,
     device: str = "cpu",
 ) -> GkmSVM:
@@ -48,7 +47,6 @@ def load_lsgkm_model(
 
     Args:
         path: Path to the .model.txt or .model.txt.gz file.
-        dtype: dtype of the one-hot support vectors. Coefficients are float64 (float32 on MLX) whatever it is.
         sv_chunk_size: ``sv_chunk_size`` of the model (SV chunks in GkmExplain).
         device: ``"cpu"`` (default), ``"cuda"``, ``"mlx"``, or ``"auto"``
             (CuPy if available, else MLX, else CPU).
@@ -94,7 +92,6 @@ def load_lsgkm_model(
         sequences,
         bias=-header["rho"][0],
         n_expected=header["total_sv"],
-        dtype=dtype,
         sv_chunk_size=sv_chunk_size,
         device=device,
     )

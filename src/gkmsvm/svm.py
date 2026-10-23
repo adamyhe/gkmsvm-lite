@@ -142,21 +142,24 @@ LSGKM_MAX_LENGTH = 2047
 
 
 def _uniform_or_lengths(lengths, shape) -> np.ndarray | None:
-    """lengths as host int64 [B], or None when every row is shape[2] long."""
+    """lengths as host int64 [B], or None when every row is shape[-1] long."""
     if lengths is None:
         return None
     lengths = np.asarray(to_cpu(lengths), dtype=np.int64).reshape(-1)
-    B, _, L = shape
+    B, L = shape[0], shape[-1]
     if lengths.shape[0] != B or (lengths < 0).any() or (lengths > L).any():
         raise ValueError(f"lengths must be {B} values in 0..{L}")
     return None if (lengths == L).all() else lengths
 
 
 def as_batch(x, lengths=None):
-    """(x [B, 4, L_max], lengths or None) from a one-hot array (with lengths of
-    its rows when they differ) or a list of [4, L_i] arrays or DNA strings
-    (N allowed). Warns about sequences longer than LS-GKM reads."""
+    """(x [B, L_max] base codes, lengths or None) from a [B, 4, L] one-hot
+    array or [B, L] codes (with lengths of its rows when they differ), or a
+    list of [4, L_i] one-hot arrays, [L_i] codes or DNA strings (N allowed).
+    Warns about sequences longer than LS-GKM reads."""
     import warnings
+
+    from gkmsvm.codec import encode_codes, to_codes
 
     if isinstance(x, (list, tuple)):
         if lengths is not None:
@@ -164,17 +167,19 @@ def as_batch(x, lengths=None):
         if not len(x):
             raise ValueError("no sequences")
         if isinstance(x[0], str):
-            from gkmsvm.codec import one_hot_encode
-
-            x = [one_hot_encode(s, allow_n=True) for s in x]
+            x = [encode_codes(s, allow_n=True) for s in x]
+        else:
+            x = [to_codes(a[None])[0] for a in x]  # [4, L_i] one-hot or [L_i] codes
         lens = np.array([a.shape[-1] for a in x], dtype=np.int64)
         xp = get_array_module(x[0])
-        out = xp.zeros((len(x), 4, int(lens.max())), dtype=x[0].dtype)
+        out = xp.zeros((len(x), int(lens.max())), dtype=xp.uint8)
         for i, a in enumerate(x):
-            out[i, :, : a.shape[-1]] = a
+            out[i, : a.shape[-1]] = a
         x, lengths = out, lens
+    else:
+        x = to_codes(x)
     lengths = _uniform_or_lengths(lengths, x.shape)
-    longest = int(x.shape[2] if lengths is None else lengths.max())
+    longest = int(x.shape[-1] if lengths is None else lengths.max())
     if longest > LSGKM_MAX_LENGTH:
         warnings.warn(
             f"sequences up to {longest} bp: LS-GKM reads only the first "
@@ -194,14 +199,14 @@ def _allele_arrays(ref, alt, ref_lengths=None, alt_lengths=None):
         raise ValueError(
             f"ref and alt hold {ref.shape[0]} and {alt.shape[0]} sequences"
         )
-    L = max(ref.shape[2], alt.shape[2])
+    L = max(ref.shape[-1], alt.shape[-1])
 
     def widen(x, n):
-        if x.shape[2] == L:
+        if x.shape[-1] == L:
             return x, n
-        n = np.full(x.shape[0], x.shape[2], dtype=np.int64) if n is None else n
+        n = np.full(x.shape[0], x.shape[-1], dtype=np.int64) if n is None else n
         x = to_cpu(x)
-        return np.pad(x, ((0, 0), (0, 0), (0, L - x.shape[2]))), n
+        return np.pad(x, ((0, 0), (0, L - x.shape[-1]))), n
 
     ref, ref_lengths = widen(ref, ref_lengths)
     alt, alt_lengths = widen(alt, alt_lengths)
@@ -292,10 +297,16 @@ class GkmSVM(DeviceModel):
         sv_chunk_size: int | None = None,
         device: str = "cpu",
     ):
-        if support_sequences.ndim != 3 or support_sequences.shape[1] != 4:
+        from gkmsvm.codec import to_codes
+
+        if support_sequences.ndim == 3 and support_sequences.shape[1] != 4:
             raise ValueError(
-                f"support_sequences must be [S, 4, L], got {list(support_sequences.shape)}"
+                f"support_sequences must be [S, 4, L] one-hot or [S, L] base "
+                f"codes, got {list(support_sequences.shape)}"
             )
+        # Stored as [S, L] uint8 base codes (A=0, C=1, G=2, T=3), what the
+        # kernels read; one-hot SVs are converted (N as A)
+        support_sequences = to_codes(support_sequences)
         if coefficients.ndim != 1:
             raise ValueError(
                 f"coefficients must be [S], got {list(coefficients.shape)}"
@@ -310,7 +321,7 @@ class GkmSVM(DeviceModel):
         # SVs of different lengths: support_sequences is padded to the longest
         # and sv_lengths [S] (host int64) gives each one's; None when uniform
         self.sv_lengths = _uniform_or_lengths(sv_lengths, support_sequences.shape)
-        # One-hot SVs keep the caller's dtype; coefficients are float64 (float32 on MLX)
+        # Coefficients are float64 (float32 on MLX)
         self.coefficients = coefficients.astype(float_dtype(coefficients))
         self.bias = bias
         self.kernel_type = resolve_kernel_type(kernel_type)
@@ -568,7 +579,7 @@ class GkmSVM(DeviceModel):
             if not isinstance(kernel, PackedGkmKernel) or kernel._join_plan() is None:
                 self._lmer_table = False
                 return None
-            sv = to_cpu(self.support_sequences).astype(np.float64)
+            sv = to_cpu(self.support_sequences)
             fwd, rc = kernel.pack_both(sv, self.sv_lengths)
             coef = to_cpu(self.coefficients).astype(np.float64)
             if kernel.normalize:
@@ -679,7 +690,7 @@ class GkmSVM(DeviceModel):
             scores = self(
                 get_array_module(ref).concatenate([alt, ref]),
                 lengths=_joint_lengths(
-                    ref.shape[2], (n, alt_lengths), (n, ref_lengths)
+                    ref.shape[-1], (n, alt_lengths), (n, ref_lengths)
                 ),
                 batch_size=batch_size,
                 verbose=verbose,
@@ -814,8 +825,7 @@ class GkmSVM(DeviceModel):
         starts = range(0, len(todo), self._DELTASVM_CHUNK)
         for start in _progress(starts, verbose, "to_deltasvm"):
             idx = todo[start : start + self._DELTASVM_CHUNK]
-            x = np.eye(4, dtype=np.float32)[digits[idx]].transpose(0, 2, 1)
-            x = self._match_device(np.ascontiguousarray(x))
+            x = self._match_device(digits[idx].astype(np.uint8))  # [n, l] codes
             w = to_cpu(self._score_unbatched(x)).ravel().astype(np.float64) - self.bias
             if unnorm:
                 diag = to_cpu(base._raw_diagonal(x)).astype(np.float64)

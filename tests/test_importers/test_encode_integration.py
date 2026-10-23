@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from gkmsvm.codec import one_hot_encode, reverse_complement
+from gkmsvm.codec import codes_to_one_hot, one_hot_encode, reverse_complement
 from gkmsvm.importers.lsgkm import load_lsgkm_model, parse_lsgkm_header
 
 
@@ -47,7 +47,7 @@ class TestEncodeModelLoad:
         assert model.bias == pytest.approx(-0.197343)
 
     def test_support_sequence_shape(self, model):
-        assert model.support_sequences.shape == (10, 4, 300)
+        assert model.support_sequences.shape == (10, 300)
 
     def test_kernel_params(self, model):
         p = model.kernel_params
@@ -77,7 +77,7 @@ class TestEncodeModelInference:
         assert abs(float(score.item())) > 0.01
 
     def test_rc_invariance(self, model):
-        sv = model.support_sequences[0:1]
+        sv = codes_to_one_hot(model.support_sequences[0:1])
         sv_rc = reverse_complement(sv)
         score_fwd = model(sv)
         score_rc = model(sv_rc)
@@ -99,8 +99,7 @@ class TestEncodeModelInference:
     def test_variant_scoring(self, model):
         ref = model.support_sequences[0:1].copy()
         alt = ref.copy()
-        alt[0, :, 50] = 0
-        alt[0, 1, 50] = 1  # C
+        alt[0, 50] = 1  # C
         delta = model.score_variants(ref, alt)
         assert delta.shape == (1, 1)
         assert np.isfinite(delta).all()

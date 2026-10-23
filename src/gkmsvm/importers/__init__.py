@@ -57,12 +57,11 @@ def build_model(
     *,
     bias: float,
     n_expected: int | None,
-    dtype,
     sv_chunk_size: int | None,
     device: str,
 ):
     """GkmSVM from parsed SVs, taking L, k, d, gamma, M, H, norc from header."""
-    from gkmsvm.codec import one_hot_encode
+    from gkmsvm.codec import encode_codes
     from gkmsvm.svm import GkmSVM
 
     if not sequences:
@@ -85,10 +84,7 @@ def build_model(
             "reading them as N (scored as A, as LS-GKM does)",
             stacklevel=3,
         )
-    encoded = [
-        one_hot_encode(seq, dtype=dtype, allow_n=True, allow_other=True)
-        for seq in sequences
-    ]
+    encoded = [encode_codes(seq, allow_other=True) for seq in sequences]
     # SVs of different lengths (LS-GKM trained on peaks as they are) are
     # padded to the longest, with sv_lengths
     from gkmsvm.svm import as_batch

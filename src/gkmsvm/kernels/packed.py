@@ -128,18 +128,22 @@ class PackedGkmKernel(GkmKernel):
             )
 
     def pack(self, x, lengths=None):
-        """[B, W] uint32 packed windows of one-hot x, on x's device.
+        """[B, W] uint32 packed windows of x, on x's device.
 
-        N (all-zero) positions pack as A. lengths [B]: each row's sequence
-        length (x is padded to its longest); windows past a row's last are
-        PAD_WINDOW, and a row shorter than l has none.
+        x: [B, L] base codes (codec.to_codes), or a [B, 4, L] one-hot (N, all
+        zero, packs as A). lengths [B]: each row's sequence length (x is padded
+        to its longest); windows past a row's last are PAD_WINDOW, and a row
+        shorter than l has none.
         """
-        B, _, L = x.shape
+        from gkmsvm.codec import to_codes
+
+        B, L = x.shape[0], x.shape[-1]
         self._check_length(L)
         W = L - self.l + 1
         dev = device_of(x)
         xp = np if dev == "mlx" else get_array_module(x)
-        base = (xp.argmax(to_cpu(x) if dev == "mlx" else x, axis=1)).astype(xp.uint32)
+        codes = to_codes(x)
+        base = (to_cpu(codes) if dev == "mlx" else codes).astype(xp.uint32)
         packed = xp.zeros((B, W), dtype=xp.uint32)
         for k in range(self.l):
             packed |= base[:, k : k + W] << xp.uint32(2 * k)

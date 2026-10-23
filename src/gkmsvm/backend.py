@@ -254,17 +254,11 @@ class _MlxShim:
 def _mlx_sliding_windows(x: Any, shape: tuple, strides: tuple) -> Any:
     """Implement as_strided for MLX using mx.as_strided.
 
-    Only handles the sliding-window patterns used in gkmsvm:
-    - [B, C, W, l] from [B, C, L] (one-hot windows: weighted kernels, DeltaSVM)
-    - [B, W, l] from [B, L]
+    Only handles the sliding-window pattern used in gkmsvm: [B, W, l] from
+    [B, L] (DeltaSVM's windows of base codes).
     """
     ndim_in = x.ndim
     ndim_out = len(shape)
-
-    if ndim_in == 3 and ndim_out == 4:
-        B, C, L = x.shape
-        _, _, W, l = shape
-        return mx.as_strided(x, shape=(B, C, W, l), strides=(C * L, L, 1, 1))
 
     if ndim_in == 2 and ndim_out == 3:
         B, L = x.shape

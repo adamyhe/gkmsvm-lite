@@ -149,8 +149,26 @@ def extract_loci(
 
     Returns:
         ``(sequences_array,)``, or ``(sequences_array, mask)`` when
-        ``return_mask`` is True.
+        ``return_mask`` is True; sequences_array is [N, 4, in_window] int8.
     """
+    seqs, mask = loci_sequences(
+        loci, sequences, in_window=in_window, chroms=chroms, summit=summit
+    )
+    # Letters other than ACGT encode as all-zero (N)
+    results = [
+        one_hot_encode(seq, dtype=np.int8, allow_n=True, allow_other=True)
+        for seq in seqs
+    ]
+    if results:
+        X = np.ascontiguousarray(np.stack(results))
+    else:
+        X = np.zeros((0, 4, in_window), dtype=np.int8)
+
+    return (X, mask) if return_mask else (X,)
+
+
+def loci_sequences(loci, sequences, *, in_window, chroms=None, summit=True):
+    """(DNA strings, mask over the loci) of extract_loci's windows."""
     try:
         import pyfaidx
     except ImportError as e:
@@ -170,7 +188,7 @@ def extract_loci(
     )
 
     mask = np.zeros(len(loci["chrom"]), dtype=bool)
-    results = []
+    seqs = []
     for i, (chrom, mid) in enumerate(zip(loci["chrom"], centers)):
         if chroms is not None and chrom not in chroms:
             continue
@@ -182,14 +200,6 @@ def extract_loci(
         if start < 0 or end > len(sequences[chrom]):
             continue
 
-        # Letters other than ACGT encode as all-zero (N)
-        seq = str(sequences[chrom][start:end])
-        results.append(one_hot_encode(seq, allow_n=True, allow_other=True))
+        seqs.append(str(sequences[chrom][start:end]))
         mask[i] = True
-
-    if results:
-        X = np.ascontiguousarray(np.stack(results))
-    else:
-        X = np.zeros((0, 4, in_window), dtype=np.float32)
-
-    return (X, mask) if return_mask else (X,)
+    return seqs, mask

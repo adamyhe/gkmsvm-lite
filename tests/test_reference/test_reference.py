@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from gkmsvm.codec import one_hot_encode, reverse_complement
+from gkmsvm.codec import codes_to_one_hot, one_hot_encode, reverse_complement
 from gkmsvm.importers.lsgkm import load_lsgkm_model
 from gkmsvm.kernels.direct import DirectGkmKernel
 from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
@@ -209,7 +209,7 @@ class TestEncodeOracle:
     @pytest.fixture
     def model_data(self):
         model = load_lsgkm_model(FIXTURE)
-        sv_np = model.support_sequences.astype(np.float64)
+        sv_np = codes_to_one_hot(model.support_sequences, np.float64)
         coefs_np = model.coefficients.astype(np.float64)
         bias = model.bias
         return sv_np, coefs_np, bias

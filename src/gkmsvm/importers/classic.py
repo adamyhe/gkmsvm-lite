@@ -34,7 +34,6 @@ def load_classic_model(
     d: int = 3,
     filter_type: int = 1,
     include_rc: bool = True,
-    dtype: np.dtype | type = np.float32,
     sv_chunk_size: int | None = None,
     device: str = "cpu",
 ) -> GkmSVM:
@@ -57,7 +56,7 @@ def load_classic_model(
             truncated (default), 2 gkm counts.
         include_rc: Reverse complements (default True; False for -R, R
             addRC=FALSE).
-        dtype, sv_chunk_size, device: as in load_lsgkm_model.
+        sv_chunk_size, device: as in load_lsgkm_model.
 
     Returns:
         A GkmSVM with bias 0.
@@ -116,7 +115,6 @@ def load_classic_model(
         sequences,
         bias=0.0,
         n_expected=None,
-        dtype=dtype,
         sv_chunk_size=sv_chunk_size,
         device=device,
     )

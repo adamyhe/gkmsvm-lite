@@ -79,11 +79,11 @@ def _fail(msg: str):
 
 def _model_length(model) -> int | None:
     """The model's SV length, or None when its SVs differ in length."""
-    return None if model.sv_lengths is not None else model.support_sequences.shape[2]
+    return None if model.sv_lengths is not None else model.support_sequences.shape[-1]
 
 
 def _load_inputs(args: argparse.Namespace, path: str, default_length: int | None):
-    """(names, X [B, 4, L], lengths or None, mask over BED lines or None).
+    """(names, X [B, L] base codes, lengths or None, mask over BED lines or None).
 
     With --genome, path is a BED/narrowPeak file: windows of --length (else
     default_length) around each summit. Otherwise a FASTA: used as is when its
@@ -91,17 +91,21 @@ def _load_inputs(args: argparse.Namespace, path: str, default_length: int | None
     to --length (else default_length) when they differ; with
     --variable-length, padded with each record's length.
     """
-    from gkmsvm.codec import center_crop, one_hot_encode
+    from gkmsvm.codec import center_crop, encode_codes
     from gkmsvm.fasta import read_fasta
 
     if getattr(args, "genome", None):
-        from gkmsvm.fasta import extract_loci, read_loci
+        from gkmsvm.fasta import loci_sequences, read_loci
 
         length = args.length or default_length
         if length is None:
             _fail("give --length for windows from --genome")
         loci = read_loci(path)
-        X, mask = extract_loci(loci, args.genome, in_window=length, return_mask=True)
+        seqs, mask = loci_sequences(loci, args.genome, in_window=length)
+        # Letters other than ACGT are N, read as A
+        X = np.zeros((len(seqs), length), dtype=np.uint8)
+        for i, s in enumerate(seqs):
+            X[i] = encode_codes(s, allow_other=True)
         if (~mask).any():
             print(
                 f"Dropped {int((~mask).sum())} of {len(mask)} loci (chromosome missing "
@@ -115,9 +119,8 @@ def _load_inputs(args: argparse.Namespace, path: str, default_length: int | None
     seqs = [seq for _, seq in records]
 
     def encode(s):
-        # N (and with --allow-other-bases any letter) encodes as all-zero,
-        # scored as A, as in LS-GKM
-        return one_hot_encode(s, allow_n=True, allow_other=args.allow_other_bases)
+        # N (and with --allow-other-bases any letter) reads as A, as in LS-GKM
+        return encode_codes(s, allow_n=True, allow_other=args.allow_other_bases)
 
     if getattr(args, "variable_length", False):
         from gkmsvm.svm import as_batch
@@ -149,8 +152,19 @@ def _load_inputs(args: argparse.Namespace, path: str, default_length: int | None
 
 
 def _as_list(X, lengths):
-    """[4, L_i] arrays of X's rows at their lengths (X itself when uniform)."""
-    return X if lengths is None else [x[:, :n] for x, n in zip(X, lengths)]
+    """[L_i] codes of X's rows at their lengths (X itself when uniform)."""
+    return X if lengths is None else [x[:n] for x, n in zip(X, lengths)]
+
+
+def _saved_one_hot(X, lengths):
+    """[B, 4, L] float32 one-hot of codes X for output files, 0 past each
+    row's length."""
+    from gkmsvm.codec import codes_to_one_hot
+
+    one_hot = codes_to_one_hot(X)
+    if lengths is not None:
+        one_hot *= np.arange(X.shape[-1])[None, None, :] < lengths[:, None, None]
+    return one_hot
 
 
 def _add_kernel_args(parser: argparse.ArgumentParser) -> None:
@@ -280,9 +294,9 @@ def cmd_train(args: argparse.Namespace) -> None:
     length = args.length or TRAIN_LENGTH
     _, pos, pos_len, _ = _load_inputs(args, args.positives, length)
     _, neg, neg_len, _ = _load_inputs(args, args.negatives, length)
-    if not args.variable_length and pos.shape[2] != neg.shape[2]:
+    if not args.variable_length and pos.shape[-1] != neg.shape[-1]:
         _fail(
-            f"positives are {pos.shape[2]} bp and negatives {neg.shape[2]} bp; give "
+            f"positives are {pos.shape[-1]} bp and negatives {neg.shape[-1]} bp; give "
             "--length to crop both"
         )
 
@@ -322,7 +336,7 @@ def cmd_ism(args: argparse.Namespace) -> None:
     model = _load_model(args.model, device=args.device)
     names, X, lengths, _ = _load_inputs(args, args.input, _model_length(model))
     names = np.array(names)
-    one_hot = X.copy()
+    one_hot = _saved_one_hot(X, lengths)
 
     result = ism(model, X, lengths=lengths, verbose=args.verbose)
     result = to_cpu(result)
@@ -342,7 +356,7 @@ def cmd_explain(args: argparse.Namespace) -> None:
 
     model = _load_model(args.model, device=args.device)
     _, X, lengths, _ = _load_inputs(args, args.input, _model_length(model))
-    one_hot = X.astype(np.float32)
+    one_hot = _saved_one_hot(X, lengths)
 
     hyp = to_cpu(
         gkmexplain(model, X, mode="hypothetical", lengths=lengths, verbose=args.verbose)
@@ -441,8 +455,8 @@ def cmd_score_variants(args: argparse.Namespace) -> None:
         not args.variable_length and X_ref.shape != X_alt.shape
     ):
         _fail(
-            f"{X_ref.shape[0]} ref sequences of {X_ref.shape[2]} bp but "
-            f"{X_alt.shape[0]} alt sequences of {X_alt.shape[2]} bp"
+            f"{X_ref.shape[0]} ref sequences of {X_ref.shape[-1]} bp but "
+            f"{X_alt.shape[0]} alt sequences of {X_alt.shape[-1]} bp"
         )
 
     deltas = to_cpu(
