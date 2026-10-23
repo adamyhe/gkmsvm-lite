@@ -132,7 +132,7 @@ SMO columns use the same index built over the training set: a column K(i, :) is 
 
 | Entry point | Path today | File |
 |---|---|---|
-| Gram tiles (`compute_gram`: libsvm, Nyström) | Masked join in column panels | `gram.py` |
+| Gram tiles (`compute_gram`: libsvm, Nyström) | l-mer index over the columns (self-Gram rows from the diagonal on; not on MLX), else masked join in column panels | `gram.py` |
 | SMO kernel columns (`KernelColumnCache.compute_columns`) | l-mer index over the training set (`-t 1`-`-t 5`), else batched masked join | `solver.py` |
 | Prediction `-t 0/1/2/4` | Exact l-mer table | `svm.py`, `lmer_table.py` |
 | Prediction `-t 3`, other kernels; ISM; mutation impact | Cached l-mer index over the SVs, else masked join | `svm.py`, `ism.py`, `explain.py` |

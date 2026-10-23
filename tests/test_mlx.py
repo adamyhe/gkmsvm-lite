@@ -447,6 +447,23 @@ class TestMLXGram:
         gram = compute_gram(kernel, to_mlx(seqs))
         np.testing.assert_allclose(gram, gram.T, atol=1e-10)
 
+    @pytest.mark.parametrize("which", ["t2", "t4"])
+    def test_gram_matches_cpu_index(self, which):
+        """MLX's masked-join Gram against the CPU's l-mer-index Gram."""
+        from gkmsvm.gram import compute_gram
+        from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
+        from gkmsvm.kernels.weighted import CenterWeightedGkmKernel
+
+        kernel = {
+            "t2": lambda: EstTruncGkmKernel(9, 6, d=3),
+            "t4": lambda: CenterWeightedGkmKernel(9, 6, M=3, H=2.0),
+        }[which]()
+        X = np.stack([one_hot_encode(s) for s in _make_seqs(40, 60, seed=5)])
+        ref = compute_gram(kernel, X)
+        got = compute_gram(kernel, to_mlx(X))
+        np.testing.assert_allclose(got, ref, rtol=1e-5, atol=1e-6)
+        np.testing.assert_array_equal(got, got.T)
+
 
 # ---------------------------------------------------------------------------
 # Training

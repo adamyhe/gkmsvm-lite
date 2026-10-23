@@ -829,6 +829,23 @@ class TestLmerIndexGPU:
         got = cp.asnumpy(index.pairwise(cp.asarray(bx)))
         np.testing.assert_allclose(got, ref, rtol=1e-12, atol=1e-12)
 
+    @pytest.mark.parametrize("which", ["t2", "t4"])
+    def test_gram_through_index_matches_cpu(self, which, monkeypatch):
+        import gkmsvm.gram as gram
+        from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
+        from gkmsvm.kernels.weighted import CenterWeightedGkmKernel
+
+        kernel = {
+            "t2": lambda: EstTruncGkmKernel(9, 6, d=3),
+            "t4": lambda: CenterWeightedGkmKernel(9, 6, M=3, H=2.0),
+        }[which]()
+        X = np.stack([one_hot_encode(s) for s in _make_seqs(40, 60, seed=5)])
+        monkeypatch.setattr(GkmSVM, "_MAX_SCORE_BYTES", 8 * 40 * 7)  # 7-row blocks
+        ref = gram.compute_gram(kernel, X)
+        got = gram.compute_gram(kernel, cp.asarray(X))
+        np.testing.assert_allclose(got, ref, rtol=1e-10, atol=1e-12)
+        np.testing.assert_array_equal(got, got.T)
+
     def test_rbf_model_scores_match_cpu(self):
         model = _make_model(40, 60, "gkmrbf", {"L": 9, "k": 6, "d": 3, "gamma": 2.0})
         X = np.stack([one_hot_encode(s) for s in _make_seqs(25, 60, seed=7)])
