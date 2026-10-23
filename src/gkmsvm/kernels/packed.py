@@ -181,7 +181,11 @@ class PackedGkmKernel(GkmKernel):
         """K_raw [B, S] between packed rows bx [B, Wx] and columns by [S, Wy].
 
         by_rc: the columns' reverse complements, added in the same call (one
-            masked-join index serves both blocks).
+            masked-join index serves both blocks). When the columns hold more
+            windows than the rows, the masked join instead indexes only the
+            forward columns and probes with both strands of the rows, since
+            K(x, rc(y)) = K(rc(x), y): the index build, which dominates
+            scoring against many SVs, halves.
         diag_offset: rows are sequences 0..B-1 and columns sequences
             diag_offset.. of one set (a self-Gram column panel); entries below
             the diagonal may be left 0 (CPU masked join only).
@@ -198,6 +202,9 @@ class PackedGkmKernel(GkmKernel):
         wx, wy = self.row_weights(bx), self.row_weights(by)
         wy_rc = self.row_weights(by_rc, rc=True)
         if plan is not None and not small:
+            if by_rc is not None and by.size > bx.size:
+                bx, wx = _with_rc_rows(bx, wx, self.l)
+                by_rc = wy_rc = None
             return _masked(bx, by, plan, by_rc, diag_offset, dev, wx, wy, wy_rc)
         if wx is None:
             raw = self._brute(bx, by, dev)
@@ -272,6 +279,32 @@ def _masked(bx, by, plan, by_rc, diag_offset, dev, wx=None, wy=None, wy_rc=None)
     # Exact integer counts combined in float64; Metal holds float32
     out = masked.masked_pairwise_mlx(bx, by, plan, by_rc, wx=wx, wy=wy, wy_rc=wy_rc)
     return mx.array(out.astype(np.float32))
+
+
+def _with_rc_rows(bx, wx, l):
+    """Rows holding their RC windows and then their own ([B, 2W]), and the
+    windows' weights (wx: row_weights of bx, or None; an RC window carries
+    its forward window's weight).
+
+    The masked join on CPU visits one run of non-PAD windows per row, so
+    padded rows move their non-PAD windows to the front (their order doesn't
+    change the sum). MLX rows come back as NumPy, which masked_pairwise_mlx
+    takes.
+    """
+    if is_mlx(bx):
+        bx = np.asarray(bx)
+    xp = get_array_module(bx)
+    both = _concat_windows(_rc_windows(bx, l), bx)
+    w = None if wx is None else np.concatenate([wx[:, ::-1], wx], axis=1)
+    if is_padded(both):
+        order = xp.argsort(both == PAD_WINDOW, axis=1)
+        both = xp.ascontiguousarray(xp.take_along_axis(both, order, axis=1))
+        if w is not None:
+            w = np.broadcast_to(w, both.shape)
+            w = np.take_along_axis(w, to_cpu(order), axis=1)
+    if w is not None:
+        w = np.ascontiguousarray(w)
+    return both, w
 
 
 def _concat_windows(a, b):

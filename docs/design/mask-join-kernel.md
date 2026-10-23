@@ -71,6 +71,8 @@ Work tile by tile, like `compute_gram` does now: a block of A query sequences ag
 
 Then normalize with the diagonal and, for `-t 3`, apply `exp(γ(K − 1))`, exactly as `compute_gram` does now.
 
+Which strand gets the RC: the column-side build costs about twice as much per window as a query-side probe, and it scales with the SV count when scoring. Since K(x, rc(y)) = K(rc(x), y), `raw_packed` indexes only the forward columns and probes with each query row's RC and forward windows (`packed._with_rc_rows`) whenever the columns hold more windows than the rows. On an M4, `-t 2` l11 k7 d3 with 930 queries took 1.2x less time at 4k SVs, 1.56x at 16k and 1.49x at 72k. With more rows than columns (Gram panels, SMO columns) it lost (0.81x at 4,000 rows × 1,000 columns), so those keep the RC on the column side. Indexing the queries and streaming the SVs instead gained nothing (0.9x): every SV window still computes a key per mask. Larger mask chunks (more threads building at once) were slower (0.5 GiB 38.8 s, 1.5 GiB 54.8 s at 72k SVs): the build is bound by memory bandwidth.
+
 Diagonal tiles keep the symmetry trick: process only query < column, plus the diagonal, and mirror. The self-kernel diagonal K(x, x) can stay brute force (O(N W²), small) or use the same join with A = B = one sequence.
 
 ### CPU (Numba)

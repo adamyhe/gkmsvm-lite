@@ -126,3 +126,52 @@ class TestWeighted:
         upper = kernel.raw_packed(bx, bx[10:], brc[10:], diag_offset=10)
         keep = np.arange(40)[:, None] <= np.arange(10, 40)[None, :]
         np.testing.assert_allclose(upper[keep], full[:, 10:][keep], rtol=1e-12)
+
+
+class TestRcRows:
+    """With more column windows than row windows, raw_packed probes with both
+    strands of the rows against the forward columns only."""
+
+    @staticmethod
+    def _kernels(kind):
+        from gkmsvm.kernels.weighted import CenterWeightedGkmKernel
+
+        make = {
+            "t0": lambda: DirectGkmKernel(8, 5),
+            "t2": lambda: EstTruncGkmKernel(9, 6, d=3),
+            "t3": lambda: RbfGkmKernel(9, 6, d=3, gamma=2.0).base,
+            "t4": lambda: CenterWeightedGkmKernel(8, 5, M=20, H=3.0),
+        }[kind]
+        fast, brute = make(), make()
+        brute.use_masked = False
+        return fast, brute
+
+    @pytest.mark.parametrize("kind", ["t0", "t2", "t3", "t4"])
+    def test_matches_brute(self, kind):
+        rng = np.random.default_rng(6)
+        X, Y = _onehot(17, 40, rng), _onehot(30, 61, rng)  # even and odd W
+        X[2, :, 5:35] = Y[4, :, 20:50]
+        fast, brute = self._kernels(kind)
+        by, by_rc = fast.pack_both(Y)
+        bx = fast.pack(X)
+        assert by.size > bx.size
+        np.testing.assert_allclose(
+            fast.raw_packed(bx, by, by_rc), brute.raw_packed(bx, by, by_rc), rtol=1e-12
+        )
+
+    @pytest.mark.parametrize("kind", ["t2", "t4"])
+    def test_padded_rows(self, kind):
+        """Variable-length rows, and ISM-style rows with PAD at both ends."""
+        from gkmsvm.kernels.packed import PAD_WINDOW
+
+        rng = np.random.default_rng(7)
+        X, Y = _onehot(20, 40, rng), _onehot(30, 61, rng)
+        fast, brute = self._kernels(kind)
+        by, by_rc = fast.pack_both(Y, rng.integers(20, 62, 30))
+        bx = fast.pack(X, rng.integers(10, 41, 20))
+        bx[3, :4] = PAD_WINDOW
+        bx[5, :2] = PAD_WINDOW
+        bx[5, 10:] = PAD_WINDOW
+        np.testing.assert_allclose(
+            fast.raw_packed(bx, by, by_rc), brute.raw_packed(bx, by, by_rc), rtol=1e-12
+        )
