@@ -137,6 +137,43 @@ def test_gram_and_columns_match_pairwise(name):
                 np.testing.assert_allclose(cols[i], expected[i], rtol=1e-10, atol=1e-12)
 
 
+@pytest.mark.parametrize("name", ["t2", "t4"])
+def test_pairwise_diag_offset(name):
+    """Row b of a self-Gram block from r gets only columns >= r + b."""
+    kernel = KERNEL_OBJS[name]().base
+    rng = np.random.default_rng(6)
+    X = _onehot(30, 40, rng)
+    bx, bx_rc = kernel.pack_both(X)
+    index = lmer_index.LmerIndex(kernel, bx, bx_rc)
+    full = index.pairwise(bx)
+    r = 11
+    got = index.pairwise(bx[r:20], diag_offset=r)
+    upper = np.arange(30)[None, :] >= r + np.arange(9)[:, None]
+    np.testing.assert_allclose(got, np.where(upper, full[r:20], 0), rtol=1e-12)
+
+
+@pytest.mark.parametrize("name", KERNEL_OBJS)
+@pytest.mark.parametrize("ragged", [False, True])
+@pytest.mark.parametrize("cross", [False, True])
+def test_gram_index_vs_masked(name, ragged, cross, monkeypatch):
+    """compute_gram through the index (upper-triangle row blocks for a
+    self-Gram) matches the masked join."""
+    kernel = KERNEL_OBJS[name]()
+    rng = np.random.default_rng(7)
+    X, Y = _onehot(40, 30, rng), _onehot(17, 30, rng)
+    lengths = rng.integers(12, 31, 40) if ragged else None
+    y_lengths = rng.integers(12, 31, 17) if ragged else None
+    args = (kernel, X, Y) if cross else (kernel, X)
+    kw = {"lengths": lengths, "y_lengths": y_lengths} if cross else {"lengths": lengths}
+    monkeypatch.setattr(GkmSVM, "_MAX_SCORE_BYTES", 8 * 40 * 7)  # 7-row blocks
+    got = compute_gram(*args, **kw)
+    monkeypatch.setattr(lmer_index, "applies", lambda *a, **k: False)
+    expected = compute_gram(*args, **kw)
+    np.testing.assert_allclose(got, expected, rtol=1e-10, atol=1e-12)
+    if not cross:
+        np.testing.assert_array_equal(got, got.T)
+
+
 def test_applies_dense_neighborhoods():
     """Large neighborhoods qualify only over columns with >= 4 windows per l-mer."""
     k = EstTruncGkmKernel(11, 7, d=4)  # 31,714 neighbors

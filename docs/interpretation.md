@@ -31,7 +31,7 @@ pert = gkmexplain(model, x, mode="perturbation")  # [B, 4, L]
 - Motif discovery with TF-MoDISco (hypothetical contribution input)
 - Generating sequence logos
 
-Importance is exactly `hypothetical * one_hot_input`. Internally, only the hypothetical computation runs — importance is derived by element-wise multiplication with the input one-hot.
+Importance is exactly `hypothetical * one_hot_input`, with N counted as A. Internally, only the hypothetical computation runs — importance is derived by element-wise multiplication with the input's one-hot.
 
 **Perturbation** (`mode="perturbation"`, legacy `mode=2`) computes the discrete kernel-value change from each possible single-base mutation. At each position, the reference base channel is zero; alternate base channels contain the predicted score change from that mutation. Corresponds to lsgkm C mode 4 (`perturbation_eff=1` over every window pair with up to d+1 mismatches, which are all the pairs a substitution changes; mode 3 leaves out the d+1 pairs). Uses `gamma[m] = mismatch_table[m+1] - mismatch_table[m]` for match-to-mismatch and `kappa[m] = mismatch_table[m-1] - mismatch_table[m]` for mismatch-to-match. Each SV's kernel change is divided by the reference sequence's norm (not the mutant's), and for `-t 3`/`-t 5` the RBF is applied by lsgkm's proportional redistribution, as in the other modes, so this approximates the score change of each mutation rather than equaling it (use `ism()` for exact score changes). Use for per-position mutation maps.
 

@@ -4,7 +4,7 @@ batches equal scoring each sequence at its own length."""
 import numpy as np
 import pytest
 
-from gkmsvm.codec import one_hot_decode, one_hot_encode
+from gkmsvm.codec import decode_codes, one_hot_encode
 from gkmsvm.kernels.packed import PAD_WINDOW
 from gkmsvm.svm import GkmSVM
 
@@ -150,7 +150,7 @@ def test_uniform_lengths_are_not_padded():
     from gkmsvm.svm import as_batch
 
     x, lengths = as_batch(["ACGTACGTAA", "ACGTACGTCC"])
-    assert lengths is None and x.shape == (2, 4, 10)
+    assert lengths is None and x.shape == (2, 10)
 
 
 def test_short_sequences_score_nan():
@@ -475,16 +475,16 @@ def _ragged_training_set():
 
 def _sv_coefficients(model):
     """{SV sequence at its length: coefficient}."""
-    from gkmsvm.codec import one_hot_decode
+    from gkmsvm.codec import decode_codes
 
-    L = model.support_sequences.shape[2]
+    L = model.support_sequences.shape[-1]
     lengths = (
         model.sv_lengths
         if model.sv_lengths is not None
         else [L] * len(model.coefficients)
     )
     return {
-        one_hot_decode(sv[:, :n]): float(c)
+        decode_codes(sv[:n]): float(c)
         for sv, n, c in zip(model.support_sequences, lengths, model.coefficients)
     }
 
@@ -633,7 +633,7 @@ def test_smo_svr_on_mixed_lengths(kernel_type, cache_size):
     np.testing.assert_allclose(np.asarray(model(q)), np.asarray(ref(q)), atol=2e-3)
 
     coef = {
-        one_hot_decode(sv[:, :n]): c
+        decode_codes(sv[:n]): c
         for sv, n, c in zip(
             model.support_sequences, model.sv_lengths, model.coefficients
         )

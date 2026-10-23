@@ -10,9 +10,7 @@ vectors (72,145 SVs, l=11 k=7 d=3):
         scores through the cached l-mer index (per-SV kernel values for
         the RBF), whose cost grows with the matching (window, SV) pairs.
 
-For both, path "masked join" turns the table and the index off, the kernel
-path before them (an SV index is built on every call), and LS-GKM's
-gkmpredict scores the same models at -T --threads (and mLS-GKM's at
+LS-GKM's gkmpredict scores the same models at -T --threads (and mLS-GKM's at
 -t --threads -T 1 with --mlsgkm-bin). The -t 3 coefficients
 were trained for -t 2; only speed is measured.
 
@@ -95,9 +93,6 @@ def _worker(spec: dict) -> None:
 
     def prepare(path):
         model = load_model(path)
-        if spec["path"] == "masked join":
-            model.use_lmer_table = False
-            model.use_lmer_index = False
         if spec["device"] == "cuda":
             model.cuda()
         return model
@@ -248,42 +243,42 @@ def main():
                     )
                     print(f"  {impl} ({n_thr} threads): {m.wall_s:.1f}s [{m.status}]")
 
-                for path in (DEFAULT_PATH[kernel], "masked join"):
-                    for device in devices:
-                        spec = {
-                            "model": str(npz),
-                            "warmup_model": str(warm_npz),
-                            "queries": str(queries),
+                path = DEFAULT_PATH[kernel]
+                for device in devices:
+                    spec = {
+                        "model": str(npz),
+                        "warmup_model": str(warm_npz),
+                        "queries": str(queries),
+                        "path": path,
+                        "device": device,
+                        "batch_size": args.batch_size,
+                    }
+                    m = run_measured(
+                        [sys.executable, __file__, "--worker", json.dumps(spec)],
+                        timeout=args.timeout,
+                    )
+                    res = worker_result(m.stdout) or {}
+                    if m.status != "ok":
+                        print(f"  {path} {device} {m.status}: {m.stderr[-300:]}")
+                    rows.append(
+                        {
+                            **base,
+                            "implementation": "gkmsvm-lite",
                             "path": path,
                             "device": device,
-                            "batch_size": args.batch_size,
+                            "threads": lite_threads if device == "cpu" else None,
+                            "status": m.status,
+                            "first_s": res.get("first_s"),
+                            "steady_s": res.get("steady_s"),
+                            "peak_rss_mb": m.peak_rss_mb,
                         }
-                        m = run_measured(
-                            [sys.executable, __file__, "--worker", json.dumps(spec)],
-                            timeout=args.timeout,
+                    )
+                    if res:
+                        print(
+                            f"  {path}, {device}: first {res['first_s']:.2f}s, "
+                            f"steady {res['steady_s']:.2f}s "
+                            f"({args.n_seqs / res['steady_s']:,.0f} seq/s)"
                         )
-                        res = worker_result(m.stdout) or {}
-                        if m.status != "ok":
-                            print(f"  {path} {device} {m.status}: {m.stderr[-300:]}")
-                        rows.append(
-                            {
-                                **base,
-                                "implementation": "gkmsvm-lite",
-                                "path": path,
-                                "device": device,
-                                "threads": lite_threads if device == "cpu" else None,
-                                "status": m.status,
-                                "first_s": res.get("first_s"),
-                                "steady_s": res.get("steady_s"),
-                                "peak_rss_mb": m.peak_rss_mb,
-                            }
-                        )
-                        if res:
-                            print(
-                                f"  {path}, {device}: first {res['first_s']:.2f}s, "
-                                f"steady {res['steady_s']:.2f}s "
-                                f"({args.n_seqs / res['steady_s']:,.0f} seq/s)"
-                            )
     finally:
         shutil.rmtree(work, ignore_errors=True)
 

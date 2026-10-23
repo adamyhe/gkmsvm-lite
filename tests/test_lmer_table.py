@@ -3,6 +3,7 @@
 import numpy as np
 import pytest
 
+from gkmsvm.codec import codes_to_one_hot
 from gkmsvm.svm import GkmSVM
 
 
@@ -43,7 +44,8 @@ def test_table_matches_kernel(case, include_rc, normalize):
     model = _model(case, include_rc, rng)
     model.kernel.normalize = normalize
     X = _onehot(25, 50, rng)
-    X[3, :, 5:35] = model.support_sequences[2, :, 0:30]  # near-identical to an SV
+    # near-identical to an SV
+    X[3, :, 5:35] = codes_to_one_hot(model.support_sequences[2:3, 0:30])[0]
 
     model.use_lmer_table = False
     ref = np.asarray(model(X))

@@ -263,3 +263,52 @@ class TestDeltaSVMImporter:
         got = float(model(x)[0, 0])
         expected = _naive_deltasvm_score(seq, weights_dict, l, k, True)
         assert abs(got - expected) < 1e-4
+
+
+def _random_model(l, k, include_rc, seed):
+    rng = np.random.default_rng(seed)
+    weights = rng.normal(size=4**k)
+    return DeltaSVM(weights, l=l, k=k, include_rc=include_rc), weights
+
+
+@pytest.mark.parametrize("include_rc", [False, True])
+def test_n_reads_as_a(include_rc):
+    """N is A on the forward strand, so T on the reverse one, as the gkm-SVM
+    kernels read it: a sequence with N scores as the same one with A."""
+    model, weights = _random_model(6, 4, include_rc, 0)
+    seqs = [s[:5] + "NNN" + s[8:17] + "n" + s[18:] for s in _make_seqs(4, 30, seed=7)]
+    x = np.stack([one_hot_encode(s, allow_n=True) for s in seqs])
+    weights_dict = {_index_to_kmer(i, 4): w for i, w in enumerate(weights)}
+    expected = [
+        _naive_deltasvm_score(
+            s.upper().replace("N", "A"), weights_dict, 6, 4, include_rc
+        )
+        for s in seqs
+    ]
+    np.testing.assert_allclose(model(x)[:, 0], expected, rtol=1e-10)
+    np.testing.assert_allclose(model(seqs)[:, 0], expected, rtol=1e-10)
+
+
+@pytest.mark.parametrize("device", ["mlx", "cuda"])
+@pytest.mark.parametrize("include_rc", [False, True])
+def test_array_path_matches_cpu(device, include_rc):
+    """The CUDA/MLX path (strided windows of base codes) against the numba one,
+    over sequences with N, mixed lengths and the chunked branch."""
+    from gkmsvm.backend import HAS_CUPY, to_cpu
+
+    if device == "cuda" and not HAS_CUPY:
+        pytest.skip("CuPy not installed")
+    if device == "mlx":
+        pytest.importorskip("mlx.core")
+    model, weights = _random_model(8, 5, include_rc, 1)
+    seqs = [s[:9] + "N" + s[10:] for s in _make_seqs(6, 40, seed=8)]
+    mixed = seqs[:3] + [s[:25] for s in seqs[3:]]
+    ref = [np.asarray(model(q)) for q in (seqs, mixed)]
+    dev = DeltaSVM(weights, l=8, k=5, include_rc=include_rc, device=device)
+    tol = 1e-4 if device == "mlx" else 1e-10
+    for q, r in zip((seqs, mixed), ref):
+        np.testing.assert_allclose(to_cpu(dev(q)), r, rtol=tol, atol=tol)
+    dev._INTERMEDIATE_BUDGET = 8 * 33 * 56 * 5 * 4  # chunks of 8 rows
+    np.testing.assert_allclose(
+        to_cpu(dev(seqs * 3)), np.tile(ref[0], (3, 1)), rtol=tol, atol=tol
+    )

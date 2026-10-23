@@ -2,7 +2,7 @@
 
 ## Basic scoring
 
-All models (loaded or trained) use the same interface. Input is a `[batch, 4, length]` one-hot encoded DNA array; output is `[batch, 1]` margin scores.
+All models (loaded or trained) use the same interface. Input is a `[batch, 4, length]` one-hot encoded DNA array (any dtype), a list of DNA strings, or `[batch, length]` uint8 base codes (A=0, C=1, G=2, T=3); output is `[batch, 1]` margin scores.
 
 ```python
 from gkmsvm import load_model, one_hot_encode
@@ -113,7 +113,7 @@ Peak memory is bounded internally: kernel scoring computes [rows, S] kernel valu
 
 ## One-hot encoding
 
-DNA sequences are represented as `[4, length]` one-hot arrays with channel order A=0, C=1, G=2, T=3.
+DNA sequences are represented as `[4, length]` one-hot arrays with channel order A=0, C=1, G=2, T=3. Internally, and in `model.support_sequences`, they are `[length]` uint8 base codes with the same numbering: inputs are converted on entry (N, an all-zero column, reads as A, as in LS-GKM).
 
 ```python
 from gkmsvm import one_hot_encode, one_hot_decode, reverse_complement

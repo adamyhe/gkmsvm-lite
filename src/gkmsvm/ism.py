@@ -81,7 +81,7 @@ def _ism_packed(model, x, lengths=None):
     that hold at most ``GkmSVM._MAX_SCORE_BYTES`` of them (_ism_kernel).
     """
     xp = get_array_module(x)
-    B, _, L = x.shape
+    B, L = x.shape[0], x.shape[-1]
     base = model.kernel.base
     W = L - base.l + 1
     S = model.num_support_vectors
@@ -127,7 +127,7 @@ def _ism_table(model, x, table, lengths=None):
     # Padding (identical in old and new) reads entry 0, which cancels in new - old
     old = dev(np.where(old == PAD_WINDOW, 0, old))
     new = dev(np.where(new == PAD_WINDOW, 0, new))
-    L = x.shape[2]
+    L = x.shape[-1]
     slot_wt = _slot_weights(base.base, L, lengths)
     ref = model._table_raw(bx, table)  # [B]
     if slot_wt is None:
@@ -186,7 +186,7 @@ def _ism_index(model, x, _table=None, lengths=None):
         inv_ds,
         coef,
         gamma,
-        _slot_weights(base, x.shape[2], lengths),
+        _slot_weights(base, x.shape[-1], lengths),
     )
     if host and xp is not np:
         out = xp.asarray(out.astype(np.float32 if is_mlx(x) else np.float64))
@@ -196,7 +196,7 @@ def _ism_index(model, x, _table=None, lengths=None):
 def _ism_kernel(model, x, _table=None, lengths=None):
     """f(mutant) - f(x) from per-SV kernel values: [B, 4, L]."""
     xp = get_array_module(x)
-    B, _, L = x.shape
+    B, L = x.shape[0], x.shape[-1]
     kernel = model.kernel
     base = kernel.base
     S = model.num_support_vectors
@@ -261,7 +261,7 @@ def _mutants(base, x, bx, bx_rc):
     and K_raw(mutant, mutant) [4, L, B] on x's device (both None without
     normalization).
     """
-    L = x.shape[2]
+    L = x.shape[-1]
     l = base.l
     W = L - l + 1
     old, new = _packed_mutations(to_cpu(bx), L, W, l)

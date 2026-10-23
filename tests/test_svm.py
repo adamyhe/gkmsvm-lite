@@ -37,7 +37,7 @@ class TestGkmSVMConstruction:
     def test_shape_validation(self):
         with pytest.raises(ValueError, match="\\[S, 4, L\\]"):
             GkmSVM(
-                support_sequences=np.zeros((3, 10)),
+                support_sequences=np.zeros((3, 5, 10)),
                 coefficients=np.zeros(3),
                 bias=0.0,
                 kernel_type="gkm_cnt",
@@ -322,3 +322,35 @@ def test_resolve_kernel_type_takes_cli_integers():
         assert resolve_kernel_type(str(t)) == resolve_kernel_type(t)
     with pytest.raises(ValueError, match="Valid: 0-6"):
         resolve_kernel_type("7")
+
+
+@pytest.mark.parametrize("name", ["lsgkm_mode5_est", "lsgkm_mode5_rbf"])
+def test_base_codes_match_one_hot(name):
+    """SVs are stored as [S, L] uint8 base codes; one-hot inputs of any dtype,
+    base codes and strings give the same outputs."""
+    from pathlib import Path
+
+    from gkmsvm import gkmexplain, ism, train_gkmsvm
+    from gkmsvm.codec import to_codes
+    from gkmsvm.importers.lsgkm import load_lsgkm_model
+
+    fixtures = Path(__file__).parent / "fixtures"
+    model = load_lsgkm_model(fixtures / f"{name}.model.txt.gz")
+    assert model.support_sequences.dtype == np.uint8
+    assert model.support_sequences.ndim == 2
+    rng = np.random.default_rng(0)
+    seqs = ["".join(rng.choice(list("ACGTN"), 60)) for _ in range(3)]
+    x32 = np.stack([one_hot_encode(s, allow_n=True) for s in seqs])
+    for f in (
+        model,
+        lambda x: ism(model, x),
+        lambda x: gkmexplain(model, x),
+        lambda x: gkmexplain(model, x, mode="perturbation"),
+    ):
+        np.testing.assert_array_equal(f(x32.astype(np.int8)), f(x32))
+        np.testing.assert_array_equal(f(to_codes(x32)), f(x32))
+    np.testing.assert_array_equal(model(seqs), model(x32))
+
+    train = ["".join(rng.choice(list("ACGT"), 40)) for _ in range(40)]
+    trained = train_gkmsvm(train[:20], train[20:], kernel_type="estimated", l=8, k=5)
+    assert trained.support_sequences.dtype == np.uint8

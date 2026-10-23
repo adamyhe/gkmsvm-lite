@@ -115,39 +115,47 @@ def _counting_sort(keys, ids, offsets):
 
 
 @njit(inline="always")
-def _add_window(acc, w, scale, offsets, ids, vals, masks, weights, n_lmers):
-    """acc[s] += scale * K_raw(window w, s); vals: the entries' window weights
-    (empty: all 1)."""
+def _add_window(acc, w, scale, offsets, ids, vals, masks, weights, n_lmers, lo=0):
+    """acc[s] += scale * K_raw(window w, s) for columns s >= lo; vals: the
+    entries' window weights (empty: all 1). Each l-mer's entries are sorted by
+    column, so its scan runs down from the last and stops below lo."""
     weighted = vals.shape[0] > 0
     if np.int64(w) >= n_lmers:  # padding window
         return
     for t in range(masks.shape[0]):
         v = np.int64(w ^ masks[t])
         wt = scale * weights[t]
-        if weighted:
-            for e in range(offsets[v], offsets[v + 1]):
-                acc[ids[e]] += wt * vals[e]
-        else:
-            for e in range(offsets[v], offsets[v + 1]):
-                acc[ids[e]] += wt
+        for e in range(offsets[v + 1] - 1, offsets[v] - 1, -1):
+            s = ids[e]
+            if s < lo:
+                break
+            acc[s] += wt * vals[e] if weighted else wt
 
 
 @njit(parallel=True, cache=True)
-def _query_cpu(bx, offsets, ids, vals, masks, weights, n_lmers, S, n_split, wx):
+def _query_cpu(
+    bx, offsets, ids, vals, masks, weights, n_lmers, S, n_split, wx, diag_offset
+):
     """Each row's windows in n_split chunks (so few rows still use every
     thread), each accumulating into its own row of partial sums. wx: the
-    query windows' weights, [B or 1, W] ([1, 0]: all 1)."""
+    query windows' weights, [B or 1, W] ([1, 0]: all 1). diag_offset >= 0:
+    row b only gets columns >= diag_offset + b (the rest stay 0)."""
     B, W = bx.shape
     part = np.zeros((B * n_split, S), dtype=np.float64)
     step = (W + n_split - 1) // n_split
     for task in prange(B * n_split):
-        b, c = task // n_split, task % n_split
-        acc = part[task]
+        # Rows interleaved first and last (0, B-1, 1, B-2, ...): the workqueue
+        # layer gives each thread one contiguous range of tasks, and rows
+        # above a diagonal shrink with b
+        j, c = task // n_split, task % n_split
+        b = j // 2 if j % 2 == 0 else B - 1 - j // 2
+        acc = part[b * n_split + c]
         wb = wx[min(np.int64(b), wx.shape[0] - 1)]
+        lo = diag_offset + b if diag_offset >= 0 else 0
         for i in range(c * step, min(W, (c + 1) * step)):
             scale = wb[i] if wb.shape[0] > 0 else 1.0
             _add_window(
-                acc, bx[b, i], scale, offsets, ids, vals, masks, weights, n_lmers
+                acc, bx[b, i], scale, offsets, ids, vals, masks, weights, n_lmers, lo
             )
     if n_split == 1:
         return part
@@ -379,11 +387,13 @@ extern "C" __global__ void lmer_index_query(
     const unsigned int* __restrict__ masks, const double* __restrict__ weights,
     int n_masks, long long n_lmers, int S, double* __restrict__ out,
     const unsigned char* __restrict__ wx, int wx_stride,
-    const unsigned char* __restrict__ vals, int weighted)
+    const unsigned char* __restrict__ vals, int weighted, long long diag_offset)
 {
     // grid.y = query row; each thread takes one (window, neighbor) item.
     // wx [rows or 1, W], vals: window weights of the queries (wx_stride 0 when
-    // the rows share one) and entries (-t 4/5, weighted = 1)
+    // the rows share one) and entries (-t 4/5, weighted = 1). diag_offset >= 0:
+    // row b only gets columns >= diag_offset + b; each l-mer's entries are
+    // sorted by column, so its scan runs down from the last and stops below lo
     long long it = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (it >= n_items) return;
     int b = blockIdx.y;
@@ -392,13 +402,13 @@ extern "C" __global__ void lmer_index_query(
     if (v >= n_lmers) return;  // padding window
     double wt = weights[t];
     double* row = out + (long long)b * S;
-    if (weighted) {
-        wt *= wx[(long long)b * wx_stride + i];
-        for (long long e = offsets[v]; e < offsets[v + 1]; e++)
-            atomicAdd(&row[ids[e]], wt * vals[e]);
-        return;
+    int lo = diag_offset >= 0 ? (int)(diag_offset + b) : 0;
+    if (weighted) wt *= wx[(long long)b * wx_stride + i];
+    for (long long e = offsets[v + 1] - 1; e >= offsets[v]; e--) {
+        int s = ids[e];
+        if (s < lo) break;
+        atomicAdd(&row[s], weighted ? wt * vals[e] : wt);
     }
-    for (long long e = offsets[v]; e < offsets[v + 1]; e++) atomicAdd(&row[ids[e]], wt);
 }
 """
 
@@ -641,21 +651,23 @@ class LmerIndex:
         self.table, self.levels = np.unique(self.weights, return_inverse=True)
         self.levels = self.levels.astype(np.int32)
         blocks = [to_cpu(by)] + ([to_cpu(by_rc)] if by_rc is not None else [])
-        keys = np.concatenate([b.ravel() for b in blocks]).astype(np.int64)
+        # Entries in column order (each column's fwd then RC windows), so the
+        # stable sort leaves every l-mer's entries sorted by column
+        keys = np.hstack(blocks).ravel().astype(np.int64)
         W = blocks[0].shape[1]
-        ids = np.tile(np.repeat(np.arange(self.S, dtype=np.int32), W), len(blocks))
+        ids = np.repeat(np.arange(self.S, dtype=np.int32), W * len(blocks))
         # Window weights (-t 4/5): each entry's, and the query windows' (row_weights)
         self.row_weights = kernel.row_weights
         vals = None
         if (
             kernel.window_weights(W) is not None
         ):  # an RC window carries its forward weight
-            vals = np.concatenate(
+            vals = np.hstack(
                 [
-                    np.broadcast_to(kernel.row_weights(b, rc=k == 1), b.shape).ravel()
+                    np.broadcast_to(kernel.row_weights(b, rc=k == 1), b.shape)
                     for k, b in enumerate(blocks)
                 ]
-            )
+            ).ravel()
         keep = keys < self.n_lmers  # PAD past shorter sequences' windows
         if not keep.all():
             keys, ids = keys[keep], ids[keep]
@@ -707,15 +719,18 @@ class LmerIndex:
     def nbytes(self) -> int:
         return self.offsets.nbytes + self.ids.nbytes + self.vals.nbytes
 
-    def pairwise(self, bx):
+    def pairwise(self, bx, diag_offset=None):
         """K_raw [B, S] of packed query rows bx [B, W] against the columns.
 
         Rows may contain padding windows (any value >= 4^l), which add nothing.
-        CPU/CUDA return float64, MLX float32, on bx's device.
+        CPU/CUDA return float64, MLX float32, on bx's device. diag_offset (CPU,
+        CUDA): row b is column diag_offset + b of a self-Gram, and only its
+        columns from there on are computed (the rest are 0).
         """
         from gkmsvm.kernels.packed import device_of
 
         dev = device_of(bx)
+        diag_offset = -1 if diag_offset is None else diag_offset
         if dev == "cpu":
             import numba
 
@@ -727,9 +742,12 @@ class LmerIndex:
                 self.S,
                 max(1, n_split),
                 self._wx(bx),
+                diag_offset,
             )
         if dev == "cuda":
-            return self._pairwise_cuda(bx)
+            return self._pairwise_cuda(bx, diag_offset)
+        if diag_offset >= 0:
+            raise ValueError("diag_offset is not supported on MLX")
         return self._pairwise_mlx(bx)
 
     def reduce(self, bx, inv_dx, inv_ds, coef, gamma=np.nan):
@@ -843,7 +861,7 @@ class LmerIndex:
                 )
         return self._dev[dev]
 
-    def _pairwise_cuda(self, bx):
+    def _pairwise_cuda(self, bx, diag_offset=-1):
         import cupy as cp
 
         offsets, ids, masks, weights, vals = self._arrays("cuda")
@@ -881,6 +899,7 @@ class LmerIndex:
                     np.int32(wx_stride),
                     vals,
                     np.int32(weighted),
+                    np.int64(diag_offset + b0 if diag_offset >= 0 else -1),
                 ),
             )
         return out

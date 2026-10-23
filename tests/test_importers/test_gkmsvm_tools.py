@@ -88,14 +88,14 @@ def test_svs_matched_by_id(tmp_path):
     """As gkmsvm_classify: each alpha picks its SV by id (extra FASTA records
     are ignored, lowercase is read as uppercase); an id missing from the
     FASTA is an error."""
-    from gkmsvm.codec import one_hot_encode
+    from gkmsvm.codec import encode_codes
 
     seqs = {"a": "ACGTTGCAAGGTC", "b": "ttgacgatcgaat", "c": "GGGCCCATATAGC"}
     model = load_classic_model(_write(tmp_path, {"c": 0.5, "b": -0.3}, seqs), L=5, k=3)
     assert model.num_support_vectors == 2 and model.bias == 0.0
     np.testing.assert_array_equal(
         model.support_sequences,
-        np.stack([one_hot_encode(seqs[i].upper()) for i in ("c", "b")]),
+        np.stack([encode_codes(seqs[i]) for i in ("c", "b")]),
     )
     np.testing.assert_array_equal(model.coefficients, [0.5, -0.3])
     with pytest.raises(ValueError, match="not in"):

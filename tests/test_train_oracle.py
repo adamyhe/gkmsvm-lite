@@ -6,7 +6,7 @@ test_variable_length.py)."""
 import numpy as np
 import pytest
 
-from gkmsvm.codec import one_hot_decode
+from gkmsvm.codec import decode_codes
 from gkmsvm.fasta import read_fasta
 from gkmsvm.importers.lsgkm import load_lsgkm_model
 
@@ -35,7 +35,7 @@ def _seqs(name):
 def _sv_coefficients(model):
     """{SV sequence: coefficient}."""
     return {
-        one_hot_decode(sv): float(c)
+        decode_codes(sv): float(c)
         for sv, c in zip(model.support_sequences, model.coefficients)
     }
 

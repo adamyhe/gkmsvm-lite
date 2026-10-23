@@ -9,7 +9,7 @@ from __future__ import annotations
 import numba
 import numpy as np
 
-from gkmsvm.backend import get_array_module, to_cpu
+from gkmsvm.backend import get_array_module, is_mlx, to_cpu
 
 BASES = "ACGT"
 
@@ -63,6 +63,85 @@ def one_hot_encode(
     ohe = np.zeros((L, 4), dtype=np.int8)
     _fast_one_hot(ohe, seq_bytes, _OHE_MAPPING, allow_n or allow_other, allow_other)
     return ohe.T.astype(dtype, copy=False)
+
+
+# Base codes: A=0, C=1, G=2, T=3; N (and other letters) mark as 4 and 5 here
+# and are stored as A, as every kernel reads them (LS-GKM reads non-ACGT as A)
+_CODE_MAPPING = np.full(256, 5, dtype=np.uint8)
+for _i, _b in enumerate(BASES):
+    _CODE_MAPPING[ord(_b)] = _i
+    _CODE_MAPPING[ord(_b.lower())] = _i
+_CODE_MAPPING[ord("N")] = 4
+_CODE_MAPPING[ord("n")] = 4
+
+
+@numba.njit(cache=True)
+def _fast_codes(out, seq, mapping, allow_n, allow_other):
+    for i in range(len(seq)):
+        c = mapping[seq[i]]
+        if c < 4:
+            out[i] = c
+            continue
+        if c == 4:
+            if not allow_n:
+                raise ValueError("Invalid base in sequence (pass allow_n=True for N)")
+        elif not allow_other:
+            raise ValueError(
+                "Invalid base in sequence (pass allow_other=True to read "
+                "non-ACGTN letters as N)"
+            )
+        out[i] = 0
+
+
+def encode_codes(
+    sequence: str, *, allow_n: bool = False, allow_other: bool = False
+) -> np.ndarray:
+    """[L] uint8 base codes (A=0, C=1, G=2, T=3) of a DNA string, the form
+    every kernel reads. N, and with allow_other any other letter, is stored
+    as A: the kernels score it as A on the forward strand, as LS-GKM does.
+    allow_n, allow_other as in one_hot_encode."""
+    if len(sequence) == 0:
+        raise ValueError("Sequence must be non-empty")
+    seq_bytes = np.frombuffer(bytearray(sequence, "ascii"), dtype=np.uint8)
+    out = np.empty(len(sequence), dtype=np.uint8)
+    _fast_codes(out, seq_bytes, _CODE_MAPPING, allow_n or allow_other, allow_other)
+    return out
+
+
+def to_codes(x):
+    """[B, L] uint8 base codes of a [B, 4, L] one-hot batch, on x's device.
+
+    N (an all-zero column) becomes A, as the kernels read it. A [B, L]
+    integer array is taken as codes already.
+    """
+    xp = get_array_module(x)
+    if x.ndim == 2:
+        if str(x.dtype) == "uint8":
+            return x
+        if not any(t in str(x.dtype) for t in ("int", "bool")):
+            raise ValueError(f"[B, L] base codes must be integers, got {x.dtype}")
+        return x.astype(xp.uint8)
+    if x.ndim != 3 or x.shape[1] != 4:
+        raise ValueError(
+            f"expected a [B, 4, L] one-hot array or [B, L] base codes, got "
+            f"{list(x.shape)}"
+        )
+    return xp.argmax(x, axis=1).astype(xp.uint8)
+
+
+def codes_to_one_hot(codes, dtype=np.float32):
+    """[B, 4, L] one-hot of [B, L] base codes, on codes' device."""
+    xp = get_array_module(codes)
+    if is_mlx(codes):  # MLX takes its own dtypes
+        dtype = getattr(xp, np.dtype(dtype).name)
+    return (codes[:, None, :] == xp.arange(4, dtype=xp.uint8)[None, :, None]).astype(
+        dtype
+    )
+
+
+def decode_codes(codes) -> str:
+    """DNA string of [L] base codes."""
+    return np.frombuffer(b"ACGT", dtype=np.uint8)[to_cpu(codes)].tobytes().decode()
 
 
 def one_hot_decode(arr: np.ndarray) -> str:

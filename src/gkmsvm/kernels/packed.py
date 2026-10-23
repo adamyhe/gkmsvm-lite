@@ -128,18 +128,22 @@ class PackedGkmKernel(GkmKernel):
             )
 
     def pack(self, x, lengths=None):
-        """[B, W] uint32 packed windows of one-hot x, on x's device.
+        """[B, W] uint32 packed windows of x, on x's device.
 
-        N (all-zero) positions pack as A. lengths [B]: each row's sequence
-        length (x is padded to its longest); windows past a row's last are
-        PAD_WINDOW, and a row shorter than l has none.
+        x: [B, L] base codes (codec.to_codes), or a [B, 4, L] one-hot (N, all
+        zero, packs as A). lengths [B]: each row's sequence length (x is padded
+        to its longest); windows past a row's last are PAD_WINDOW, and a row
+        shorter than l has none.
         """
-        B, _, L = x.shape
+        from gkmsvm.codec import to_codes
+
+        B, L = x.shape[0], x.shape[-1]
         self._check_length(L)
         W = L - self.l + 1
         dev = device_of(x)
         xp = np if dev == "mlx" else get_array_module(x)
-        base = (xp.argmax(to_cpu(x) if dev == "mlx" else x, axis=1)).astype(xp.uint32)
+        codes = to_codes(x)
+        base = (to_cpu(codes) if dev == "mlx" else codes).astype(xp.uint32)
         packed = xp.zeros((B, W), dtype=xp.uint32)
         for k in range(self.l):
             packed |= base[:, k : k + W] << xp.uint32(2 * k)
@@ -181,7 +185,11 @@ class PackedGkmKernel(GkmKernel):
         """K_raw [B, S] between packed rows bx [B, Wx] and columns by [S, Wy].
 
         by_rc: the columns' reverse complements, added in the same call (one
-            masked-join index serves both blocks).
+            masked-join index serves both blocks). When the columns hold more
+            windows than the rows, the masked join instead indexes only the
+            forward columns and probes with both strands of the rows, since
+            K(x, rc(y)) = K(rc(x), y): the index build, which dominates
+            scoring against many SVs, halves.
         diag_offset: rows are sequences 0..B-1 and columns sequences
             diag_offset.. of one set (a self-Gram column panel); entries below
             the diagonal may be left 0 (CPU masked join only).
@@ -198,6 +206,9 @@ class PackedGkmKernel(GkmKernel):
         wx, wy = self.row_weights(bx), self.row_weights(by)
         wy_rc = self.row_weights(by_rc, rc=True)
         if plan is not None and not small:
+            if by_rc is not None and by.size > bx.size:
+                bx, wx = _with_rc_rows(bx, wx, self.l)
+                by_rc = wy_rc = None
             return _masked(bx, by, plan, by_rc, diag_offset, dev, wx, wy, wy_rc)
         if wx is None:
             raw = self._brute(bx, by, dev)
@@ -272,6 +283,32 @@ def _masked(bx, by, plan, by_rc, diag_offset, dev, wx=None, wy=None, wy_rc=None)
     # Exact integer counts combined in float64; Metal holds float32
     out = masked.masked_pairwise_mlx(bx, by, plan, by_rc, wx=wx, wy=wy, wy_rc=wy_rc)
     return mx.array(out.astype(np.float32))
+
+
+def _with_rc_rows(bx, wx, l):
+    """Rows holding their RC windows and then their own ([B, 2W]), and the
+    windows' weights (wx: row_weights of bx, or None; an RC window carries
+    its forward window's weight).
+
+    The masked join on CPU visits one run of non-PAD windows per row, so
+    padded rows move their non-PAD windows to the front (their order doesn't
+    change the sum). MLX rows come back as NumPy, which masked_pairwise_mlx
+    takes.
+    """
+    if is_mlx(bx):
+        bx = np.asarray(bx)
+    xp = get_array_module(bx)
+    both = _concat_windows(_rc_windows(bx, l), bx)
+    w = None if wx is None else np.concatenate([wx[:, ::-1], wx], axis=1)
+    if is_padded(both):
+        order = xp.argsort(both == PAD_WINDOW, axis=1)
+        both = xp.ascontiguousarray(xp.take_along_axis(both, order, axis=1))
+        if w is not None:
+            w = np.broadcast_to(w, both.shape)
+            w = np.take_along_axis(w, to_cpu(order), axis=1)
+    if w is not None:
+        w = np.ascontiguousarray(w)
+    return both, w
 
 
 def _concat_windows(a, b):

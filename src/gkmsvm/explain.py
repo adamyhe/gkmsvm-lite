@@ -21,6 +21,7 @@ import numpy as np
 from numba import njit, prange
 
 from gkmsvm.backend import get_array_module, is_mlx
+from gkmsvm.codec import codes_to_one_hot
 from gkmsvm.kernels.direct import _packed_mismatches
 from gkmsvm.kernels.packed import PAD_WINDOW
 from gkmsvm.svm import (
@@ -1177,7 +1178,9 @@ def _gkmexplain(model, x, lengths, resolved, batch_size, verbose, metal=False):
     path and the per-SV kernel run in Metal."""
     if resolved == "importance":
         hyp = _gkmexplain(model, x, lengths, "hypothetical", batch_size, verbose, metal)
-        return hyp * _n_as_a(x)
+        # N is stored as A, so its importance goes there, as in lsgkm (and the
+        # importance then sums to score - bias)
+        return hyp * codes_to_one_hot(x, hyp.dtype)
 
     is_perturbation = resolved == "perturbation"
 
@@ -1186,7 +1189,7 @@ def _gkmexplain(model, x, lengths, resolved, batch_size, verbose, metal=False):
     # RBF (-t 3/-t 5): each SV's contributions scale by _rbf_scale of its kernel value
     gamma = kernel.gamma if base is not kernel else None
     xp = get_array_module(x)
-    B, _, seqlen = x.shape
+    B, seqlen = x.shape[0], x.shape[-1]
     l = base.l
     d = l if base.d is None else base.d  # -t 0 without d counts every pair
     if is_perturbation:
@@ -1302,15 +1305,6 @@ def _gkmexplain(model, x, lengths, resolved, batch_size, verbose, metal=False):
                 )
 
     return result
-
-
-def _n_as_a(x):
-    """One-hot x with N (all-zero) positions set to A: N packs as A, so its
-    windows score as A and its importance goes there, as in lsgkm (and the
-    importance then sums to score - bias)."""
-    xp = get_array_module(x)
-    n = (x.sum(axis=1, keepdims=True) == 0).astype(x.dtype)
-    return xp.concatenate([x[:, :1] + n, x[:, 1:]], axis=1)
 
 
 def _query_wts(base, packed):
@@ -1546,7 +1540,7 @@ def _explain_with_table(model, x, A, perturbation, batch_size, verbose, lengths)
     base = model.kernel.base
     xp = get_array_module(x)
     x_cpu = to_cpu(x)
-    seqlen = x_cpu.shape[2]
+    seqlen = x_cpu.shape[-1]
     out = np.concatenate(
         [
             _explain_table_cpu(
@@ -1648,7 +1642,7 @@ def _explain_lmer(
             verbose,
             perturbation,
         )
-    seqlen = x.shape[2]
+    seqlen = x.shape[-1]
     parts = []
     for _, packed_x, packed_x_rc, wx in _batches(base, x, lengths, batch_size, verbose):
         inv_dx = _inv_dx(base, packed_x, packed_x_rc)
@@ -1755,7 +1749,7 @@ def _explain_lmer_cuda(
     table_a = cp.asarray(table_a, dtype=cp.float64)
     table_b = cp.asarray(table_b, dtype=cp.float64)
 
-    B, _, seqlen = x.shape
+    B, seqlen = x.shape[0], x.shape[-1]
     out = cp.empty((B, 4, seqlen), dtype=cp.float64)
     for b0, packed_x, packed_x_rc, wx in _batches(
         base, x, lengths, batch_size, verbose
@@ -1835,7 +1829,7 @@ def mutation_impact(
     ref, alt, ref_lengths, alt_lengths = _allele_arrays(
         ref, alt, ref_lengths, alt_lengths
     )
-    L = ref.shape[2]
+    L = ref.shape[-1]
     short = None
     if ref_lengths is not None or alt_lengths is not None:
         both_lengths = _joint_lengths(

@@ -23,7 +23,6 @@ def load_r_gkmsvm_model(
     maxnmm: int = 3,
     useTgkm: int = 1,
     addRC: bool = True,
-    dtype: np.dtype | type = np.float32,
     sv_chunk_size: int | None = None,
     device: str = "cpu",
 ) -> GkmSVM:
@@ -34,7 +33,7 @@ def load_r_gkmsvm_model(
         svseq_path: PREFIX_svseq.fa; default: next to path.
         L, K, maxnmm, useTgkm, addRC: the kernel, as given to gkmsvm_kernel
             (the package's defaults).
-        dtype, sv_chunk_size, device: as in load_lsgkm_model.
+        sv_chunk_size, device: as in load_lsgkm_model.
 
     Returns:
         A GkmSVM with bias 0 (classic.load_classic_model).
@@ -49,7 +48,6 @@ def load_r_gkmsvm_model(
         d=maxnmm,
         filter_type=useTgkm,
         include_rc=addRC,
-        dtype=dtype,
         sv_chunk_size=sv_chunk_size,
         device=device,
     )

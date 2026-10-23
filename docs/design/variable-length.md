@@ -90,7 +90,7 @@ So every kernel that reads packed windows gets a `w == PAD_WINDOW → skip` test
   - a `[B, 4, L_max]` array plus `lengths`, or
   - a list of `[4, L_i]` arrays or DNA strings, converted with `codec.encode_batch` (which already returns padded arrays plus a mask; it would return lengths).
 - **Outputs:** scores are `[B, 1]` as now. ISM and GkmExplain return `[B, 4, L_max]`, zero past each length, for either input form.
-- **Models:** `GkmSVM.support_sequences` stays `[S, 4, L_max]`, plus `sv_lengths [S]` (None when uniform). npz stores `sv_lengths` (older npz files have none, so they are uniform). `save_lsgkm` writes each SV trimmed to its length. `DeviceModel` moves `sv_lengths` with the arrays.
+- **Models:** `GkmSVM.support_sequences` is `[S, L_max]` base codes, plus `sv_lengths [S]` (None when uniform). npz stores `sv_lengths` (older npz files have none, so they are uniform). `save_lsgkm` writes each SV trimmed to its length. `DeviceModel` moves `sv_lengths` with the arrays.
 - **CLI:** with `--variable-length`, FASTAs with mixed lengths work in every subcommand. `explain` writes padded `[B, 4, L_max]` attribution and sequence arrays and warns when lengths differ (TF-MoDISco needs one length).
 
 ## Validation (LS-GKM oracles)

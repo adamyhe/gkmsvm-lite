@@ -481,7 +481,7 @@ class TestMutationImpactOracle:
         from gkmsvm.importers.lsgkm import load_lsgkm_model
 
         model = load_lsgkm_model(
-            str(self.FIXTURES / f"lsgkm_mode5_{kind}.model.txt.gz"), dtype=np.float64
+            str(self.FIXTURES / f"lsgkm_mode5_{kind}.model.txt.gz")
         )
         seqs = [s for _, s in read_fasta(str(self.FIXTURES / "lsgkm_mode5_test51.fa"))]
         rows = [l.split("\t") for l in open(self.FIXTURES / f"lsgkm_mode5_{kind}.txt")]

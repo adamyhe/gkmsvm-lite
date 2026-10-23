@@ -237,7 +237,7 @@ class TestLoadModelErrors:
         """)
         )
         model = load_lsgkm_model(p)
-        assert model.support_sequences.shape == (2, 4, 6)
+        assert model.support_sequences.shape == (2, 6)
         np.testing.assert_array_equal(model.sv_lengths, [4, 6])
 
 

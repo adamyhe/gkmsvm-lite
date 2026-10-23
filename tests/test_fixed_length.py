@@ -201,7 +201,7 @@ def test_train_crops_to_length(tmp_path):
             "cpu",
         ]
     )
-    assert load_model(out).support_sequences.shape[2] == 48
+    assert load_model(out).support_sequences.shape[-1] == 48
     with pytest.raises(SystemExit):  # default 300 bp: every record is shorter
         main(
             [

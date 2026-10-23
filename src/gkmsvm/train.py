@@ -14,7 +14,7 @@ from gkmsvm.backend import (
     to_gpu,
     to_mlx,
 )
-from gkmsvm.codec import one_hot_encode
+from gkmsvm.codec import encode_codes, to_codes
 from gkmsvm.svm import KERNEL_BUILDERS, GkmSVM, as_batch, resolve_kernel_type
 
 # ---------------------------------------------------------------------------
@@ -94,8 +94,8 @@ def train_gkmsvm(
     Returns:
         A trained GkmSVM model.
     """
-    pos = _to_onehot(pos_seqs, allow_other_bases)
-    neg = _to_onehot(neg_seqs, allow_other_bases)
+    pos = _to_codes(pos_seqs, allow_other_bases)
+    neg = _to_codes(neg_seqs, allow_other_bases)
     X, lengths = _concat([pos, neg])
     _check_lengths(X, lengths, l)
     X = _move_to_device(X, device, verbose)
@@ -193,7 +193,7 @@ def train_gkmsvr(
         A trained GkmSVM model. Scores are predicted continuous values.
     """
     _check_solver(solver)
-    X, lengths = _to_onehot(sequences, allow_other_bases)
+    X, lengths = _to_codes(sequences, allow_other_bases)
     _check_lengths(X, lengths, l)
     X = _move_to_device(X, device, verbose)
     y = np.asarray(labels, dtype=np.float64)
@@ -414,7 +414,7 @@ def _fit(
     sv_lengths = None
     if lengths is not None:
         sv_lengths = lengths[sv_idx]
-        sv_seqs = sv_seqs[:, :, : int(sv_lengths.max())]
+        sv_seqs = sv_seqs[:, : int(sv_lengths.max())]
     coefs = np.asarray(coefs, dtype=np.float64)
     if verbose:
         print(
@@ -549,19 +549,19 @@ def _gram_fits_on_cpu(N: int) -> bool:
     return gram_bytes < available * 0.75
 
 
-def _to_onehot(seqs, allow_other: bool = False):
-    """(X [N, 4, L] one-hot, lengths [N] or None): DNA strings may hold N, and
-    with allow_other any letter, read as N; lists of different lengths are
-    padded to the longest (svm.as_batch)."""
-    if isinstance(seqs, np.ndarray) and seqs.ndim == 3:
-        return seqs, None
+def _to_codes(seqs, allow_other: bool = False):
+    """(X [N, L] base codes, lengths [N] or None) from a [N, 4, L] one-hot or
+    [N, L] codes array, or a list of DNA strings or arrays: DNA strings may
+    hold N, and with allow_other any letter, read as A (as in LS-GKM); lists
+    of different lengths are padded to the longest (svm.as_batch)."""
+    if isinstance(seqs, np.ndarray) and seqs.ndim in (2, 3):
+        return to_codes(seqs), None
     if isinstance(seqs, (list, tuple)):
         if len(seqs) == 0:
             raise ValueError("Sequence list must be non-empty")
         if isinstance(seqs[0], str):
-            # N encodes as all-zero (scored as A, as in LS-GKM)
             seqs = [
-                one_hot_encode(s, allow_n=True, allow_other=allow_other) for s in seqs
+                encode_codes(s, allow_n=True, allow_other=allow_other) for s in seqs
             ]
         if isinstance(seqs[0], np.ndarray):
             return as_batch(list(seqs))
@@ -573,20 +573,18 @@ def _to_onehot(seqs, allow_other: bool = False):
 
 def _concat(parts):
     """(X, lengths or None): (X, lengths) parts in one batch, padded to the longest."""
-    L = max(X.shape[2] for X, _ in parts)
+    L = max(X.shape[-1] for X, _ in parts)
     lengths = np.concatenate(
-        [np.full(X.shape[0], X.shape[2]) if n is None else n for X, n in parts]
+        [np.full(X.shape[0], X.shape[-1]) if n is None else n for X, n in parts]
     ).astype(np.int64)
-    X = np.concatenate(
-        [np.pad(X, ((0, 0), (0, 0), (0, L - X.shape[2]))) for X, _ in parts]
-    )
+    X = np.concatenate([np.pad(X, ((0, 0), (0, L - X.shape[-1]))) for X, _ in parts])
     return X, None if (lengths == L).all() else lengths
 
 
 def _check_lengths(X, lengths, l):
     """Training sequences need at least one l-mer each (gkmtrain silently
     builds a broken model from one without)."""
-    shortest = X.shape[2] if lengths is None else int(lengths.min())
+    shortest = X.shape[-1] if lengths is None else int(lengths.min())
     if shortest < l:
         raise ValueError(
             f"training sequences must be at least l = {l} bp long; the shortest "

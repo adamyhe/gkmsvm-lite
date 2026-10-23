@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from gkmsvm.backend import to_cpu
-from gkmsvm.codec import one_hot_decode
+from gkmsvm.codec import decode_codes
 
 
 def save_npz(model, path: str | Path) -> None:
@@ -126,8 +126,8 @@ def save_lsgkm(model, path: str | Path) -> None:
 
     lengths = model.sv_lengths
     for i in range(len(coefs)):
-        sv = svs[i] if lengths is None else svs[i][:, : lengths[i]]  # drop the padding
-        seq_str = one_hot_decode(sv)
+        sv = svs[i] if lengths is None else svs[i][: lengths[i]]  # drop the padding
+        seq_str = decode_codes(sv)
         lines.append(f"{coefs[i]} {seq_str}")
 
     text = "\n".join(lines) + "\n"
