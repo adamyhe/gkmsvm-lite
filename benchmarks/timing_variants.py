@@ -164,7 +164,7 @@ def _score_deltasvm(spec: dict) -> None:
         weights = np.load(table) - float(load_lsgkm_model(spec["model"]).bias)
     else:
         weights = np.asarray(
-            load_lsgkm_model(spec["model"], dtype=np.float64)
+            load_lsgkm_model(spec["model"])
             .to_deltasvm(query_norm=True)
             .weights
         )
@@ -194,7 +194,7 @@ def _worker(spec: dict) -> None:
         _score_deltasvm(spec)
         return
     t0 = time.perf_counter()
-    model = load_lsgkm_model(spec["model"], dtype=np.float64)
+    model = load_lsgkm_model(spec["model"])
     if spec["device"] == "cuda":
         model.cuda()
     data = np.load(Path(spec["work"]) / "variants.npz")

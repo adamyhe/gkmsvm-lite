@@ -185,7 +185,7 @@ def main():
             sys.exit(f"gkmpredict not found in {args.mlsgkm_bin}")
         c_runs.append((MLSGKM, gkmpredict, args.threads))
 
-    full = load_lsgkm_model(MODEL_PATH, dtype=np.float64)
+    full = load_lsgkm_model(MODEL_PATH)
     S = full.num_support_vectors
     sizes = sorted({S if s == "max" else min(int(s), S) for s in args.sizes.split(",")})
     order = np.random.default_rng(0).permutation(S)
