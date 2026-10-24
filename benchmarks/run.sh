@@ -10,6 +10,7 @@
 #   bash benchmarks/run.sh                    # make paper (DEVICE=cuda)
 #   bash benchmarks/run.sh fig1b s2           # selected targets
 #   bash benchmarks/run.sh --quick            # small settings, results/quick/
+#   bash benchmarks/run.sh -B fig1b           # rerun even if results are up to date
 #   bash benchmarks/run.sh --cpu-only fig1b
 #   bash benchmarks/run.sh --lsgkm-bin <lsgkm>/bin fig1c   # source build with gkmexplain
 #   bash benchmarks/run.sh --mlsgkm-bin <mLS-GKM>/bin       # add the mLS-GKM baseline
@@ -22,11 +23,13 @@ LSGKM_ENV="lsgkm"
 LITE_ENV="gkmsvm-bench"
 DEVICE="cuda"
 MAKE_VARS=()
+MAKE_FLAGS=()
 TARGETS=()
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --quick)     MAKE_VARS+=(QUICK=1); shift ;;
+        -B|--force)  MAKE_FLAGS+=(-B); shift ;;
         --cpu-only)  DEVICE="cpu"; shift ;;
         --lsgkm-bin) MAKE_VARS+=("LSGKM_BIN=$2"); shift 2 ;;
         --mlsgkm-bin) MAKE_VARS+=("MLSGKM_BIN=$2"); shift 2 ;;
@@ -82,5 +85,5 @@ LOG="$LOG_DIR/$(date +%Y%m%d_%H%M%S)_${COMMIT}_${TAG}.log"
 
 echo ">>> make ${TARGETS[*]} DEVICE=$DEVICE ${MAKE_VARS[*]:-}  (log: $LOG)"
 conda run --no-capture-output -n "$LITE_ENV" \
-    make -C "$REPO/benchmarks" "${TARGETS[@]}" DEVICE="$DEVICE" LSGKM_ENV="$LSGKM_ENV" \
+    make ${MAKE_FLAGS[@]+"${MAKE_FLAGS[@]}"} -C "$REPO/benchmarks" "${TARGETS[@]}" DEVICE="$DEVICE" LSGKM_ENV="$LSGKM_ENV" \
     ${MAKE_VARS[@]+"${MAKE_VARS[@]}"} 2>&1 | tee "$LOG"
