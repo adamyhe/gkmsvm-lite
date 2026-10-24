@@ -269,11 +269,11 @@ def test_gkmexplain_on_mixed_svs(kernel_type, mode):
 
 def _device(device):
     """(function moving an array to device, rtol), or skip."""
-    from gkmsvm.backend import HAS_CUPY, to_gpu, to_mlx
+    from gkmsvm.backend import cuda_available, to_gpu, to_mlx
 
     if device == "cuda":
-        if not HAS_CUPY:
-            pytest.skip("CuPy not installed")
+        if not cuda_available():
+            pytest.skip("No CUDA GPU (or CuPy not installed)")
         return to_gpu, 1e-9
     pytest.importorskip("mlx.core")
     return to_mlx, 2e-4  # float32
