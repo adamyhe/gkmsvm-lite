@@ -526,7 +526,9 @@ def _available_memory(xp) -> int:
         with open("/proc/meminfo") as f:
             for line in f:
                 if line.startswith("MemAvailable:"):
-                    return int(line.split()[1]) * 1024
+                    available = int(line.split()[1]) * 1024
+                    cgroup = _cgroup_available_memory()
+                    return available if cgroup is None else min(available, cgroup)
     except (FileNotFoundError, OSError):
         pass
     try:
@@ -539,6 +541,56 @@ def _available_memory(xp) -> int:
     except (AttributeError, ValueError, OSError):
         pass
     return 8 * 1024**3
+
+
+def _cgroup_available_memory(
+    proc_cgroup: str = "/proc/self/cgroup", root: str = "/sys/fs/cgroup"
+) -> int | None:
+    """Memory left under this process's cgroup limits (a Slurm job's --mem, a
+    container's limit), or None without one. MemAvailable counts the whole
+    machine, so on a shared node it can be far above what the job may use.
+    The limit can sit on an ancestor (Slurm limits the job's cgroup while
+    the process runs in an unlimited step/task cgroup below it), so every
+    level up to the root counts and the tightest wins. Inactive page cache
+    is reclaimable, so it counts as free."""
+    from pathlib import Path
+
+    try:
+        entries = [line.split(":", 2) for line in Path(proc_cgroup).read_text().splitlines()]
+    except OSError:
+        return None
+    for entry in entries:
+        if len(entry) != 3:
+            continue
+        _, controllers, path = entry
+        if controllers == "":  # v2
+            base = Path(root)
+            files = ("memory.max", "memory.current", "inactive_file")
+        elif "memory" in controllers.split(","):  # v1
+            base = Path(root) / "memory"
+            files = ("memory.limit_in_bytes", "memory.usage_in_bytes", "total_inactive_file")
+        else:
+            continue
+        rel = Path(path.strip("/"))
+        best = None
+        for level in (rel, *rel.parents):
+            d = base / level
+            try:
+                limit = (d / files[0]).read_text().strip()
+                usage = int((d / files[1]).read_text())
+                stat = dict(
+                    line.split()[:2] for line in (d / "memory.stat").read_text().splitlines()
+                )
+            except (OSError, ValueError):
+                continue
+            # v1 reports "no limit" as a huge number
+            if limit == "max" or int(limit) >= 1 << 60:
+                continue
+            free = max(int(limit) - usage + int(stat.get(files[2], 0)), 0)
+            best = free if best is None else min(best, free)
+        if best is not None:
+            return best
+    return None
 
 
 def _gram_fits_on_cpu(N: int) -> bool:

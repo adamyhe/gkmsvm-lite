@@ -344,3 +344,94 @@ def test_train_strings_with_n_equal_onehot():
     b = train_gkmsvm(enc(pos), enc(neg), **kw)
     np.testing.assert_allclose(a.coefficients, b.coefficients, rtol=1e-10, atol=1e-12)
     assert a.bias == pytest.approx(b.bias)
+
+
+class TestCgroupMemory:
+    """_available_memory caps MemAvailable at the cgroup limit (Slurm --mem)."""
+
+    @staticmethod
+    def _write(root, rel, files):
+        d = root / rel
+        d.mkdir(parents=True)
+        for name, text in files.items():
+            (d / name).write_text(text)
+
+    def test_v1(self, tmp_path):
+        from gkmsvm.train import _cgroup_available_memory
+
+        proc = tmp_path / "cgroup"
+        proc.write_text("11:cpuset:/slurm/job1\n5:memory:/slurm/job1\n3:cpu,cpuacct:/slurm/job1\n")
+        self._write(tmp_path / "sys", "memory/slurm/job1", {
+            "memory.limit_in_bytes": str(4 << 30),
+            "memory.usage_in_bytes": str(3 << 30),
+            "memory.stat": f"cache 5\ntotal_inactive_file {1 << 30}\n",
+        })
+        assert _cgroup_available_memory(str(proc), str(tmp_path / "sys")) == 2 << 30
+
+    def test_limit_on_ancestor(self, tmp_path):
+        """Slurm's layout: the job's cgroup has the limit, the task's doesn't."""
+        from gkmsvm.train import _cgroup_available_memory
+
+        proc = tmp_path / "cgroup"
+        proc.write_text("5:memory:/slurm/uid_1/job_2/step_batch/task_0\n")
+        unlimited = {"memory.limit_in_bytes": "9223372036854771712",
+                     "memory.usage_in_bytes": str(1 << 30), "memory.stat": "total_inactive_file 0\n"}
+        sys_root = tmp_path / "sys"
+        self._write(sys_root, "memory/slurm/uid_1/job_2/step_batch/task_0", unlimited)
+        for name, text in {"memory.limit_in_bytes": str(8 << 30),
+                           "memory.usage_in_bytes": str(3 << 30),
+                           "memory.stat": "total_inactive_file 0\n"}.items():
+            (sys_root / "memory/slurm/uid_1/job_2" / name).write_text(text)
+        for name, text in unlimited.items():
+            (sys_root / "memory" / name).write_text(text)
+        assert _cgroup_available_memory(str(proc), str(sys_root)) == 5 << 30
+
+    def test_v2(self, tmp_path):
+        from gkmsvm.train import _cgroup_available_memory
+
+        proc = tmp_path / "cgroup"
+        proc.write_text("0::/system.slice/job\n")
+        self._write(tmp_path / "sys", "system.slice/job", {
+            "memory.max": str(2 << 30),
+            "memory.current": str(1 << 30),
+            "memory.stat": "anon 1\ninactive_file 0\n",
+        })
+        assert _cgroup_available_memory(str(proc), str(tmp_path / "sys")) == 1 << 30
+
+    @pytest.mark.parametrize("version", ["v1", "v2"])
+    def test_no_limit(self, tmp_path, version):
+        from gkmsvm.train import _cgroup_available_memory
+
+        proc = tmp_path / "cgroup"
+        if version == "v1":
+            proc.write_text("5:memory:/\n")
+            files = {"memory.limit_in_bytes": "9223372036854771712",
+                     "memory.usage_in_bytes": "1", "memory.stat": "total_inactive_file 0\n"}
+            self._write(tmp_path / "sys", "memory", files)
+        else:
+            proc.write_text("0::/\n")
+            files = {"memory.max": "max", "memory.current": "1", "memory.stat": "inactive_file 0\n"}
+            (tmp_path / "sys").mkdir()
+            for name, text in files.items():
+                (tmp_path / "sys" / name).write_text(text)
+        assert _cgroup_available_memory(str(proc), str(tmp_path / "sys")) is None
+
+    def test_missing_files(self, tmp_path):
+        from gkmsvm.train import _cgroup_available_memory
+
+        assert _cgroup_available_memory(str(tmp_path / "absent"), str(tmp_path)) is None
+        proc = tmp_path / "cgroup"
+        proc.write_text("5:memory:/slurm/job1\n")
+        assert _cgroup_available_memory(str(proc), str(tmp_path / "sys")) is None
+
+    def test_available_memory_is_capped(self, monkeypatch):
+        from pathlib import Path
+
+        from gkmsvm import train
+
+        if not Path("/proc/meminfo").exists():
+            pytest.skip("no /proc/meminfo")
+        monkeypatch.setattr(train, "_cgroup_available_memory", lambda: 12345)
+        assert train._available_memory(np) == 12345
+        monkeypatch.setattr(train, "_cgroup_available_memory", lambda: None)
+        assert train._available_memory(np) > 12345
