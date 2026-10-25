@@ -267,7 +267,7 @@ def main():
             if args.device == "cuda":
                 model.cuda()
 
-    sv_len = model.support_sequences.shape[2]
+    sv_len = model.support_sequences.shape[-1]
     print(
         f"\n  Model: {model.num_support_vectors} SVs, "
         f"L={model.kernel.l}, k={model.kernel.k}, "
