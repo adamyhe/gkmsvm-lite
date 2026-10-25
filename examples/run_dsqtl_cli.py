@@ -78,6 +78,7 @@ def download_data():
 def run_cli(*args):
     """Run gkmsvm CLI command."""
     from gkmsvm.cli import main as cli_main
+
     argv = list(args)
     print(f"  $ gkmsvm {' '.join(argv)}")
     cli_main(argv)
@@ -100,14 +101,28 @@ def train_models(n_models: int, device: str) -> list[Path]:
         print(f"\n── Training model {i}/{n_models} ──")
         t0 = time.time()
         run_cli(
-            "-v", "train",
-            "-p", pos_fa, "-n", neg_fa,
-            "-o", str(model_path),
-            "-t", "estimated",
-            "-l", str(KERNEL_L), "-k", str(KERNEL_K), "-d", str(KERNEL_D),
-            "-C", str(C_PARAM),
-            "--solver", "auto",
-            "--device", device,
+            "-v",
+            "train",
+            "-p",
+            pos_fa,
+            "-n",
+            neg_fa,
+            "-o",
+            str(model_path),
+            "-t",
+            "estimated",
+            "-l",
+            str(KERNEL_L),
+            "-k",
+            str(KERNEL_K),
+            "-d",
+            str(KERNEL_D),
+            "-C",
+            str(C_PARAM),
+            "--solver",
+            "auto",
+            "--device",
+            device,
         )
         print(f"  Trained in {time.time() - t0:.1f}s")
         model_paths.append(model_path)
@@ -129,10 +144,14 @@ def convert_to_deltasvm(model_paths: list[Path]) -> list[Path]:
         print(f"\n── Converting {model_path.name} to deltaSVM ──")
         t0 = time.time()
         run_cli(
-            "-v", "to-deltasvm",
-            "-m", str(model_path),
-            "-o", str(weight_path),
-            "--device", "auto",
+            "-v",
+            "to-deltasvm",
+            "-m",
+            str(model_path),
+            "-o",
+            str(weight_path),
+            "--device",
+            "auto",
         )
         print(f"  Converted in {time.time() - t0:.1f}s")
         weight_paths.append(weight_path)
@@ -157,6 +176,7 @@ def average_weights(weight_paths: list[Path]) -> Path:
                 parts = line.split("\t")
                 kmer, weight = parts[0], float(parts[1])
                 from gkmsvm.deltasvm import _kmer_to_index
+
                 w[_kmer_to_index(kmer)] = weight
         all_weights.append(w)
 
@@ -176,7 +196,9 @@ def average_weights(weight_paths: list[Path]) -> Path:
     return avg_path
 
 
-def score_variants(avg_weights_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def score_variants(
+    avg_weights_path: Path,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Score dsQTL test variants and return (deltas, labels, effects, published_deltas)."""
     import pandas as pd
     from gkmsvm import one_hot_encode, read_fasta, load_deltasvm_model
@@ -191,7 +213,9 @@ def score_variants(avg_weights_path: Path) -> tuple[np.ndarray, np.ndarray, np.n
     alt_seqs = [s for _, s in pos_minor] + [s for _, s in neg_minor]
     labels = np.array([1] * len(pos_major) + [0] * len(neg_major))
 
-    print(f"\nScoring {len(ref_seqs)} variants ({(labels == 1).sum()} sig + {(labels == 0).sum()} ctrl)")
+    print(
+        f"\nScoring {len(ref_seqs)} variants ({(labels == 1).sum()} sig + {(labels == 0).sum()} ctrl)"
+    )
 
     X_ref = np.stack([one_hot_encode(s) for s in ref_seqs])
     X_alt = np.stack([one_hot_encode(s) for s in alt_seqs])
@@ -207,7 +231,9 @@ def score_variants(avg_weights_path: Path) -> tuple[np.ndarray, np.ndarray, np.n
 
     # Load effect sizes
     geo = pd.read_csv(GEO_TABLE, sep="\t", compression="gzip")
-    geo = geo.sort_values("Pr(>|t|)").drop_duplicates(subset=["Chr", "SNP"], keep="first")
+    geo = geo.sort_values("Pr(>|t|)").drop_duplicates(
+        subset=["Chr", "SNP"], keep="first"
+    )
 
     effects = np.full(len(ref_seqs), np.nan)
     for idx, (name, _) in enumerate(pos_major):
@@ -237,11 +263,14 @@ def evaluate_and_plot(
 ):
     """Evaluate metrics and save plots."""
     from sklearn.metrics import (
-        roc_auc_score, average_precision_score,
-        roc_curve, precision_recall_curve,
+        roc_auc_score,
+        average_precision_score,
+        roc_curve,
+        precision_recall_curve,
     )
     from scipy.stats import spearmanr, pearsonr
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
@@ -326,18 +355,36 @@ def evaluate_and_plot(
         prec, rec, _ = precision_recall_curve(labels, scores)
         ap = average_precision_score(labels, scores)
         ax.plot(rec, prec, color=color, linewidth=2, label=f"{label} (AP={ap:.3f})")
-    ax.axhline(baseline, color="k", linestyle="--", alpha=0.3, linewidth=1,
-               label=f"Random ({baseline:.3f})")
+    ax.axhline(
+        baseline,
+        color="k",
+        linestyle="--",
+        alpha=0.3,
+        linewidth=1,
+        label=f"Random ({baseline:.3f})",
+    )
     ax.set_xlabel("Recall")
     ax.set_ylabel("Precision")
     ax.set_title("Precision-Recall Curve")
     ax.legend(loc="upper right", fontsize=9)
 
     ax = axes[2]
-    ax.hist(abs_ours[labels == 0], bins=50, alpha=0.6, label="Non-significant",
-            color="gray", density=True)
-    ax.hist(abs_ours[labels == 1], bins=50, alpha=0.6, label="dsQTL (sig.)",
-            color="steelblue", density=True)
+    ax.hist(
+        abs_ours[labels == 0],
+        bins=50,
+        alpha=0.6,
+        label="Non-significant",
+        color="gray",
+        density=True,
+    )
+    ax.hist(
+        abs_ours[labels == 1],
+        bins=50,
+        alpha=0.6,
+        label="dsQTL (sig.)",
+        color="steelblue",
+        density=True,
+    )
     ax.set_xlabel("|DeltaSVM score|")
     ax.set_ylabel("Density")
     ax.set_title("Score Distribution")
@@ -353,8 +400,9 @@ def evaluate_and_plot(
     fig, axes = plt.subplots(1, 3, figsize=(16, 4.5))
 
     ax = axes[0]
-    ax.scatter(sig_effects, sig_deltas, alpha=0.4, s=12, color="steelblue",
-               rasterized=True)
+    ax.scatter(
+        sig_effects, sig_deltas, alpha=0.4, s=12, color="steelblue", rasterized=True
+    )
     z = np.polyfit(sig_effects, sig_deltas, 1)
     x_line = np.linspace(sig_effects.min(), sig_effects.max(), 100)
     ax.plot(x_line, np.polyval(z, x_line), "r-", alpha=0.6, linewidth=1.5)
@@ -365,8 +413,7 @@ def evaluate_and_plot(
     ax.axvline(0, color="grey", linewidth=0.5, alpha=0.5)
 
     ax = axes[1]
-    ax.scatter(sig_effects, sig_pub, alpha=0.4, s=12, color="coral",
-               rasterized=True)
+    ax.scatter(sig_effects, sig_pub, alpha=0.4, s=12, color="coral", rasterized=True)
     z_pub = np.polyfit(sig_effects, sig_pub, 1)
     ax.plot(x_line, np.polyval(z_pub, x_line), "r-", alpha=0.6, linewidth=1.5)
     ax.set_xlabel("Measured effect size (beta)")
@@ -377,10 +424,16 @@ def evaluate_and_plot(
 
     ax = axes[2]
     r_vs = np.corrcoef(our_deltas, pub_deltas)[0, 1]
-    ax.scatter(pub_deltas, our_deltas, alpha=0.1, s=3, color="gray",
-               rasterized=True)
-    ax.scatter(sig_pub, sig_deltas, alpha=0.5, s=12, color="steelblue",
-               label="Significant dsQTLs", rasterized=True)
+    ax.scatter(pub_deltas, our_deltas, alpha=0.1, s=3, color="gray", rasterized=True)
+    ax.scatter(
+        sig_pub,
+        sig_deltas,
+        alpha=0.5,
+        s=12,
+        color="steelblue",
+        label="Significant dsQTLs",
+        rasterized=True,
+    )
     lo = min(pub_deltas.min(), our_deltas.min())
     hi = max(pub_deltas.max(), our_deltas.max())
     ax.plot([lo, hi], [lo, hi], "k--", alpha=0.3)
@@ -410,8 +463,9 @@ def evaluate_and_plot(
     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
 
     ax = axes[0]
-    ax.scatter(pub_w[mask], avg_w[mask], alpha=0.3, s=5, color="steelblue",
-               rasterized=True)
+    ax.scatter(
+        pub_w[mask], avg_w[mask], alpha=0.3, s=5, color="steelblue", rasterized=True
+    )
     lim = max(abs(pub_w[mask]).max(), abs(avg_w[mask]).max()) * 1.1
     ax.plot([-lim, lim], [-lim, lim], "k--", alpha=0.3)
     ax.set_xlabel("Published weight (Lee 2015)")
@@ -436,19 +490,27 @@ def evaluate_and_plot(
 
     # Save scores
     scores_path = OUT_DIR / "variant_scores.tsv"
-    np.savetxt(scores_path,
-               np.column_stack([our_deltas, pub_deltas, labels, effects]),
-               delimiter="\t",
-               header="our_delta\tpub_delta\tlabel\teffect_size",
-               comments="")
+    np.savetxt(
+        scores_path,
+        np.column_stack([our_deltas, pub_deltas, labels, effects]),
+        delimiter="\t",
+        header="our_delta\tpub_delta\tlabel\teffect_size",
+        comments="",
+    )
     print(f"Saved: {scores_path}")
 
 
 def main():
     parser = argparse.ArgumentParser(description="dsQTL deltaSVM CLI pipeline")
-    parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mlx"])
-    parser.add_argument("--n-models", type=int, default=5, help="Number of neg-set models (default: 5)")
-    parser.add_argument("--skip-training", action="store_true", help="Skip training, use cached models")
+    parser.add_argument(
+        "--device", default="auto", choices=["auto", "cpu", "cuda", "mlx"]
+    )
+    parser.add_argument(
+        "--n-models", type=int, default=5, help="Number of neg-set models (default: 5)"
+    )
+    parser.add_argument(
+        "--skip-training", action="store_true", help="Skip training, use cached models"
+    )
     args = parser.parse_args()
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)

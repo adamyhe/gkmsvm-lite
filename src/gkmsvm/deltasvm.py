@@ -15,14 +15,14 @@ import numpy as np
 from numba import njit, prange
 
 from gkmsvm.backend import DeviceModel, float_dtype, get_array_module, get_strides
-from gkmsvm.codec import reverse_complement
+from gkmsvm.svm import _progress, as_batch
 
 
 @njit(parallel=True, fastmath=True, cache=True)
 def _score_strand_numba(x, combos, powers, weights, l):
-    """Fused argmax + gapped k-mer weight lookup. No intermediate arrays."""
+    """Gapped k-mer weight lookup over [B, L] base codes. No intermediate arrays."""
     B = x.shape[0]
-    L = x.shape[2]
+    L = x.shape[-1]
     W = L - l + 1
     n_combos = combos.shape[0]
     k = combos.shape[1]
@@ -35,15 +35,11 @@ def _score_strand_numba(x, combos, powers, weights, l):
             for c in range(n_combos):
                 idx = 0
                 for j in range(k):
-                    pos = w + combos[c, j]
-                    base = 0
-                    for ch in range(1, 4):
-                        if x[b, ch, pos] > x[b, base, pos]:
-                            base = ch
-                    idx += base * powers[j]
+                    idx += np.int64(x[b, w + combos[c, j]]) * powers[j]
                 s += weights[idx]
         scores[b] = s
     return scores
+
 
 _BASE_MAP = {"A": 0, "C": 1, "G": 2, "T": 3}
 
@@ -109,31 +105,56 @@ class DeltaSVM(DeviceModel):
         return int((self.weights != 0).sum())
 
     def __call__(
-        self, x: np.ndarray, *, verbose: bool = False,
+        self,
+        x,
+        *,
+        lengths=None,
+        verbose: bool = False,
     ) -> np.ndarray:
         """Score sequences by summing gapped k-mer weights.
 
         Args:
-            x: [B, 4, L] one-hot encoded DNA sequences.
+            x: [B, 4, L] one-hot encoded DNA sequences, or a list of [4, L_i]
+                arrays or DNA strings of different lengths.
+            lengths: [B] lengths of x's rows when they differ (x padded to
+                the longest).
             verbose: Show tqdm progress bar over batch chunks.
 
         Returns:
             [B, 1] scores.
         """
+        from gkmsvm.backend import to_cpu
+
+        x, lengths = as_batch(x, lengths)
+        if lengths is not None:
+            # Each length's rows at that length (padding would count as A)
+            x = to_cpu(x)
+            score = np.zeros((x.shape[0], 1))
+            for n in np.unique(lengths):
+                rows = lengths == n
+                score[rows] = to_cpu(self(x[rows, : int(n)]))
+            return self._match_device(
+                score.astype(np.float32 if self._on_mlx else np.float64)
+            )
         x = self._match_device(x)
         score = self._score_strand(x, verbose=verbose)
         if self.include_rc:
-            score = score + self._score_strand(reverse_complement(x))
+            # (N is A, so T on the reverse strand, as the gkm-SVM kernels read it)
+            rc = get_array_module(x).ascontiguousarray(3 - x[:, ::-1])
+            score = score + self._score_strand(rc)
         return score + self.bias
 
     _INTERMEDIATE_BUDGET = 256 * 1024 * 1024  # 256 MB
 
     def _score_strand(
-        self, x: np.ndarray, *, verbose: bool = False,
+        self,
+        x: np.ndarray,
+        *,
+        verbose: bool = False,
     ) -> np.ndarray:
         """Score one strand."""
         xp = get_array_module(x)
-        B, C, L = x.shape
+        B, L = x.shape
         W = L - self.l + 1
         if W < 1:
             return xp.zeros((B, 1), dtype=float_dtype(x))
@@ -143,52 +164,51 @@ class DeltaSVM(DeviceModel):
         return self._score_strand_array(x, verbose=verbose)
 
     def _score_strand_cpu(
-        self, x: np.ndarray, *, verbose: bool = False,
+        self,
+        x: np.ndarray,
+        *,
+        verbose: bool = False,
     ) -> np.ndarray:
         """Numba-accelerated CPU path. No intermediate arrays."""
         B = x.shape[0]
-        x64 = np.ascontiguousarray(x, dtype=np.float64)
+        x = np.ascontiguousarray(x)
         weights64 = np.asarray(self.weights, dtype=np.float64)
-        if verbose and B > 100:
-            from tqdm import tqdm
-            chunk = max(1, B // 20)
-            chunks = list(range(0, B, chunk))
-            parts = []
-            for i in tqdm(chunks, desc="DeltaSVM"):
-                parts.append(_score_strand_numba(
-                    x64[i:i + chunk], self._combos, self._powers, weights64, self.l
-                ))
-            scores = np.concatenate(parts)
-        else:
-            scores = _score_strand_numba(
-                x64, self._combos, self._powers, weights64, self.l
-            )
+        # One call, or 20 under a progress bar
+        bar = verbose and B > 100
+        chunk = max(1, B // 20 if bar else B)
+        scores = np.concatenate(
+            [
+                _score_strand_numba(
+                    x[i : i + chunk], self._combos, self._powers, weights64, self.l
+                )
+                for i in _progress(range(0, max(1, B), chunk), bar, "DeltaSVM")
+            ]
+        )
         return scores[:, None].astype(float_dtype(x))
 
     def _score_strand_array(
-        self, x: np.ndarray, *, verbose: bool = False,
+        self,
+        x: np.ndarray,
+        *,
+        verbose: bool = False,
     ) -> np.ndarray:
         """GPU/MLX path using array operations."""
         xp = get_array_module(x)
-        B, C, L = x.shape
+        B, L = x.shape
         W = L - self.l + 1
 
         n_combos = len(self._combos)
         est_bytes = B * W * n_combos * self.k * 4
         if est_bytes > self._INTERMEDIATE_BUDGET:
             chunk = max(1, self._INTERMEDIATE_BUDGET // (W * n_combos * self.k * 4))
-            chunks = range(0, B, chunk)
-            if verbose:
-                from tqdm import tqdm
-                chunks = tqdm(chunks, desc="DeltaSVM", total=(B + chunk - 1) // chunk)
-            parts = [self._score_strand_array(x[i:i + chunk]) for i in chunks]
+            chunks = _progress(range(0, B, chunk), verbose, "DeltaSVM")
+            parts = [self._score_strand_array(x[i : i + chunk]) for i in chunks]
             return xp.concatenate(parts)
 
         sx = get_strides(x)
-        windows = xp.lib.stride_tricks.as_strided(
-            x, shape=(B, C, W, self.l), strides=(sx[0], sx[1], sx[2], sx[2])
-        )
-        base_idx = xp.argmax(windows, axis=1)  # [B, W, l]
+        base_idx = xp.lib.stride_tricks.as_strided(
+            x, shape=(B, W, self.l), strides=(sx[0], sx[1], sx[1])
+        ).astype(xp.int64)  # [B, W, l]
 
         combos = xp.asarray(self._combos)
         powers = xp.asarray(self._powers)
@@ -200,7 +220,11 @@ class DeltaSVM(DeviceModel):
         return scores[:, None]
 
     def score_variants(
-        self, ref: np.ndarray, alt: np.ndarray, *, verbose: bool = False,
+        self,
+        ref: np.ndarray,
+        alt: np.ndarray,
+        *,
+        verbose: bool = False,
     ) -> np.ndarray:
         """Compute variant effect scores as score(alt) - score(ref).
 
@@ -212,6 +236,4 @@ class DeltaSVM(DeviceModel):
         Returns:
             [B, 1] score differences.
         """
-        ref = self._match_device(ref)
-        alt = self._match_device(alt)
         return self(alt, verbose=verbose) - self(ref, verbose=verbose)

@@ -9,10 +9,12 @@ A Python implementation of gapped k-mer SVMs (gkm-SVMs) for DNA sequence analysi
 ## Install
 
 ```bash
-pip install gkmsvm-lite              # CPU (NumPy + Numba)
-pip install gkmsvm-lite[gpu]         # NVIDIA GPU (+ CuPy)
-pip install gkmsvm-lite[mlx]         # Apple Silicon GPU (+ MLX)
+uv pip install gkmsvm-lite              # CPU (NumPy + Numba)
+uv pip install "gkmsvm-lite[gpu]"       # NVIDIA GPU (+ CuPy)
+uv pip install "gkmsvm-lite[mlx]"       # Apple Silicon GPU (+ MLX)
 ```
+
+With pip, drop the `uv` (`pip install "gkmsvm-lite[gpu]"`). In a uv project, instead use `uv add "gkmsvm-lite[gpu]"`
 
 For development installation from source, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -31,17 +33,17 @@ score = model(x)  # [1, 1]
 # Variant effect prediction
 ref = one_hot_encode("ACGTACGTACGTACGT")[None, ...]
 alt = one_hot_encode("ACGTACGAACGTACGT")[None, ...]
-delta = model.score_variants(ref, alt)                         # score(alt) - score(ref)
-impact = model.score_variants(ref, alt, method="gkmexplain")   # lsgkm gkmexplain -m 5
+delta = model.score_variants(ref, alt)  # score(alt) - score(ref)
+impact = model.score_variants(ref, alt, method="gkmexplain")  # lsgkm gkmexplain -m 5
 
 # Attribution
 hyp = gkmexplain(model, x, mode="hypothetical")  # [1, 4, 16], -t 0/1/2 models
-attr = gkmexplain(model, x, mode="importance")   # hypothetical × input
-deltas = ism(model, x)                           # [1, 4, 16] mutation deltas, any kernel
+attr = gkmexplain(model, x, mode="importance")  # hypothetical × input
+deltas = ism(model, x)  # [1, 4, 16] mutation deltas, any kernel
 
 # GPU acceleration
 model.cuda()  # NVIDIA
-model.mlx()   # Apple Silicon
+model.mlx()  # Apple Silicon
 ```
 
 Speed and memory against LS-GKM are in [docs/performance.md](docs/performance.md).
@@ -78,11 +80,11 @@ model.save("my_model.npz")
 
 ```python
 from gkmsvm import (
-    load_lsgkm_model,      # LS-GKM / kundajelab/lsgkm
-    load_classic_model,     # C gkmSVM (LIBSVM-style format)
-    load_r_gkmsvm_model,   # R gkmSVM (Ghandi et al. 2016)
-    load_deltasvm_model,    # DeltaSVM k-mer weights
-    load_model,             # auto-detect npz or LS-GKM text
+    load_lsgkm_model,  # LS-GKM / kundajelab/lsgkm
+    load_classic_model,  # C++ gkmSVM (_svalpha.out + _svseq.fa)
+    load_r_gkmsvm_model,  # R gkmSVM (the same files)
+    load_deltasvm_model,  # DeltaSVM k-mer weights
+    load_model,  # auto-detect npz or LS-GKM text
 )
 ```
 
@@ -92,27 +94,27 @@ See [docs/models.md](docs/models.md) for format details, training options, and e
 
 All six LS-GKM kernel types are supported:
 
-| `-t` | Name | Description |
-|------|------|-------------|
-| 0 | gkm_cnt | Direct gapped k-mer count |
-| 1 | gkm_estfull | Estimated full l-mer |
-| 2 | gkm_esttrunc | Estimated truncated l-mer (LS-GKM default) |
-| 3 | gkmrbf | RBF-transformed estimated |
-| 4 | wgkm | Center-weighted gapped k-mer |
-| 5 | wgkmrbf | Center-weighted RBF |
+| `-t` | Name         | Description                                |
+| ---- | ------------ | ------------------------------------------ |
+| 0    | gkm_cnt      | Direct gapped k-mer count                  |
+| 1    | gkm_estfull  | Estimated full l-mer                       |
+| 2    | gkm_esttrunc | Estimated truncated l-mer (LS-GKM default) |
+| 3    | gkmrbf       | RBF-transformed estimated                  |
+| 4    | wgkm         | Center-weighted gapped k-mer               |
+| 5    | wgkmrbf      | Center-weighted RBF                        |
 
 ## Documentation
 
-| Guide | Contents |
-|---|---|
-| [CLI reference](docs/cli.md) | All `gkmsvm` subcommands, flags, and usage examples |
-| [Loading and training models](docs/models.md) | Importing from all formats, training SVC/SVR, solver selection, kernel types |
-| [Scoring and variant effects](docs/scoring.md) | Inference, batch scoring, VEP, GPU acceleration, memory management |
-| [Interpretation](docs/interpretation.md) | GkmExplain, ISM, when to use each, why gradients don't work |
-| [Performance](docs/performance.md) | Benchmarks, optimization details, tuning guidance |
-| [Validation](docs/validation.md) | Oracle tests against LS-GKM, GkmExplain paper dsQTL reproduction |
-| [Design decisions](docs/design.md) | Architecture, kernel math, format specifications |
-| [Roadmap](docs/roadmap.md) | Completed features and what's next |
+| Guide                                          | Contents                                                                     |
+| ---------------------------------------------- | ---------------------------------------------------------------------------- |
+| [CLI reference](docs/cli.md)                   | All `gkmsvm` subcommands, flags, and usage examples                          |
+| [Loading and training models](docs/models.md)  | Importing from all formats, training SVC/SVR, solver selection, kernel types |
+| [Scoring and variant effects](docs/scoring.md) | Inference, batch scoring, VEP, GPU acceleration, memory management           |
+| [Interpretation](docs/interpretation.md)       | GkmExplain, ISM, when to use each, why gradients don't work                  |
+| [Performance](docs/performance.md)             | Benchmarks, optimization details, tuning guidance                            |
+| [Validation](docs/validation.md)               | Oracle tests against LS-GKM, GkmExplain paper dsQTL reproduction             |
+| [Design decisions](docs/design.md)             | Architecture, kernel math, format specifications                             |
+| [Roadmap](docs/roadmap.md)                     | Completed features and what's next                                           |
 
 ## Citation
 

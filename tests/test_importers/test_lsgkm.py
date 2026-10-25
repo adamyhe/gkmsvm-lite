@@ -132,7 +132,8 @@ class TestLoadModel:
 class TestLoadEstTruncModel:
     def test_load_esttrunc(self, tmp_path):
         p = tmp_path / "trunc.model.txt"
-        p.write_text(textwrap.dedent("""\
+        p.write_text(
+            textwrap.dedent("""\
             svm_type c_svc
             kernel_type gkm_esttrunc
             L 11
@@ -146,7 +147,8 @@ class TestLoadEstTruncModel:
             SV
             1.0 ACGTACGTACGT
             -0.5 TGCATGCATGCA
-        """))
+        """)
+        )
         model = load_lsgkm_model(p)
         assert model.num_support_vectors == 2
         assert model.kernel_type == "gkm_esttrunc"
@@ -154,7 +156,8 @@ class TestLoadEstTruncModel:
 
     def test_esttrunc_forward_runs(self, tmp_path):
         p = tmp_path / "trunc.model.txt"
-        p.write_text(textwrap.dedent("""\
+        p.write_text(
+            textwrap.dedent("""\
             svm_type c_svc
             kernel_type gkm_esttrunc
             L 3
@@ -166,7 +169,8 @@ class TestLoadEstTruncModel:
             SV
             0.8 ACGT
             -0.3 TGCA
-        """))
+        """)
+        )
         model = load_lsgkm_model(p)
         query = one_hot_encode("ACGT")[np.newaxis]
         score = model(query)
@@ -177,7 +181,8 @@ class TestLoadEstTruncModel:
 class TestLoadModelErrors:
     def test_unsupported_kernel(self, tmp_path):
         p = tmp_path / "fake.model.txt"
-        p.write_text(textwrap.dedent("""\
+        p.write_text(
+            textwrap.dedent("""\
             svm_type c_svc
             kernel_type totally_fake_kernel
             L 11
@@ -188,13 +193,15 @@ class TestLoadModelErrors:
             rho 0.0
             SV
             1.0 ACGTACGTACGT
-        """))
+        """)
+        )
         with pytest.raises(NotImplementedError, match="totally_fake_kernel"):
             load_lsgkm_model(p)
 
     def test_wrong_sv_count(self, tmp_path):
         p = tmp_path / "bad.model.txt"
-        p.write_text(textwrap.dedent("""\
+        p.write_text(
+            textwrap.dedent("""\
             svm_type c_svc
             kernel_type gkm_cnt
             L 3
@@ -205,13 +212,17 @@ class TestLoadModelErrors:
             rho 0.0
             SV
             1.0 ACGT
-        """))
+        """)
+        )
         with pytest.raises(ValueError, match="Expected 5"):
             load_lsgkm_model(p)
 
-    def test_variable_length_svs(self, tmp_path):
+    def test_variable_length_svs_load_padded(self, tmp_path):
+        """SVs of different lengths load padded, with sv_lengths
+        (tests/test_variable_length.py checks their scores)."""
         p = tmp_path / "varlen.model.txt"
-        p.write_text(textwrap.dedent("""\
+        p.write_text(
+            textwrap.dedent("""\
             svm_type c_svc
             kernel_type gkm_cnt
             L 3
@@ -223,6 +234,32 @@ class TestLoadModelErrors:
             SV
             1.0 ACGT
             -1.0 ACGTAC
-        """))
-        with pytest.raises(ValueError, match="same length"):
-            load_lsgkm_model(p)
+        """)
+        )
+        model = load_lsgkm_model(p)
+        assert model.support_sequences.shape == (2, 6)
+        np.testing.assert_array_equal(model.sv_lengths, [4, 6])
+
+
+def test_svs_with_other_letters_load_as_n(tmp_path):
+    """LS-GKM reads non-ACGT SV letters as A when it fits the model, so they load
+    as N (with a warning) instead of failing."""
+    import warnings
+    from pathlib import Path
+
+    src = Path(__file__).parent.parent / "fixtures" / "lsgkm_wgkm_t1.model.txt.gz"
+    lines = gzip.open(src, "rt").read().splitlines()
+    sv_start = lines.index("SV") + 1
+    coef, seq = lines[sv_start].split()
+    lines[sv_start] = f"{coef} {seq[:5]}RY{seq[7:]}"
+    path = tmp_path / "m.model.txt"
+    path.write_text("\n".join(lines) + "\n")
+    with pytest.warns(UserWarning, match="other than ACGTN"):
+        model = load_lsgkm_model(path)
+    n_version = tmp_path / "n.model.txt"
+    lines[sv_start] = f"{coef} {seq[:5]}NN{seq[7:]}"
+    n_version.write_text("\n".join(lines) + "\n")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        ref = load_lsgkm_model(n_version)
+    np.testing.assert_array_equal(model.support_sequences, ref.support_sequences)

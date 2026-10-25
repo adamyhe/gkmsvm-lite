@@ -8,7 +8,7 @@ Ship an LS-GKM model importer and predictor before building training. Match `gkm
 
 ## Kernel modes are distinct
 
-`-t 0` (direct gapped k-mer / `gkm_cnt`) and `-t 2` (truncated estimated l-mer / `gkm_esttrunc`, the LS-GKM default) use different math. The binomial coefficient table `C(l-m, k)` for `-t 0` does NOT apply to `-t 2`. The `-t 2` weight table is ported from `calc_gkm_kernel_lmerest_wt` in `libsvm_gkm.c`.
+`-t 0` (direct gapped k-mer / `gkm_cnt`) and `-t 2` (truncated estimated l-mer / `gkm_esttrunc`, the LS-GKM default) use different math. The binomial coefficient table `C(l-m, k)` for `-t 0` does NOT apply to `-t 2`. As in LS-GKM, `-t 0` counts only window pairs within `d` mismatches (default 3). The `-t 2` weight table is ported from `calc_gkm_kernel_lmerest_wt` in `libsvm_gkm.c`.
 
 `-t 1` (`gkm_estfull`) is supported via `EstTruncGkmKernel(truncate=False)`.
 
@@ -45,7 +45,7 @@ Every kernel computes on packed windows: each l-mer is a uint32 (2 bits per base
 - **Masked join** (`kernels/masked.py`) when both sides have 16+ sequences: h(m) as a signed sum of C(l-m, j) terms, each an exact-match join on masked l-mer keys. See [design/mask-join-kernel.md](design/mask-join-kernel.md).
 - **Brute force** below that: every window pair, skipping pairs below `min_matches`. CPU: Numba `@njit(parallel=True, fastmath=True)`. NVIDIA: CuPy RawKernel with coalesced SV reads and shared-memory caching of the table and query windows. Apple: Metal kernels via `mx.fast.metal_kernel` (pairwise, and cross-diagonal for self-kernels against [x, rc(x)]).
 
-Scoring against a model's SVs adds two faster paths for fixed SVs: the exact l-mer weight table (`lmer_table.py`, `-t 0/1/2/4`, l <= 12) and the cached l-mer index (`kernels/lmer_index.py`, `-t 1/2/3` with a small d-neighborhood).
+Scoring against a model's SVs adds two faster paths for fixed SVs: the exact l-mer weight table (`lmer_table.py`, `-t 0/1/2/4`, l <= 12) and the cached l-mer index (`kernels/lmer_index.py`, `-t 1`-`-t 5` with a small d-neighborhood).
 
 **GkmExplain** (`-t 0/1/2`): the same packed comparison selects the ~0.1% of window pairs within the mismatch cutoff, and only those are decomposed per position, with base identities read from the packed words (`(packed >> 2k) & 3`). Importance is `hypothetical * one_hot_input`; only hypothetical and perturbation have kernels (one kernel with a mode flag per device). The inner loop multiplies by the normalized coefficient and reduces over SVs, accumulating into the `[B, 4, L]` result: CPU Numba with `prange` over the batch; CUDA one thread per (sequence, SV) pair with float64 `atomicAdd` (CC >= 6.0). MLX falls back to CPU. Usually that per-SV loop is skipped: the attribution is linear in the SVs, so summing them into a 4^l table of l-mer weights first lets each query window visit just the l-mers within the cutoff (CPU Numba, or a CUDA kernel with 16 lanes per window), at no cost per SV. For `-t 0/1/2`, since a pair's weight at each position depends only on its mismatch count and the base difference there, the attribution of every possible window is an XOR convolution over the 4^l l-mers: Walsh-Hadamard transforms precompute it as a [4^l, 4, l] table (1.4 GiB, ~1 s at l=11), and explaining a sequence becomes W row lookups. It is built automatically once a call explains enough sequences to pay for it.
 
@@ -59,7 +59,7 @@ Two solver backends, selected automatically based on available memory:
 
 **Precomputed Gram + sklearn** (`solver="libsvm"`, default for small N): Computes the full N×N kernel matrix via tiled Gram computation, then calls scikit-learn's LIBSVM-backed `SVC(kernel='precomputed')` / `SVR(kernel='precomputed')`. Supports both C-SVC (`train_gkmsvm`, `-s 0`) and epsilon-SVR (`train_gkmsvr`, `-s 3`). Fast — LIBSVM's SMO is highly optimized — but requires O(N²) memory.
 
-**Column-cached SMO** (`solver="smo"`, large N): WSS3 working set selection (Fan et al. 2005) with shrinking and cached kernel columns. Memory is O(cache_size × N) instead of O(N²). Currently supports C-SVC only. A C extension (`_csmo`) handles the optimization loop and the column cache; kernel columns come from `KernelColumnCache` on the training device (Numba CPU, CuPy GPU, or MLX): one query row of an l-mer index over the training set when it applies (`-t 1/2/3`), else batches through the masked join; misses prefetch likely next working-set columns into free cache slots. Installs still succeed if the extension fails to compile, but `solver="smo"` then raises.
+**Column-cached SMO** (`solver="smo"`, large N): WSS3 working set selection (Fan et al. 2005) with shrinking and cached kernel columns. Memory is O(cache_size × N) instead of O(N²). Currently supports C-SVC only. A C extension (`_csmo`) handles the optimization loop and the column cache; kernel columns come from `KernelColumnCache` on the training device (Numba CPU, CuPy GPU, or MLX): one query row of an l-mer index over the training set when it applies (`-t 1`-`-t 5`), else batches through the masked join; misses prefetch likely next working-set columns into free cache slots. Installs still succeed if the extension fails to compile, but `solver="smo"` then raises.
 
 **Nyström approximation** (`solver="nystrom"`): kernel values against m landmarks (O(N m) evaluations), a low-rank N×N approximation, then sklearn. Saves kernel evaluations, not memory; the solution is approximate.
 
@@ -79,18 +79,9 @@ LS-GKM exists because the full N×N kernel matrix doesn't fit in memory at scale
 
 Header key-value pairs until `SV` marker, then `<signed_coef> <DNA_sequence>` per line. Key fields: `svm_type`, `kernel_type`, `L`, `k`, `d`, `norc`, `rho`, `nr_class`, `total_sv`. Auto-detects gzip. Binary classification only (nr_class=2). `norc` is optional (missing = RC on); some builds (kundajelab lsgkm) reject the key, so `save_lsgkm` writes it only for RC-off models.
 
-## Classic gkmSVM format (C)
+## Classic and R gkmSVM formats
 
-Original gkmSVM C implementation uses OPPOSITE sign convention: `bias = +rho`. LIBSVM-style `key value` headers followed by `SV` marker. Supports both embedded SVs (single file: `coef sequence` per line) and two-file format (model + FASTA). Integer kernel types (0-5) are mapped to string names. Load via `load_classic_model(model_path, svseq_path=...)`.
-
-## R gkmSVM format
-
-R gkmSVM package (Ghandi et al. 2016, kernlab-based) uses `#`-prefixed headers (`#rho`, `#nsv`, `#npos`, `#nneg`, `#L`, `#k`, `#d`). Two sub-formats:
-
-- **Unified `.gkmmodel`**: headers then FASTA entries where the header line is `>seq_id\tcoefficient`.
-- **Legacy two-file**: `_svalpha.out` (tab-separated `seq_id\tcoef`) plus `_svseq.fa`.
-
-Same bias convention as C gkmSVM: `bias = +rho`. Load via `load_r_gkmsvm_model(path, svseq_path=...)`. Auto-detects `_svseq.fa` companion file when loading `_svalpha.out`.
+`gkmsvm_train` (C++ and R, which share the code) writes `PREFIX_svalpha.out` (`id<TAB>alpha`) and `PREFIX_svseq.fa`: no bias (R drops kernlab's `b`), no kernel parameters. `classic.load_classic_model` (and `r_gkmsvm.load_r_gkmsvm_model`, under R's argument names) takes the kernel as arguments (defaults l=10, k=6, d=3, `-t 1`), maps `-t`/`useTgkm` 0/1/2 to `gkm_estfull`/`gkm_esttrunc`/`gkm_cnt` (each truncated at d), matches SVs to alphas by id and drops non-ACGT letters, as the tools' FASTA reader does. Checked against each tool's `gkmsvm_kernel`; `gkmsvm_classify` differs from that by up to ~2%.
 
 ## SV cache
 
@@ -116,7 +107,7 @@ The mismatch table has zero entries for high-mismatch counts. For esttrunc l=11 
 
 ## Epsilon-SVR
 
-`train_gkmsvr()` trains an epsilon-SVR for continuous-valued prediction (e.g. quantitative chromatin accessibility from lsgkm-svr). The epsilon parameter controls the tube width — errors within ±epsilon are not penalized. Uses LIBSVM's `-s 3` solver with precomputed Gram matrix. SMO SVR (2N dual variables, different box constraints) is deferred — the Gram path handles typical regression dataset sizes.
+`train_gkmsvr()` trains an epsilon-SVR for continuous-valued prediction (e.g. quantitative chromatin accessibility from lsgkm-svr). The epsilon parameter controls the tube width — errors within ±epsilon are not penalized. It takes the same solvers as `train_gkmsvm`: LIBSVM's `-s 3` on the precomputed Gram, Nyström, or the column-cached SMO. The SMO solves LIBSVM's epsilon-SVR dual: 2N variables, α_i with sign +1 and linear term ε − z_i, α*_i with sign −1 and ε + z_i, both using sequence i's kernel column, so the cache holds N columns as for C-SVC and the solver is the C-SVC one with a linear term and a column index t mod N. Coefficients are α − α*.
 
 ## References
 

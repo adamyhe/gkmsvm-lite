@@ -10,6 +10,7 @@
 #   bash benchmarks/run.sh                    # make paper (DEVICE=cuda)
 #   bash benchmarks/run.sh fig1b s2           # selected targets
 #   bash benchmarks/run.sh --quick            # small settings, results/quick/
+#   bash benchmarks/run.sh -B fig1b           # rerun even if results are up to date
 #   bash benchmarks/run.sh --cpu-only fig1b
 #   bash benchmarks/run.sh --set a100 fig1b fig1c s2 s3   # second host: results/a100/
 #   bash benchmarks/run.sh --lsgkm-bin <lsgkm>/bin fig1c   # source build with gkmexplain
@@ -23,12 +24,14 @@ LSGKM_ENV="lsgkm"
 LITE_ENV="gkmsvm-bench"
 DEVICE="cuda"
 MAKE_VARS=()
+MAKE_FLAGS=()
 TARGETS=()
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --quick)     MAKE_VARS+=(QUICK=1); shift ;;
         --set)       MAKE_VARS+=("SET=$2"); shift 2 ;;
+        -B|--force)  MAKE_FLAGS+=(-B); shift ;;
         --cpu-only)  DEVICE="cpu"; shift ;;
         --lsgkm-bin) MAKE_VARS+=("LSGKM_BIN=$2"); shift 2 ;;
         --mlsgkm-bin) MAKE_VARS+=("MLSGKM_BIN=$2"); shift 2 ;;
@@ -60,11 +63,14 @@ conda run -n "$LSGKM_ENV" which gkmtrain >/dev/null \
 
 if ! conda env list 2>/dev/null | grep -q "^${LITE_ENV} "; then
     echo ">>> Creating gkmsvm-lite env '$LITE_ENV'"
-    $CONDA create -n "$LITE_ENV" python=3.11 -y
+    $CONDA create -n "$LITE_ENV" -c conda-forge python=3.11 uv -y
 fi
+# uv, not pip (it also ignores pip.conf and PIP_* settings)
+conda run -n "$LITE_ENV" which uv >/dev/null 2>&1 \
+    || $CONDA install -n "$LITE_ENV" -c conda-forge uv -y
 EXTRAS="examples"
 [[ "$DEVICE" == "cuda" ]] && EXTRAS="examples,gpu"
-conda run -n "$LITE_ENV" pip install --quiet -e "$REPO[$EXTRAS]"
+conda run -n "$LITE_ENV" uv pip install --quiet -e "$REPO[$EXTRAS]"
 
 if [[ "$DEVICE" == "cuda" ]] && \
    ! conda run -n "$LITE_ENV" python -c "import cupy; cupy.cuda.Device(0).compute_capability" 2>/dev/null; then
@@ -81,5 +87,5 @@ LOG="$LOG_DIR/$(date +%Y%m%d_%H%M%S)_${COMMIT}_${TAG}.log"
 
 echo ">>> make ${TARGETS[*]} DEVICE=$DEVICE ${MAKE_VARS[*]:-}  (log: $LOG)"
 conda run --no-capture-output -n "$LITE_ENV" \
-    make -C "$REPO/benchmarks" "${TARGETS[@]}" DEVICE="$DEVICE" LSGKM_ENV="$LSGKM_ENV" \
+    make ${MAKE_FLAGS[@]+"${MAKE_FLAGS[@]}"} -C "$REPO/benchmarks" "${TARGETS[@]}" DEVICE="$DEVICE" LSGKM_ENV="$LSGKM_ENV" \
     ${MAKE_VARS[@]+"${MAKE_VARS[@]}"} 2>&1 | tee "$LOG"

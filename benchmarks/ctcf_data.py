@@ -9,8 +9,8 @@ that set on hg19:
 
   positives  the wgEncodeBroadHistoneH1hescCtcf SPP optimal peaks (55,782; of
              the two H1-hESC CTCF sets the one with enough peaks for 90k), as
-             300 bp windows centered on each summit. LS-GKM trained on the
-             variable-length peaks; gkmsvm-lite trains on fixed-length windows.
+             300 bp windows centered on each summit (Lee 2016 used the
+             variable-length peaks; here both tools train on these windows).
   negatives  random 300 bp windows without N that overlap no peak, drawn to
              the positives' joint distribution of GC fraction and repeat
              fraction (soft-masked lowercase), in bins of 0.02 x 0.1.
@@ -82,8 +82,9 @@ def overlaps(starts: np.ndarray, peaks: np.ndarray) -> np.ndarray:
 
 def bins(gc: np.ndarray, repeat: np.ndarray) -> np.ndarray:
     n_gc = int(round(1 / GC_BIN)) + 1
-    return (np.minimum(gc / GC_BIN, n_gc - 1).astype(int) * 100
-            + np.minimum(repeat / REPEAT_BIN, 10).astype(int))
+    return np.minimum(gc / GC_BIN, n_gc - 1).astype(int) * 100 + np.minimum(
+        repeat / REPEAT_BIN, 10
+    ).astype(int)
 
 
 def build(genome_path: Path, peaks_path: Path, out: Path, seed: int = 0) -> None:
@@ -92,7 +93,10 @@ def build(genome_path: Path, peaks_path: Path, out: Path, seed: int = 0) -> None
     rng = np.random.default_rng(seed)
     peaks = read_peaks(peaks_path)
     genome = Fasta(str(genome_path), sequence_always_upper=False, as_raw=True)
-    splits = {"train": [c for c in CHROMS if c not in TEST_CHROMS], "test": list(TEST_CHROMS)}
+    splits = {
+        "train": [c for c in CHROMS if c not in TEST_CHROMS],
+        "test": list(TEST_CHROMS),
+    }
     out.mkdir(parents=True, exist_ok=True)
     for split, chroms in splits.items():
         pos, pos_bins, cand = [], [], []  # cand: (chrom, start, bin)
@@ -109,11 +113,16 @@ def build(genome_path: Path, peaks_path: Path, out: Path, seed: int = 0) -> None
             pos_bins.append(bins(gc, rep))
             n_cand = int(CANDIDATES_PER_POSITIVE * n_pos * len(seq) / total_len)
             for s0 in range(0, n_cand, 200_000):
-                c_starts = rng.integers(0, len(seq) - WIDTH, size=min(200_000, n_cand - s0))
+                c_starts = rng.integers(
+                    0, len(seq) - WIDTH, size=min(200_000, n_cand - s0)
+                )
                 gc, rep, has_n = window_stats(seq, c_starts)
                 keep = ~has_n & ~overlaps(c_starts, p)
-                cand += zip([chrom] * int(keep.sum()), c_starts[keep].tolist(),
-                            bins(gc[keep], rep[keep]).tolist())
+                cand += zip(
+                    [chrom] * int(keep.sum()),
+                    c_starts[keep].tolist(),
+                    bins(gc[keep], rep[keep]).tolist(),
+                )
         pos_bins = np.concatenate(pos_bins)
         cand_bins = np.array([b for _, _, b in cand])
         # Each positive bin draws as many candidates without replacement
@@ -127,22 +136,32 @@ def build(genome_path: Path, peaks_path: Path, out: Path, seed: int = 0) -> None
         chosen = np.concatenate(chosen)
         if short:  # bins without enough candidates: fill from the rest at random
             rest = np.setdiff1d(np.arange(len(cand)), chosen)
-            chosen = np.concatenate([chosen, rng.choice(rest, size=short, replace=False)])
+            chosen = np.concatenate(
+                [chosen, rng.choice(rest, size=short, replace=False)]
+            )
         neg = [cand[i][:2] for i in chosen]
         for name, regions in (("pos", pos), ("neg", neg)):
             path = out / f"{split}_{name}.fa"
             with open(path, "w") as f:
                 for chrom, s in regions:
-                    f.write(f">{chrom}:{s}-{s + WIDTH}\n{genome[chrom][s:s + WIDTH].upper()}\n")
-        print(f"{split}: {len(pos):,} positives, {len(neg):,} matched negatives "
-              f"({short} outside their GC/repeat bin), from {len(cand):,} candidates")
+                    f.write(
+                        f">{chrom}:{s}-{s + WIDTH}\n{genome[chrom][s : s + WIDTH].upper()}\n"
+                    )
+        print(
+            f"{split}: {len(pos):,} positives, {len(neg):,} matched negatives "
+            f"({short} outside their GC/repeat bin), from {len(cand):,} candidates"
+        )
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--genome", default=None,
-                        help="Soft-masked hg19 FASTA (default: download UCSC hg19 into data/)")
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--genome",
+        default=None,
+        help="Soft-masked hg19 FASTA (default: download UCSC hg19 into data/)",
+    )
     parser.add_argument("--out", default=str(OUT))
     args = parser.parse_args()
 

@@ -10,9 +10,7 @@ vectors (72,145 SVs, l=11 k=7 d=3):
         scores through the cached l-mer index (per-SV kernel values for
         the RBF), whose cost grows with the matching (window, SV) pairs.
 
-For both, path "masked join" turns the table and the index off, the kernel
-path before them (an SV index is built on every call), and LS-GKM's
-gkmpredict scores the same models at -T --threads (and mLS-GKM's at
+LS-GKM's gkmpredict scores the same models at -T --threads (and mLS-GKM's at
 -t --threads -T 1 with --mlsgkm-bin). The -t 3 coefficients
 were trained for -t 2; only speed is measured.
 
@@ -75,8 +73,13 @@ def _subset_model(full, idx, kernel: str):
     kernel_type, extra = KERNELS[kernel]
     # Positive-coefficient SVs first, as LIBSVM-format files list them by class
     idx = idx[np.argsort(full.coefficients[idx] <= 0, kind="stable")]
-    return GkmSVM(full.support_sequences[idx], full.coefficients[idx], full.bias,
-                  kernel_type, {**full.kernel_params, **extra})
+    return GkmSVM(
+        full.support_sequences[idx],
+        full.coefficients[idx],
+        full.bias,
+        kernel_type,
+        {**full.kernel_params, **extra},
+    )
 
 
 # ── gkmsvm-lite worker (child process) ─────────────────────────────
@@ -90,9 +93,6 @@ def _worker(spec: dict) -> None:
 
     def prepare(path):
         model = load_model(path)
-        if spec["path"] == "masked join":
-            model.use_lmer_table = False
-            model.use_lmer_index = False
         if spec["device"] == "cuda":
             model.cuda()
         return model
@@ -116,24 +116,42 @@ def _worker(spec: dict) -> None:
 
 def main():
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--device", default="cuda", choices=["cpu", "cuda"],
-                        help="cuda: run gkmsvm-lite on CPU and CUDA (default: cuda)")
-    parser.add_argument("--sizes", default=DEFAULT_SIZES,
-                        help="SV counts, comma separated; 'max' = all 72,145")
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--device",
+        default="cuda",
+        choices=["cpu", "cuda"],
+        help="cuda: run gkmsvm-lite on CPU and CUDA (default: cuda)",
+    )
+    parser.add_argument(
+        "--sizes",
+        default=DEFAULT_SIZES,
+        help="SV counts, comma separated; 'max' = all 72,145",
+    )
     parser.add_argument("--kernels", default="t2,t3")
     parser.add_argument("--n-seqs", type=int, default=1000, help="Query sequences")
     parser.add_argument("--batch-size", type=int, default=1000)
     parser.add_argument("--conda-env", default="lsgkm")
-    parser.add_argument("--lsgkm-bin", default=None,
-                        help="Directory with LS-GKM binaries the conda env lacks")
-    parser.add_argument("--threads", type=int, default=lsgkm_default_threads(),
-                        choices=LSGKM_THREADS,
-                        help="LS-GKM -T and gkmsvm-lite CPU threads")
+    parser.add_argument(
+        "--lsgkm-bin",
+        default=None,
+        help="Directory with LS-GKM binaries the conda env lacks",
+    )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=lsgkm_default_threads(),
+        choices=LSGKM_THREADS,
+        help="LS-GKM -T and gkmsvm-lite CPU threads",
+    )
     parser.add_argument("--no-lsgkm", action="store_true")
-    parser.add_argument("--mlsgkm-bin", default=None,
-                        help="mLS-GKM bin directory (source build): also time its gkmpredict "
-                        "(-t --threads -T 1)")
+    parser.add_argument(
+        "--mlsgkm-bin",
+        default=None,
+        help="mLS-GKM bin directory (source build): also time its gkmpredict "
+        "(-t --threads -T 1)",
+    )
     parser.add_argument("--timeout", type=float, default=6 * 3600)
     parser.add_argument("--output", default=str(RESULTS / "throughput.tsv"))
     parser.add_argument("--worker", default=None, help=argparse.SUPPRESS)
@@ -154,8 +172,13 @@ def main():
         if gkmpredict is None:
             sys.exit("gkmpredict not found; pass --lsgkm-bin or --no-lsgkm")
         # Some builds' gkmpredict has no -T (single-threaded)
-        c_runs.append(("LS-GKM", gkmpredict,
-                       args.threads if lsgkm_has_option(gkmpredict, "-T") else 1))
+        c_runs.append(
+            (
+                "LS-GKM",
+                gkmpredict,
+                args.threads if lsgkm_has_option(gkmpredict, "-T") else 1,
+            )
+        )
     if args.mlsgkm_bin:
         gkmpredict = mlsgkm_binary("gkmpredict", args.mlsgkm_bin)
         if gkmpredict is None:
@@ -171,9 +194,11 @@ def main():
 
     work = Path(tempfile.mkdtemp(prefix="throughput_"))
     queries = work / "queries.fa"
-    write_seqs(queries, read_seqs(SEQ_DIR / "gm12878_shared.fa")[:args.n_seqs], "q")
-    print(f"Work dir: {work}\n{args.n_seqs} queries, SV counts {sizes}, "
-          f"{lite_threads} CPU threads")
+    write_seqs(queries, read_seqs(SEQ_DIR / "gm12878_shared.fa")[: args.n_seqs], "q")
+    print(
+        f"Work dir: {work}\n{args.n_seqs} queries, SV counts {sizes}, "
+        f"{lite_threads} CPU threads"
+    )
 
     rows = []
     try:
@@ -191,45 +216,84 @@ def main():
                 if c_runs:
                     model.save(str(txt), fmt="lsgkm")
                 for impl, gkmpredict, n_thr in c_runs:
-                    m = run_measured([gkmpredict, *c_threads_opts(impl, n_thr), str(queries),
-                                      str(txt), str(work / "pred.txt")], timeout=args.timeout)
+                    m = run_measured(
+                        [
+                            gkmpredict,
+                            *c_threads_opts(impl, n_thr),
+                            str(queries),
+                            str(txt),
+                            str(work / "pred.txt"),
+                        ],
+                        timeout=args.timeout,
+                    )
                     if m.status != "ok":
                         print(f"  {impl} {m.status}: {(m.stderr or m.stdout)[-500:]}")
-                    rows.append({**base, "implementation": impl, "path": "gkmpredict",
-                                 "device": "cpu", "threads": n_thr,
-                                 "status": m.status, "first_s": m.wall_s,
-                                 "steady_s": m.wall_s, "peak_rss_mb": m.peak_rss_mb})
+                    rows.append(
+                        {
+                            **base,
+                            "implementation": impl,
+                            "path": "gkmpredict",
+                            "device": "cpu",
+                            "threads": n_thr,
+                            "status": m.status,
+                            "first_s": m.wall_s,
+                            "steady_s": m.wall_s,
+                            "peak_rss_mb": m.peak_rss_mb,
+                        }
+                    )
                     print(f"  {impl} ({n_thr} threads): {m.wall_s:.1f}s [{m.status}]")
 
-                for path in (DEFAULT_PATH[kernel], "masked join"):
-                    for device in devices:
-                        spec = {"model": str(npz), "warmup_model": str(warm_npz),
-                                "queries": str(queries), "path": path, "device": device,
-                                "batch_size": args.batch_size}
-                        m = run_measured([sys.executable, __file__, "--worker",
-                                          json.dumps(spec)], timeout=args.timeout)
-                        res = worker_result(m.stdout) or {}
-                        if m.status != "ok":
-                            print(f"  {path} {device} {m.status}: {m.stderr[-300:]}")
-                        rows.append({**base, "implementation": "gkmsvm-lite", "path": path,
-                                     "device": device,
-                                     "threads": lite_threads if device == "cpu" else None,
-                                     "status": m.status, "first_s": res.get("first_s"),
-                                     "steady_s": res.get("steady_s"),
-                                     "peak_rss_mb": m.peak_rss_mb})
-                        if res:
-                            print(f"  {path}, {device}: first {res['first_s']:.2f}s, "
-                                  f"steady {res['steady_s']:.2f}s "
-                                  f"({args.n_seqs / res['steady_s']:,.0f} seq/s)")
+                path = DEFAULT_PATH[kernel]
+                for device in devices:
+                    spec = {
+                        "model": str(npz),
+                        "warmup_model": str(warm_npz),
+                        "queries": str(queries),
+                        "path": path,
+                        "device": device,
+                        "batch_size": args.batch_size,
+                    }
+                    m = run_measured(
+                        [sys.executable, __file__, "--worker", json.dumps(spec)],
+                        timeout=args.timeout,
+                    )
+                    res = worker_result(m.stdout) or {}
+                    if m.status != "ok":
+                        print(f"  {path} {device} {m.status}: {m.stderr[-300:]}")
+                    rows.append(
+                        {
+                            **base,
+                            "implementation": "gkmsvm-lite",
+                            "path": path,
+                            "device": device,
+                            "threads": lite_threads if device == "cpu" else None,
+                            "status": m.status,
+                            "first_s": res.get("first_s"),
+                            "steady_s": res.get("steady_s"),
+                            "peak_rss_mb": m.peak_rss_mb,
+                        }
+                    )
+                    if res:
+                        print(
+                            f"  {path}, {device}: first {res['first_s']:.2f}s, "
+                            f"steady {res['steady_s']:.2f}s "
+                            f"({args.n_seqs / res['steady_s']:,.0f} seq/s)"
+                        )
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
     df = pd.DataFrame(rows)
     df["seqs_per_sec"] = df["n_seqs"] / df["steady_s"]
-    write_tsv(args.output, df, "Prediction throughput vs number of SVs", args.device,
-              model=MODEL_PATH.name,
-              c_threads=",".join(f"{impl}:{t}" for impl, _, t in c_runs) or None,
-              mlsgkm=mlsgkm_version(args.mlsgkm_bin), lite_cpu_threads=lite_threads)
+    write_tsv(
+        args.output,
+        df,
+        "Prediction throughput vs number of SVs",
+        args.device,
+        model=MODEL_PATH.name,
+        c_threads=",".join(f"{impl}:{t}" for impl, _, t in c_runs) or None,
+        mlsgkm=mlsgkm_version(args.mlsgkm_bin),
+        lite_cpu_threads=lite_threads,
+    )
 
 
 if __name__ == "__main__":

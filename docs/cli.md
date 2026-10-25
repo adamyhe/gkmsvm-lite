@@ -8,6 +8,19 @@ gkmsvm <command> [options]
 
 Global options: `-v` / `--verbose` enables progress bars.
 
+## Inputs
+
+Every command that reads sequences (`predict`, `train`, `trainsvr`, `ism`, `explain`, `deltasvm`, `score-variants`) works on fixed-length windows, as the ENCODE gkm-SVM and DART-Eval pipelines do:
+
+- **Peaks:** `--genome genome.fa` makes the input a BED or narrowPeak file. Each window is `--length` bp around the summit (`start` + column 10 of a narrowPeak), or around the midpoint when there is no summit. Windows past a chromosome end are dropped, and the count is reported. `score-variants` takes FASTA only.
+- **FASTA:** records that share a length are used as they are. Records of different lengths, or longer than an explicit `--length`, are center-cropped to `--length`. A record shorter than `--length` is an error that names it, since a FASTA record has no flanks to extend.
+- **`--length` defaults:** the model's SV length for `predict`, `ism`, `explain` and `score-variants`; 300 bp for `train` and `trainsvr`; none for `deltasvm`.
+- **`--variable-length`** (`predict`, `train`, `trainsvr`, `ism`, `explain`, `score-variants`, `deltasvm`): uses records at their own lengths, as LS-GKM does, for compatibility. `ism` and `explain` write `[B, 4, L_max]` arrays, zero past each record's length, with the lengths in a `lengths` array; `score-variants` then allows indels. Models whose support vectors differ in length (LS-GKM trained on raw peaks) always load. Their queries are cropped to `--length` unless `--variable-length` is given.
+
+Sequences may contain N, which is scored as A on the forward strand, as LS-GKM does. Other letters (IUPAC codes, ...) stop the command with an error unless `--allow-other-bases` is given. That flag reads them as N, matching LS-GKM, which reads every non-ACGT letter as A (with a warning). Model files whose support vectors contain such letters load with a warning.
+
+Python: `fasta.extract_loci(peaks, genome, in_window=300)` (summit-centered) and `codec.center_crop(seqs, 300)`. `model(x, lengths=...)` or `model([...sequences...])` scores sequences of different lengths.
+
 ## predict
 
 Score sequences with a trained model.
@@ -44,6 +57,7 @@ gkmsvm train -p positive.fa -n negative.fa -o model.npz -t estimated -l 11 -k 7 
 | `-k` | K informative positions (default: 7) |
 | `-d` | Max mismatches (default: 3) |
 | `-C` | Regularization parameter (default: 1.0) |
+| `-w` | Positives' C is w·C, for unbalanced sets (as LS-GKM `-w`; default: 1.0) |
 | `--solver` | `auto`, `libsvm`, `smo`, or `nystrom` (default: auto: libsvm if the Gram fits in RAM, else smo) |
 | `--cache-size` | SMO kernel-column cache size (default: sized from available RAM) |
 | `--no-rc` | Disable reverse complement |
@@ -68,13 +82,14 @@ gkmsvm trainsvr -i sequences.fa --labels values.txt -o model.npz -C 1.0 --epsilo
 | `--labels` | Labels file (one value per line, same order as FASTA) |
 | `-o`, `--output` | Output model |
 | `--epsilon` | SVR epsilon / tube width (default: 0.1) |
-| `--solver` | `auto`, `libsvm`, or `nystrom` (default: auto) |
+| `--solver` | `auto`, `libsvm`, `smo`, or `nystrom` (default: auto: libsvm if the Gram fits in RAM, else smo) |
+| `--cache-size` | SMO kernel-column cache size (default: sized from available RAM) |
 
-Accepts the same kernel and device options as `train`. SVR uses the precomputed Gram (or Nyström); SMO is not implemented for SVR, so training dataset size is bounded by available memory.
+Accepts the same kernel and device options as `train`.
 
 ## explain
 
-Compute GkmExplain hypothetical attribution scores (`-t 0/1/2` models). Outputs two `.npz` files directly usable with [TF-MoDISco](https://github.com/jmschrei/tfmodisco-lite).
+Compute GkmExplain hypothetical attribution scores (any kernel type). Outputs two `.npz` files directly usable with [TF-MoDISco](https://github.com/kundajelab/tfmodisco) (`uv pip install modisco`; tfmodisco-lite was merged into it).
 
 ```bash
 gkmsvm explain -m model.npz -i sequences.fa -o attr.npz -s seqs.npz --device cuda

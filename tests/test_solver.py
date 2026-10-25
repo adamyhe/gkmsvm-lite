@@ -32,17 +32,22 @@ def _biased_seqs(n, length, rng, bias_base=0):
 
 
 class TestKernelColumnCache:
-    @pytest.mark.parametrize("kernel", [
-        DirectGkmKernel(l=7, k=5, normalize=True, include_rc=True),
-        EstTruncGkmKernel(l=7, k=5, d=3, normalize=True, include_rc=True),
-    ])
+    @pytest.mark.parametrize(
+        "kernel",
+        [
+            DirectGkmKernel(l=7, k=5, normalize=True, include_rc=True),
+            EstTruncGkmKernel(l=7, k=5, d=3, normalize=True, include_rc=True),
+        ],
+    )
     def test_column_matches_pairwise(self, kernel):
         rng = np.random.default_rng(42)
         X = _random_seqs(20, 20, rng)
         cache = KernelColumnCache(kernel, X)
         expected = kernel.pairwise(X, X)
         for i in range(X.shape[0]):
-            np.testing.assert_allclose(cache.compute_columns([i])[i], expected[i], atol=1e-10)
+            np.testing.assert_allclose(
+                cache.compute_columns([i])[i], expected[i], atol=1e-10
+            )
 
 
 class TestSmoSolve:
@@ -60,12 +65,16 @@ class TestSmoSolve:
         assert n_sv > 0
 
         score_pos = np.mean(
-            [float(np.dot(coef, kernel.pairwise(pos[i:i+1], X)[0]) + bias)
-             for i in range(5)]
+            [
+                float(np.dot(coef, kernel.pairwise(pos[i : i + 1], X)[0]) + bias)
+                for i in range(5)
+            ]
         )
         score_neg = np.mean(
-            [float(np.dot(coef, kernel.pairwise(neg[i:i+1], X)[0]) + bias)
-             for i in range(5)]
+            [
+                float(np.dot(coef, kernel.pairwise(neg[i : i + 1], X)[0]) + bias)
+                for i in range(5)
+            ]
         )
         assert score_pos > 0
         assert score_neg < 0
@@ -84,9 +93,7 @@ class TestSmoSolve:
 
         kernel = DirectGkmKernel(l=7, k=5, normalize=True, include_rc=True)
 
-        coef_smo, bias_smo = smo_solve(
-            kernel, X, y, C=1.0, tol=1e-4, cache_size=50
-        )
+        coef_smo, bias_smo = smo_solve(kernel, X, y, C=1.0, tol=1e-4, cache_size=50)
 
         gram = compute_gram(kernel, X)
         clf = SVC(C=1.0, kernel="precomputed").fit(gram, y)
@@ -97,14 +104,18 @@ class TestSmoSolve:
         bias_lib = float(clf.intercept_[0])
 
         test_seqs = _random_seqs(10, 20, rng)
-        scores_smo = np.array([
-            float(np.dot(coef_smo, kernel.pairwise(t[None], X)[0]) + bias_smo)
-            for t in test_seqs
-        ])
-        scores_lib = np.array([
-            float(np.dot(coef_lib, kernel.pairwise(t[None], X)[0]) + bias_lib)
-            for t in test_seqs
-        ])
+        scores_smo = np.array(
+            [
+                float(np.dot(coef_smo, kernel.pairwise(t[None], X)[0]) + bias_smo)
+                for t in test_seqs
+            ]
+        )
+        scores_lib = np.array(
+            [
+                float(np.dot(coef_lib, kernel.pairwise(t[None], X)[0]) + bias_lib)
+                for t in test_seqs
+            ]
+        )
 
         np.testing.assert_allclose(scores_smo, scores_lib, atol=0.05)
 
@@ -115,9 +126,7 @@ class TestSmoSolve:
         X = np.concatenate([pos, neg])
         y = np.array([1.0] * 20 + [-1.0] * 20)
 
-        kernel = EstTruncGkmKernel(
-            l=7, k=5, d=3, normalize=True, include_rc=True
-        )
+        kernel = EstTruncGkmKernel(l=7, k=5, d=3, normalize=True, include_rc=True)
         coef, bias = smo_solve(kernel, X, y, C=1.0, tol=1e-3)
 
         n_sv = np.sum(np.abs(coef) > 1e-10)
@@ -131,13 +140,20 @@ class TestSmoSolve:
         neg = ["TTTTTTTTTTTTTTTGGGGG"] * 10
 
         model = train_gkmsvm(
-            pos, neg, kernel_type="direct", l=7, k=5, C=1.0,
-            solver="smo", cache_size=20,
+            pos,
+            neg,
+            kernel_type="direct",
+            l=7,
+            k=5,
+            C=1.0,
+            solver="smo",
+            cache_size=20,
         )
 
         assert model.num_support_vectors > 0
 
         from gkmsvm.codec import one_hot_encode
+
         x_pos = one_hot_encode("AAAAAAAAAAAAAAACCCCC")[None, ...]
         x_neg = one_hot_encode("TTTTTTTTTTTTTTTGGGGG")[None, ...]
 
@@ -163,7 +179,12 @@ class TestSmoSolve:
 
         kernel = DirectGkmKernel(l=7, k=5, normalize=True, include_rc=True)
         coef, bias = smo_solve(
-            kernel, X, y, C=1.0, tol=1e-3, cache_size=32,
+            kernel,
+            X,
+            y,
+            C=1.0,
+            tol=1e-3,
+            cache_size=32,
         )
 
         n_sv = np.sum(np.abs(coef) > 1e-10)
@@ -178,7 +199,12 @@ class TestSmoSolve:
         neg = ["TGCA" * 5] * 10
 
         model = train_gkmsvm(
-            pos, neg, kernel_type="direct", l=7, k=5, C=1.0,
+            pos,
+            neg,
+            kernel_type="direct",
+            l=7,
+            k=5,
+            C=1.0,
             solver="auto",
         )
         assert model.num_support_vectors > 0
@@ -188,8 +214,12 @@ class TestSmoSolve:
 
         with pytest.raises(ValueError, match="Unknown solver"):
             train_gkmsvm(
-                ["ACGT" * 5] * 5, ["TGCA" * 5] * 5,
-                kernel_type="direct", l=7, k=5, solver="bad",
+                ["ACGT" * 5] * 5,
+                ["TGCA" * 5] * 5,
+                kernel_type="direct",
+                l=7,
+                k=5,
+                solver="bad",
             )
 
 
@@ -213,11 +243,17 @@ class TestTrainGkmsvr:
 
         X = np.stack(seqs)
         model = train_gkmsvr(
-            X, labels, kernel_type="direct", l=7, k=5, C=10.0, epsilon=0.05,
+            X,
+            labels,
+            kernel_type="direct",
+            l=7,
+            k=5,
+            C=10.0,
+            epsilon=0.05,
         )
 
         assert model.num_support_vectors > 0
-        preds = np.array([model(X[i:i+1]).item() for i in range(n)])
+        preds = np.array([model(X[i : i + 1]).item() for i in range(n)])
         corr = np.corrcoef(preds, labels)[0, 1]
         assert corr > 0.5
 
@@ -236,7 +272,12 @@ class TestTrainGkmsvr:
         labels = [1.0, 0.8, 0.6, -1.0, -0.8, -0.6]
 
         model = train_gkmsvr(
-            seqs, labels, kernel_type="direct", l=7, k=5, C=1.0,
+            seqs,
+            labels,
+            kernel_type="direct",
+            l=7,
+            k=5,
+            C=1.0,
         )
         assert model.num_support_vectors > 0
 
@@ -259,12 +300,22 @@ class TestTrainGkmsvr:
         labels = np.linspace(0, 1, 30).tolist()
 
         model_tight = train_gkmsvr(
-            seqs, labels, kernel_type="direct", l=7, k=5,
-            C=10.0, epsilon=0.01,
+            seqs,
+            labels,
+            kernel_type="direct",
+            l=7,
+            k=5,
+            C=10.0,
+            epsilon=0.01,
         )
         model_wide = train_gkmsvr(
-            seqs, labels, kernel_type="direct", l=7, k=5,
-            C=10.0, epsilon=0.3,
+            seqs,
+            labels,
+            kernel_type="direct",
+            l=7,
+            k=5,
+            C=10.0,
+            epsilon=0.3,
         )
         assert model_tight.num_support_vectors >= model_wide.num_support_vectors
 
@@ -284,10 +335,16 @@ class TestTrainGkmsvr:
         labels = [1.0, 0.8, -1.0, -0.8]
 
         model = train_gkmsvr(
-            seqs, labels, kernel_type="direct", l=7, k=5, C=1.0,
+            seqs,
+            labels,
+            kernel_type="direct",
+            l=7,
+            k=5,
+            C=1.0,
         )
 
         from gkmsvm.codec import one_hot_encode
+
         test_x = one_hot_encode("AAAAAAAAAAAAAAACCCCC")[None, ...]
         score_before = model(test_x).item()
 
@@ -307,8 +364,14 @@ class TestTrainGkmsvr:
         labels = np.linspace(-1, 1, 20).tolist()
 
         model = train_gkmsvr(
-            seqs, labels, kernel_type="estimated", l=7, k=5, d=3,
-            C=1.0, epsilon=0.1,
+            seqs,
+            labels,
+            kernel_type="estimated",
+            l=7,
+            k=5,
+            d=3,
+            C=1.0,
+            epsilon=0.1,
         )
         assert model.num_support_vectors > 0
 
@@ -322,8 +385,9 @@ class TestSmoPrefetch:
         idx = list(range(3, 40, 2))  # >= 16 columns: masked-join path
         batch = cache.compute_columns(idx)
         for i in idx:
-            np.testing.assert_allclose(batch[i], cache.compute_columns([i])[i],
-                                       rtol=1e-12, atol=1e-14)
+            np.testing.assert_allclose(
+                batch[i], cache.compute_columns([i])[i], rtol=1e-12, atol=1e-14
+            )
 
     def test_unnormalized_kernel_raises(self):
         rng = np.random.default_rng(0)

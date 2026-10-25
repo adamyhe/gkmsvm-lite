@@ -4,23 +4,37 @@ Decomposes the SVM decision function into per-position, per-base
 importance scores without gradients. Ported from the C implementation
 in kundajelab/lsgkm (Shrikumar et al. 2019).
 
-Uses packed uint32 pre-filtering to skip ~99.88% of window pairs
-(those with more mismatches than d), matching the min-matches skip
-used in the forward pass. Per-position base identity is extracted
-directly from packed representations via bit shifts, eliminating
-all float intermediate arrays from the inner loop.
+The attribution is linear in the SVs (before any RBF), so it goes by the
+first of these that applies: the explain table (every l-mer's attribution,
+precomputed with Walsh-Hadamard transforms; non-RBF), the l-mer path (each
+query window visits its neighbors' summed SV weights V, or for RBF sums the
+per-query SV weights over the l-mer index), or the per-SV kernels, which
+visit every (query window, SV window) pair on packed uint32 windows and
+skip those below min_matches.
 """
 
 from __future__ import annotations
 
-import warnings
+from functools import cache
 
 import numpy as np
 from numba import njit, prange
 
 from gkmsvm.backend import get_array_module, is_mlx
+from gkmsvm.codec import codes_to_one_hot
 from gkmsvm.kernels.direct import _packed_mismatches
-from gkmsvm.svm import GkmSVM
+from gkmsvm.kernels.packed import PAD_WINDOW
+from gkmsvm.svm import (
+    GkmSVM,
+    _allele_arrays,
+    _joint_lengths,
+    _nan_rows,
+    _per_position,
+    _progress,
+    _rows,
+    _short_rows,
+    as_batch,
+)
 
 # ---------------------------------------------------------------------------
 # Fused kernels: coefficient multiplication and SV reduction in the inner loop
@@ -42,8 +56,14 @@ void fused_explain(
     const double* __restrict__ eff_coef,
     double* __restrict__ result,
     const int total_pairs, const int S, const int Wx, const int Wy,
-    const int l, const int min_matches, const int seqlen, const int perturbation
+    const int l, const int min_matches, const int seqlen, const int perturbation,
+    const double* __restrict__ wx, const int wx_stride, const double* __restrict__ wy,
+    const int wy_rs, const int wy_cs, const int weighted
 ) {
+    // Query b's window i weighs wx[b * wx_stride + i] (-t 4/5; wx_stride 0
+    // when the rows share one [Wx] row); SV s's window j weighs
+    // wy[j * wy_rs + s * wy_cs] (wy [Wy, S], or one [Wy] row shared: wy_cs 0).
+    // PAD windows (past a shorter SV's) are skipped
     extern __shared__ char smem[];
     double* s_a = (double*)smem;
     double* s_b = s_a + l + 2;
@@ -76,13 +96,18 @@ void fused_explain(
 
     for (int i = 0; i < Wx; i++) {
         unsigned int bx_val = use_smem ? s_bx[i] : bx_packed[b * Wx + i];
+        if (bx_val == 0xFFFFFFFFu) continue;
         for (int j = 0; j < Wy; j++) {
             unsigned int by_val = by_packed_t[j * S + s];
+            if (by_val == 0xFFFFFFFFu) continue;
             unsigned int xv = bx_val ^ by_val;
             int mm = __popc(((xv >> 1) | xv) & 0x55555555u);
             if (l - mm < min_matches) continue;
-            double av = ec * s_a[mm];
-            double bv = ec * s_b[mm];
+            const double ew = weighted
+                ? ec * wx[(long long)b * wx_stride + i] * wy[(long long)j * wy_rs + s * wy_cs]
+                : ec;
+            double av = ew * s_a[mm];
+            double bv = ew * s_b[mm];
             for (int k = 0; k < l; k++) {
                 int bx_k = (bx_val >> (2 * k)) & 3;
                 int by_k = (by_val >> (2 * k)) & 3;
@@ -101,30 +126,74 @@ void fused_explain(
 }
 """
 
-_cupy_explain_kernel = None
 
-
-def _explain_gpu(packed_x, packed_y_t, table_a, table_b, eff_coef, result,
-                 S_c, Wy, l, min_matches, perturbation):
-    """Launch the CUDA kernel, accumulating into ``result`` [B, 4, seqlen]."""
+@cache
+def _cupy_explain_kernel():
     import cupy as cp
 
-    global _cupy_explain_kernel
-    if _cupy_explain_kernel is None:
-        _cupy_explain_kernel = cp.RawKernel(
-            _FUSED_EXPLAIN_CUDA, "fused_explain", options=("--use_fast_math",))
+    return cp.RawKernel(
+        _FUSED_EXPLAIN_CUDA, "fused_explain", options=("--use_fast_math",)
+    )
+
+
+def _explain_gpu(
+    packed_x,
+    packed_y_t,
+    table_a,
+    table_b,
+    eff_coef,
+    result,
+    l,
+    min_matches,
+    perturbation,
+    wx,
+    wy,
+):
+    """Launch the CUDA kernel, accumulating into ``result`` [B, 4, seqlen] from
+    packed_y_t [Wy, S_c]; wx [B or 1, Wx], wy [S_c or 1, Wy]: window weights
+    ([1, 0] when unweighted)."""
+    import cupy as cp
+
     B, Wx = packed_x.shape
+    Wy, S_c = packed_y_t.shape
     total = B * S_c
     block = 256
     shared = 2 * (l + 2) * 8 + Wx * 4
-    _cupy_explain_kernel(
-        ((total + block - 1) // block,), (block,),
-        (packed_x, packed_y_t, cp.asarray(table_a, dtype=cp.float64),
-         cp.asarray(table_b, dtype=cp.float64),
-         cp.ascontiguousarray(eff_coef, dtype=cp.float64), result,
-         np.int32(total), np.int32(S_c), np.int32(Wx), np.int32(Wy),
-         np.int32(l), np.int32(min_matches), np.int32(result.shape[2]),
-         np.int32(perturbation)),
+    weighted = wx.shape[1] > 0
+    wx_stride, wy_rs, wy_cs = 0, 1, 0
+    if not weighted:
+        wx = wy = np.zeros(1)
+    else:
+        wx_stride = Wx if len(wx) > 1 else 0
+        if len(wy) > 1:  # per SV: [Wy, S_c], read like packed_y_t
+            wy, wy_rs, wy_cs = np.ascontiguousarray(wy.T), S_c, 1
+        else:
+            wy = wy[0]
+    _cupy_explain_kernel()(
+        ((total + block - 1) // block,),
+        (block,),
+        (
+            packed_x,
+            packed_y_t,
+            cp.asarray(table_a, dtype=cp.float64),
+            cp.asarray(table_b, dtype=cp.float64),
+            cp.ascontiguousarray(eff_coef, dtype=cp.float64),
+            result,
+            np.int32(total),
+            np.int32(S_c),
+            np.int32(Wx),
+            np.int32(Wy),
+            np.int32(l),
+            np.int32(min_matches),
+            np.int32(result.shape[2]),
+            np.int32(perturbation),
+            cp.asarray(wx, dtype=cp.float64),
+            np.int32(wx_stride),
+            cp.asarray(wy, dtype=cp.float64),
+            np.int32(wy_rs),
+            np.int32(wy_cs),
+            np.int32(weighted),
+        ),
         shared_mem=shared,
     )
 
@@ -138,7 +207,9 @@ def _explain_gpu(packed_x, packed_y_t, table_a, table_b, eff_coef, result,
 # picked with selects so each (neighbor, position) costs one float64 add: a
 # dynamically indexed [4, l] array spills to local memory. Perturbation adds a
 # match's weight to all four bases (q) and subtracts it from u_k. Lanes flush
-# with float64 atomicAdd (CC >= 6.0), 4 per window position.
+# with float64 atomicAdd (CC >= 6.0), 4 per window position. With window
+# weights (-t 4/5), wx scales each query window and vals the index's entries
+# (V already holds the SV windows' weights).
 _EXPLAIN_LMER_GROUP = 16
 _EXPLAIN_LMER_BLOCK = 128
 _EXPLAIN_LMER_CUDA = r"""
@@ -153,7 +224,8 @@ void explain_lmer(
     const double* __restrict__ w, const int S, const int use_index,
     const long long n_lmers, const double* __restrict__ table_a,
     const double* __restrict__ table_b, const int perturbation,
-    double* __restrict__ out
+    double* __restrict__ out, const double* __restrict__ wx, const int wx_stride,
+    const unsigned char* __restrict__ vals, const int weighted
 ) {
     const int b = blockIdx.z;
     const int lane = threadIdx.x % GROUP;
@@ -178,12 +250,17 @@ void explain_lmer(
             const unsigned int v = u ^ my_mask;
             if ((long long)v < n_lmers) {  // else a padding window
                 double wv;
-                if (use_index) {
+                if (use_index && weighted) {
+                    wv = 0.0;
+                    for (long long e = offsets[v]; e < offsets[v + 1]; e++)
+                        wv += wb[ids[e]] * vals[e];
+                } else if (use_index) {
                     wv = 0.0;
                     for (long long e = offsets[v]; e < offsets[v + 1]; e++) wv += wb[ids[e]];
                 } else {
                     wv = V[v];
                 }
+                if (weighted) wv *= wx[(long long)b * wx_stride + i];
                 my_a = wv * table_a[levels[t]];
                 my_b = wv * table_b[levels[t]];
             }
@@ -222,72 +299,531 @@ void explain_lmer(
 }
 """
 
-_cupy_explain_lmer_kernel = None
+
+@cache
+def _cupy_explain_lmer_kernel():
+    import cupy as cp
+
+    return cp.RawKernel(_EXPLAIN_LMER_CUDA, "explain_lmer")
+
+
 # Past lmer_index.MAX_NEIGHBORS, the l-mer path is taken when the SVs have at
-# least this many windows per neighbor: -t 0 l=11 k=7 (143,980 neighbors, 300 bp
+# least this many windows per neighbor: -t 0 l=11 k=7 without d (143,980 neighbors, 300 bp
 # SVs) breaks even near 1,000 SVs on CPU (Apple M4, Xeon) and 2,000 on a Titan
 # Xp, and is 3.6-4.7x faster at 10,000 (benchmarks/dev/explain_lmer_gpu.py)
 _EXPLAIN_SV_WINDOWS_PER_NEIGHBOR = 6
+# Metal (an M4): the per-SV kernel (_explain_sv_metal) keeps up to about 2,900
+# such SVs (32 x 300 bp: 0.57 s vs 0.81 s at 2,000 SVs, 2.3 s vs 0.83 s at 8,000)
+_EXPLAIN_SV_WINDOWS_PER_NEIGHBOR_METAL = 12
 # Threads to aim for per launch; mask slices (grid.y) make up for few windows
 _EXPLAIN_LMER_THREADS = 1 << 18
 
 
-def _explain_lmer_gpu(packed_x, inv_dx, V, offsets, ids, w, masks, levels, table_a,
-                      table_b, l, seqlen, perturbation):
+def _launch_slices(n, per_slice, row_threads, B, max_slices=None):
+    """(n_slices, chunk): n masks (or SV windows) split into grid.y slices of
+    chunk, as many as it takes B rows of row_threads threads to reach
+    _EXPLAIN_LMER_THREADS, but no fewer than per_slice items each (and at
+    most max_slices)."""
+    caps = [-(-n // per_slice), -(-_EXPLAIN_LMER_THREADS // (B * row_threads))]
+    if max_slices is not None:
+        caps.append(max_slices)
+    chunk = -(-n // max(1, min(caps)))
+    return -(-n // chunk), chunk
+
+
+def _explain_lmer_gpu(
+    packed_x,
+    inv_dx,
+    V,
+    offsets,
+    ids,
+    w,
+    masks,
+    levels,
+    table_a,
+    table_b,
+    l,
+    seqlen,
+    perturbation,
+    wx,
+    vals,
+):
     """[B, 4, seqlen] on CUDA: _explain_lmer_cpu when V is given, else
-    _explain_index_cpu with the CSR (offsets, ids) and SV weights w [B, S]."""
+    _explain_index_cpu with the CSR (offsets, ids) and SV weights w [B, S].
+    wx: query window weights [B or 1, W] ([1, 0] when unweighted), vals: the
+    entries' (None when unweighted)."""
     import cupy as cp
 
-    global _cupy_explain_lmer_kernel
-    if _cupy_explain_lmer_kernel is None:
-        _cupy_explain_lmer_kernel = cp.RawKernel(_EXPLAIN_LMER_CUDA, "explain_lmer")
     packed_x = cp.ascontiguousarray(packed_x, dtype=cp.uint32)
     B, W = packed_x.shape
     n_masks = len(masks)
     per_block = _EXPLAIN_LMER_BLOCK // _EXPLAIN_LMER_GROUP
     blocks = -(-W // per_block)
-    n_slices = max(1, min(-(-n_masks // 256),
-                          -(-_EXPLAIN_LMER_THREADS // (B * blocks * _EXPLAIN_LMER_BLOCK))))
-    chunk = -(-n_masks // n_slices)
-    n_slices = -(-n_masks // chunk)
+    n_slices, chunk = _launch_slices(n_masks, 256, blocks * _EXPLAIN_LMER_BLOCK, B)
     use_index = V is None
     dummy_f = cp.zeros(1, dtype=cp.float64)
+    weighted = wx.shape[1] > 0
+    wx_stride = W if weighted and len(wx) > 1 else 0
+    wx = cp.asarray(wx, dtype=cp.float64) if weighted else dummy_f
+    vals = vals if vals is not None else cp.zeros(1, dtype=cp.uint8)
     out = cp.zeros((B, 4, seqlen), dtype=cp.float64)
     for b0 in range(0, B, 65535):  # grid.z limit
         nb = min(65535, B - b0)
-        _cupy_explain_lmer_kernel(
-            (blocks, n_slices, nb), (_EXPLAIN_LMER_BLOCK,),
-            (packed_x[b0:b0 + nb], np.int32(W), np.int32(seqlen), np.int32(l),
-             masks, levels, np.int32(n_masks), np.int32(chunk),
-             dummy_f if use_index else V,
-             offsets if use_index else cp.zeros(1, dtype=cp.int64),
-             ids if use_index else cp.zeros(1, dtype=cp.int32),
-             cp.ascontiguousarray(w[b0:b0 + nb]) if use_index else dummy_f,
-             np.int32(w.shape[1] if use_index else 0), np.int32(use_index),
-             np.int64(4**l), table_a, table_b, np.int32(perturbation), out[b0:b0 + nb]))
+        _cupy_explain_lmer_kernel()(
+            (blocks, n_slices, nb),
+            (_EXPLAIN_LMER_BLOCK,),
+            (
+                packed_x[b0 : b0 + nb],
+                np.int32(W),
+                np.int32(seqlen),
+                np.int32(l),
+                masks,
+                levels,
+                np.int32(n_masks),
+                np.int32(chunk),
+                dummy_f if use_index else V,
+                offsets if use_index else cp.zeros(1, dtype=cp.int64),
+                ids if use_index else cp.zeros(1, dtype=cp.int32),
+                cp.ascontiguousarray(w[b0 : b0 + nb]) if use_index else dummy_f,
+                np.int32(w.shape[1] if use_index else 0),
+                np.int32(use_index),
+                np.int64(4**l),
+                table_a,
+                table_b,
+                np.int32(perturbation),
+                out[b0 : b0 + nb],
+                wx[b0:] if wx_stride else wx,
+                np.int32(wx_stride),
+                vals,
+                np.int32(weighted),
+            ),
+        )
     out *= inv_dx[:, None, None]
     return out
 
 
-@njit(parallel=True, cache=True, fastmath=True)
-def _explain_cpu(packed_x, packed_y, table_a, table_b, eff_coef, l, min_matches,
-                 seqlen, perturbation):
-    """[B, 4, seqlen] attributions of packed_x [B, W] against packed_y [S, Wy]."""
+# The 16 (delta mask, a, b) pairs a 16-lane group holds, passed round with
+# simd_shuffle: lane k adds each to its four sums by the pair's 2-bit delta at
+# position k (perturbation: a delta-0 pair adds to the other three bases, by
+# way of q), then writes them to part [slices, B, W, 4, 16] (_fold_windows)
+_EXPLAIN_METAL_ROUND = """        uint n = min(16u, t_end - t0);
+        for (uint j = 0; j < n; j++) {
+            uint mask = simd_shuffle(my_mask, (ushort)(src + j));
+            float av = simd_shuffle(my_a, (ushort)(src + j));
+            float bv = simd_shuffle(my_b, (ushort)(src + j));
+            if (av == 0.0f && bv == 0.0f) continue;
+            uint d = (mask >> shift) & 3u;
+            float val;
+            if (d != 0u) {
+                val = bv;
+            } else if (perturbation) {
+                q += av;
+                val = -av;
+            } else {
+                val = av;
+            }
+            r0 += d == 0u ? val : 0.0f;
+            r1 += d == 1u ? val : 0.0f;
+            r2 += d == 2u ? val : 0.0f;
+            r3 += d == 3u ? val : 0.0f;
+        }
+    }
+    if (!valid || lane >= l) return;
+    uint o = (((slice * B + b) * W + i) * 4) * 16 + lane;
+    part[o] = r0 + q;
+    part[o + 16] = r1 + q;
+    part[o + 32] = r2 + q;
+    part[o + 48] = r3 + q;
+"""
+
+# Metal (MLX) version of explain_lmer: the same 16-lane groups, one per query
+# window, lane k owning position k and the neighbors passed round with
+# simd_shuffle (two groups per 32-wide SIMD group). Metal has no float64, so
+# nothing is summed across windows on the GPU: each window writes its four
+# float32 sums per position (r[d] + q) to part [slices, B, W, 4, 16], and the
+# CPU folds the overlapping windows in float64 (_fold_windows). No atomics.
+_EXPLAIN_LMER_METAL = (
+    """
+    uint tid = thread_position_in_threadgroup.x;
+    uint tg = threads_per_threadgroup.x;
+    uint lane = tid % 16;
+    uint i = threadgroup_position_in_grid.x * (tg / 16) + tid / 16;
+    uint slice = threadgroup_position_in_grid.y;
+    uint b = threadgroup_position_in_grid.z;
+    uint W = (uint)params[0], n_masks = (uint)params[1], chunk = (uint)params[2];
+    uint use_index = (uint)params[3], S = (uint)params[4], n_lmers = (uint)params[5];
+    uint perturbation = (uint)params[6], weighted = (uint)params[7];
+    uint wx_stride = (uint)params[8], B = (uint)params[9], l = (uint)params[10];
+    // Groups past the last window still take part in the shuffles
+    bool valid = i < W;
+    uint u = valid ? bx[b * W + i] : 0u;
+    uint shift = 2 * lane;
+    float r0 = 0.0f, r1 = 0.0f, r2 = 0.0f, r3 = 0.0f, q = 0.0f;
+    uint t_begin = slice * chunk;
+    uint t_end = min(n_masks, t_begin + chunk);
+    ushort src = (ushort)((tid % 32) & ~15u);  // this group's first lane
+    for (uint t0 = t_begin; t0 < t_end; t0 += 16) {
+        uint t = t0 + lane;
+        uint my_mask = 0u;
+        float my_a = 0.0f, my_b = 0.0f;
+        if (valid && t < t_end) {
+            my_mask = masks[t];
+            uint v = u ^ my_mask;
+            if (v < n_lmers) {  // else a padding window
+                float wv;
+                if (use_index) {
+                    // compensated sum: the SV weights are signed
+                    float hi = 0.0f, lo = 0.0f;
+                    for (int e = offsets[v]; e < offsets[v + 1]; e++) {
+                        float y = w[b * S + ids[e]] * (weighted ? (float)vals[e] : 1.0f);
+                        float t2 = hi + y;
+                        lo += (fabs(hi) >= fabs(y)) ? (hi - t2) + y : (y - t2) + hi;
+                        hi = t2;
+                    }
+                    wv = hi + lo;
+                } else {
+                    wv = V[v];
+                }
+                if (weighted) wv *= wx[b * wx_stride + i];
+                my_a = wv * table_a[levels[t]];
+                my_b = wv * table_b[levels[t]];
+            }
+        }
+"""
+    + _EXPLAIN_METAL_ROUND
+)
+_EXPLAIN_LMER_METAL_THREADS = 128
+# Bytes of window partials per launch ([slices, rows, W, 4, 16] float32)
+_EXPLAIN_LMER_METAL_BYTES = 256 * 2**20
+
+
+@cache
+def _metal_explain_lmer():
+    import mlx.core as mx
+
+    return mx.fast.metal_kernel(
+        name="gkm_explain_lmer",
+        input_names=[
+            "bx",
+            "masks",
+            "levels",
+            "V",
+            "offsets",
+            "ids",
+            "w",
+            "vals",
+            "wx",
+            "table_a",
+            "table_b",
+            "params",
+        ],
+        output_names=["part"],
+        source=_EXPLAIN_LMER_METAL,
+    )
+
+
+def _metal_slices(n, per_slice, B, W):
+    """_launch_slices for the Metal kernels' grid (W windows per row, a
+    16-lane group each), with the window partials capped at
+    _EXPLAIN_LMER_METAL_BYTES; also returns the threadgroups per row."""
+    groups = -(-W // (_EXPLAIN_LMER_METAL_THREADS // 16))
+    n_slices, chunk = _launch_slices(
+        n,
+        per_slice,
+        groups * _EXPLAIN_LMER_METAL_THREADS,
+        B,
+        max(1, _EXPLAIN_LMER_METAL_BYTES // (B * W * 4 * 16 * 4)),
+    )
+    return n_slices, chunk, groups
+
+
+def _metal_fold(kernel, inputs, packed_x, n_slices, groups, inv_dx, l, seqlen):
+    """Launch a Metal explain kernel over (groups, n_slices, B) threadgroups and
+    fold its window partials: [B, 4, seqlen] float64 NumPy."""
+    import mlx.core as mx
+
+    B, W = packed_x.shape
+    part = kernel(
+        inputs=inputs,
+        template=[],
+        grid=(groups * _EXPLAIN_LMER_METAL_THREADS, n_slices, B),
+        threadgroup=(_EXPLAIN_LMER_METAL_THREADS, 1, 1),
+        output_shapes=[(n_slices * B * W * 4 * 16,)],
+        output_dtypes=[mx.float32],
+        init_value=0,
+    )[0]
+    part = np.array(part).reshape(n_slices, B, W, 4, 16)
+    return _fold_windows(np.ascontiguousarray(packed_x), part, inv_dx, l, seqlen)
+
+
+@njit(parallel=True, cache=True)
+def _fold_windows(packed_x, part, inv_dx, l, seqlen):
+    """[B, 4, seqlen] float64 from window partials part [slices, B, W, 4, 16]:
+    window i's sum for delta d at its position k goes to base u_k ^ d at
+    i + k, times inv_dx[b]."""
+    n_slices, B, W = part.shape[:3]
+    out = np.zeros((B, 4, seqlen))
+    for b in prange(B):
+        for i in range(W):
+            u = packed_x[b, i]
+            if u == PAD_WINDOW:
+                continue
+            for k in range(l):
+                uk = (u >> np.uint32(2 * k)) & np.uint32(3)
+                for d in range(4):
+                    acc = 0.0
+                    for c in range(n_slices):
+                        acc += part[c, b, i, d, k]
+                    out[b, int(uk ^ np.uint32(d)), i + k] += acc
+        out[b] *= inv_dx[b]
+    return out
+
+
+def _explain_lmer_metal(
+    packed_x,
+    inv_dx,
+    V,
+    index,
+    w,
+    masks,
+    levels,
+    table_a,
+    table_b,
+    l,
+    seqlen,
+    perturbation,
+    wx,
+    cache,
+):
+    """_explain_lmer_gpu in Metal: [B, 4, seqlen] float64 NumPy. V (float32 on
+    the device, cached in `cache`) or, for RBF, the l-mer index and per-query
+    SV weights w [B, S]; wx: query window weights ([B or 1, W] float64, [1, 0]
+    unweighted)."""
+    import mlx.core as mx
+
+    B, W = packed_x.shape
+    n_masks = len(masks)
+    key = ("explain_lmer_metal", id(masks))
+    if cache.get(key, (None,))[0] is not masks:
+        cache[key] = (
+            masks,
+            mx.array(np.ascontiguousarray(masks, dtype=np.uint32)),
+            mx.array(np.ascontiguousarray(levels, dtype=np.int32)),
+        )
+    _, masks_d, levels_d = cache[key]
+    zero_f, zero_i = mx.zeros(1, dtype=mx.float32), mx.zeros(1, dtype=mx.int32)
+    use_index = V is None
+    if use_index:
+        offsets, ids, _, _, vals = index._arrays("mlx")
+        w_d = mx.array(np.ascontiguousarray(w, dtype=np.float32))
+        V_d, S = zero_f, w.shape[1]
+        vals = vals if vals is not None else mx.zeros(1, dtype=mx.uint32)
+    else:
+        if "explain_V_mlx" not in cache:
+            cache["explain_V_mlx"] = mx.array(V.astype(np.float32))
+        V_d, S = cache["explain_V_mlx"], 0
+        offsets = ids = zero_i
+        w_d, vals = zero_f, mx.zeros(1, dtype=mx.uint32)
+    weighted = wx.shape[1] > 0
+    wx_stride = W if weighted and wx.shape[0] > 1 else 0
+    wx_d = mx.array(wx.astype(np.float32)) if weighted else zero_f
+    n_slices, chunk, groups = _metal_slices(n_masks, 256, B, W)
+    params = [
+        W,
+        n_masks,
+        chunk,
+        int(use_index),
+        S,
+        4**l,
+        int(perturbation),
+        int(weighted),
+        wx_stride,
+        B,
+        l,
+    ]
+    inputs = [
+        mx.array(np.ascontiguousarray(packed_x, dtype=np.uint32)),
+        masks_d,
+        levels_d,
+        V_d,
+        offsets,
+        ids,
+        w_d,
+        vals,
+        wx_d,
+        mx.array(np.asarray(table_a, dtype=np.float32)),
+        mx.array(np.asarray(table_b, dtype=np.float32)),
+        mx.array(params, dtype=mx.int32),
+    ]
+    return _metal_fold(
+        _metal_explain_lmer(), inputs, packed_x, n_slices, groups, inv_dx, l, seqlen
+    )
+
+
+# The per-SV kernel (_explain_cpu) in Metal: the same 16-lane groups, one per
+# query window, each lane taking one SV window per round of a slice of the
+# [S_c, Wy] SV windows; the pair's delta u ^ y and its weights go round the
+# group as the l-mer path's neighbors do. Most pairs fall below min_matches,
+# so only the lanes holding a pair (a ballot) go round.
+_EXPLAIN_SV_METAL = """
+    uint tid = thread_position_in_threadgroup.x;
+    uint tg = threads_per_threadgroup.x;
+    uint lane = tid % 16;
+    uint i = threadgroup_position_in_grid.x * (tg / 16) + tid / 16;
+    uint slice = threadgroup_position_in_grid.y;
+    uint b = threadgroup_position_in_grid.z;
+    uint W = (uint)params[0], n_items = (uint)params[1], chunk = (uint)params[2];
+    uint Wy = (uint)params[3], S = (uint)params[4], perturbation = (uint)params[5];
+    uint weighted = (uint)params[6], wx_stride = (uint)params[7], B = (uint)params[8];
+    uint l = (uint)params[9], min_matches = (uint)params[10], wy_stride = (uint)params[11];
+    // Groups past the last window (or on a PAD one) still take part in the shuffles
+    uint u = i < W ? bx[b * W + i] : 0xFFFFFFFFu;
+    bool valid = u != 0xFFFFFFFFu;
+    uint shift = 2 * lane;
+    float r0 = 0.0f, r1 = 0.0f, r2 = 0.0f, r3 = 0.0f, q = 0.0f;
+    uint t_begin = slice * chunk;
+    uint t_end = min(n_items, t_begin + chunk);
+    ushort src = (ushort)((tid % 32) & ~15u);  // this group's first lane
+    for (uint t0 = t_begin; t0 < t_end; t0 += 16) {
+        uint t = t0 + lane;
+        uint my_mask = 0u;
+        float my_a = 0.0f, my_b = 0.0f;
+        if (valid && t < t_end) {
+            uint y = sv[t];
+            uint x = u ^ y;
+            uint mm = popcount(((x >> 1) | x) & 0x55555555u);
+            if (y != 0xFFFFFFFFu && l - mm >= min_matches) {
+                uint s = t / Wy;
+                float ew = ec[b * S + s];
+                if (weighted)
+                    ew *= wx[b * wx_stride + i] * wy[s * wy_stride + (t - s * Wy)];
+                my_mask = x;
+                my_a = ew * table_a[mm];
+                my_b = ew * table_b[mm];
+            }
+        }
+        // Only the lanes holding a pair go round (the same set for the 16 lanes)
+        ulong vote = (ulong)(simd_vote::vote_t)simd_ballot(my_a != 0.0f || my_b != 0.0f);
+        uint pending = (uint)(vote >> src) & 0xFFFFu;
+""" + _EXPLAIN_METAL_ROUND.replace(
+    """        uint n = min(16u, t_end - t0);
+        for (uint j = 0; j < n; j++) {
+""",
+    """        while (pending != 0u) {
+            uint j = ctz(pending);
+            pending &= pending - 1u;
+""",
+)
+
+
+@cache
+def _metal_explain_sv():
+    import mlx.core as mx
+
+    return mx.fast.metal_kernel(
+        name="gkm_explain_sv",
+        input_names=["bx", "sv", "ec", "wx", "wy", "table_a", "table_b", "params"],
+        output_names=["part"],
+        source=_EXPLAIN_SV_METAL,
+    )
+
+
+def _explain_sv_metal(
+    packed_x,
+    packed_y,
+    table_a,
+    table_b,
+    eff_coef,
+    l,
+    min_matches,
+    seqlen,
+    perturbation,
+    wx,
+    wy,
+):
+    """_explain_cpu in Metal (arguments the same, on CPU): [B, 4, seqlen]
+    float64 NumPy, folded from float32 window partials."""
+    import mlx.core as mx
+
     B, W = packed_x.shape
     S_c, Wy = packed_y.shape
+    n_items = S_c * Wy
+    weighted = wx.shape[1] > 0
+    zero_f = mx.zeros(2, dtype=mx.float32)  # (a 1-element input would be a constant)
+    n_slices, chunk, groups = _metal_slices(n_items, 1024, B, W)
+    params = [
+        W,
+        n_items,
+        chunk,
+        Wy,
+        S_c,
+        int(perturbation),
+        int(weighted),
+        W if weighted and wx.shape[0] > 1 else 0,
+        B,
+        l,
+        min_matches,
+        Wy if weighted and wy.shape[0] > 1 else 0,
+    ]
+
+    def f32(a):
+        return mx.array(np.ascontiguousarray(a, dtype=np.float32).ravel())
+
+    inputs = [
+        mx.array(np.ascontiguousarray(packed_x, dtype=np.uint32).ravel()),
+        mx.array(np.ascontiguousarray(packed_y, dtype=np.uint32).ravel()),
+        f32(eff_coef),
+        f32(wx) if weighted else zero_f,
+        f32(wy) if weighted else zero_f,
+        f32(table_a),
+        f32(table_b),
+        mx.array(params, dtype=mx.int32),
+    ]
+    return _metal_fold(
+        _metal_explain_sv(), inputs, packed_x, n_slices, groups, np.ones(B), l, seqlen
+    )
+
+
+@njit(parallel=True, cache=True, fastmath=True)
+def _explain_cpu(
+    packed_x,
+    packed_y,
+    table_a,
+    table_b,
+    eff_coef,
+    l,
+    min_matches,
+    seqlen,
+    perturbation,
+    wx,
+    wy,
+):
+    """[B, 4, seqlen] attributions of packed_x [B, W] against packed_y [S, Wy];
+    wx [B or 1, W], wy [S or 1, Wy]: window weights ([1, 0] when unweighted).
+    PAD windows (past shorter sequences' windows) are skipped."""
+    B, W = packed_x.shape
+    S_c, Wy = packed_y.shape
+    weighted = wx.shape[1] > 0
     result = np.zeros((B, 4, seqlen), dtype=np.float64)
     for b in prange(B):
+        wxb = wx[min(np.int64(b), wx.shape[0] - 1)]
         for s in range(S_c):
             ec = eff_coef[b, s]
+            wys = wy[min(np.int64(s), wy.shape[0] - 1)]
             for i in range(W):
                 bx_val = packed_x[b, i]
+                if bx_val == PAD_WINDOW:
+                    continue
                 for j in range(Wy):
                     by_val = packed_y[s, j]
+                    if by_val == PAD_WINDOW:
+                        continue
                     mm = _packed_mismatches(bx_val, by_val)
                     if l - mm < min_matches:
                         continue
-                    av = ec * table_a[mm]
-                    bv = ec * table_b[mm]
+                    ew = ec * wxb[i] * wys[j] if weighted else ec
+                    av = ew * table_a[mm]
+                    bv = ew * table_b[mm]
                     for k in range(l):
                         bx_k = int((bx_val >> np.uint32(2 * k)) & np.uint32(3))
                         by_k = int((by_val >> np.uint32(2 * k)) & np.uint32(3))
@@ -325,30 +861,56 @@ def _distribute(acc, i, mask, v, wv, a, b, l, perturbation):
 
 
 @njit(parallel=True, cache=True, fastmath=True)
-def _explain_lmer_cpu(packed_x, inv_dx, V, masks, levels, table_a, table_b, l, seqlen,
-                      perturbation, n_split):
+def _explain_lmer_cpu(
+    packed_x,
+    inv_dx,
+    V,
+    masks,
+    levels,
+    table_a,
+    table_b,
+    l,
+    seqlen,
+    perturbation,
+    n_split,
+    wx,
+):
     """[B, 4, seqlen] attributions from the SVs' l-mer weights V (see _explain_lmer).
 
     Each query window u visits every l-mer v = u ^ mask within the mismatch
     cutoff and adds V[v] times the alpha/kappa (or perturbation) weight of
     their mismatch count to each of its positions, as _explain_cpu does for
     every SV window equal to v. Rows are split into n_split window chunks.
+    wx: the query windows' weights ([B or 1, W], [1, 0] when unweighted; V
+    holds the SVs'). PAD query windows have no neighbors (u ^ mask >= 4^l).
     """
     B, W = packed_x.shape
     n_lmers = V.shape[0]
+    weighted = wx.shape[1] > 0
     part = np.zeros((B * n_split, 4, seqlen))
     step = (W + n_split - 1) // n_split
     for task in prange(B * n_split):
         b, c = task // n_split, task % n_split
         acc = part[task]
+        wxb = wx[min(np.int64(b), wx.shape[0] - 1)]
         for i in range(c * step, min(W, (c + 1) * step)):
             u = packed_x[b, i]
+            a = wxb[i] if weighted else 1.0
             for t in range(masks.shape[0]):
                 v = u ^ masks[t]
                 if np.int64(v) >= n_lmers or V[v] == 0.0:
                     continue
-                _distribute(acc, i, masks[t], v, V[v], table_a[levels[t]],
-                            table_b[levels[t]], l, perturbation)
+                _distribute(
+                    acc,
+                    i,
+                    masks[t],
+                    v,
+                    a * V[v],
+                    table_a[levels[t]],
+                    table_b[levels[t]],
+                    l,
+                    perturbation,
+                )
     out = part.reshape(B, n_split, 4, seqlen).sum(axis=1)
     for b in range(B):
         out[b] *= inv_dx[b]
@@ -356,31 +918,63 @@ def _explain_lmer_cpu(packed_x, inv_dx, V, masks, levels, table_a, table_b, l, s
 
 
 @njit(parallel=True, cache=True, fastmath=True)
-def _explain_index_cpu(packed_x, inv_dx, offsets, ids, w, masks, levels, table_a, table_b,
-                       l, seqlen, perturbation, n_split):
+def _explain_index_cpu(
+    packed_x,
+    inv_dx,
+    offsets,
+    ids,
+    w,
+    masks,
+    levels,
+    table_a,
+    table_b,
+    l,
+    seqlen,
+    perturbation,
+    n_split,
+    wx,
+    vals,
+):
     """As _explain_lmer_cpu with per-query SV weights w [B, S]: V[v] for row b is
-    the sum of w[b, s] over the index's entries for v (RBF models)."""
+    the sum of w[b, s] over the index's entries for v (RBF models), times each
+    entry's window weight in vals (empty when unweighted)."""
     B, W = packed_x.shape
     n_lmers = offsets.shape[0] - 1
+    weighted = vals.shape[0] > 0
     part = np.zeros((B * n_split, 4, seqlen))
     step = (W + n_split - 1) // n_split
     for task in prange(B * n_split):
         b, c = task // n_split, task % n_split
         acc = part[task]
         wb = w[b]
+        wxb = wx[min(np.int64(b), wx.shape[0] - 1)]
         for i in range(c * step, min(W, (c + 1) * step)):
             u = packed_x[b, i]
+            a = wxb[i] if weighted else 1.0
             for t in range(masks.shape[0]):
                 v = u ^ masks[t]
                 if np.int64(v) >= n_lmers:
                     continue
                 wv = 0.0
-                for e in range(offsets[v], offsets[v + 1]):
-                    wv += wb[ids[e]]
+                if weighted:
+                    for e in range(offsets[v], offsets[v + 1]):
+                        wv += wb[ids[e]] * vals[e]
+                else:
+                    for e in range(offsets[v], offsets[v + 1]):
+                        wv += wb[ids[e]]
                 if wv == 0.0:
                     continue
-                _distribute(acc, i, masks[t], v, wv, table_a[levels[t]],
-                            table_b[levels[t]], l, perturbation)
+                _distribute(
+                    acc,
+                    i,
+                    masks[t],
+                    v,
+                    a * wv,
+                    table_a[levels[t]],
+                    table_b[levels[t]],
+                    l,
+                    perturbation,
+                )
     out = part.reshape(B, n_split, 4, seqlen).sum(axis=1)
     for b in range(B):
         out[b] *= inv_dx[b]
@@ -436,13 +1030,8 @@ def _explain_min_matches(alpha_table, kappa_table, l):
     Accounts for both alpha and kappa tables, since kappa[m] uses
     mismatch_table[m-1] and can be non-zero one level beyond alpha.
     """
-    max_m = -1
-    for m in range(l + 1):
-        if alpha_table[m] != 0:
-            max_m = m
-        if kappa_table is not None and m < len(kappa_table) and kappa_table[m] != 0:
-            max_m = max(max_m, m)
-    return l - max_m if max_m >= 0 else l + 1
+    nonzero = [m for m in range(l + 1) if alpha_table[m] != 0 or kappa_table[m] != 0]
+    return l - max(nonzero, default=-1)
 
 
 def _build_alpha_table(mismatch_table: np.ndarray, l: int, d: int) -> np.ndarray:
@@ -464,7 +1053,9 @@ def _build_kappa_table(mismatch_table: np.ndarray, l: int, d: int) -> np.ndarray
 
 
 def _build_perturbation_tables(
-    mismatch_table: np.ndarray, l: int, d: int,
+    mismatch_table: np.ndarray,
+    l: int,
+    d: int,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Per-mismatch perturbation effect weights (C code's perturbation_eff=1).
 
@@ -501,9 +1092,10 @@ _MODE_ALIASES: dict[int | str, str] = {
 
 def gkmexplain(
     model: GkmSVM,
-    x: np.ndarray,
+    x,
     *,
     mode: int | str = "importance",
+    lengths=None,
     batch_size: int = 50,
     verbose: bool = False,
 ) -> np.ndarray:
@@ -511,7 +1103,8 @@ def gkmexplain(
 
     Args:
         model: A GkmSVM model.
-        x: [B, 4, L] one-hot encoded sequences.
+        x: [B, 4, L] one-hot encoded sequences, or a list of [4, L_i] arrays
+            or DNA strings of different lengths.
         mode: Attribution mode (string or legacy int).
             ``"importance"`` (0) — hypothetical * one-hot.  Non-reference
                 bases are zero; sum over [B, 4, L] equals score - bias
@@ -521,14 +1114,21 @@ def gkmexplain(
                 bases at every position.  Use for TF-MoDISco (both
                 projected and hypothetical contribution inputs).
             ``"perturbation"`` (2) — discrete kernel-value delta for
-                each possible single-base mutation (lsgkm C mode 3,
-                ``perturbation_eff=1``).  Use for variant effect
-                prediction via ``score_variants(method="gkmexplain")``.
+                each possible single-base mutation (lsgkm C mode 4:
+                ``perturbation_eff=1`` over every pair it changes).  Use
+                for per-position mutation maps; variant scores
+                (``score_variants(method="gkmexplain")``) come from
+                ``mutation_impact()``.
+        lengths: [B] lengths of x's rows when they differ (x padded to the
+            longest).
         batch_size: Process inputs in batches of this size (default 50).
         verbose: Show tqdm progress bar over input batches.
 
     Returns:
-        [B, 4, L] attribution scores.
+        [B, 4, L] float64 attribution scores on the model's device (NumPy for
+        a model on MLX, whose window partials are folded on CPU); 0 past
+        each sequence's length, NaN for sequences shorter than l (with a
+        warning).
     """
     resolved = _MODE_ALIASES.get(mode)
     if resolved is None:
@@ -536,15 +1136,15 @@ def gkmexplain(
             f"mode must be 'importance', 'hypothetical', or 'perturbation' "
             f"(or 0/1/2), got {mode!r}"
         )
+    x, lengths = as_batch(x, lengths)
+    x = model._match_device(x)
+    short = _short_rows(lengths, model.kernel.base.l, "attributions")
 
     if is_mlx(x):
-        # Metal can't accumulate in float64, which the completeness axiom needs
-        warnings.warn(
-            "GkmExplain does not have an MLX kernel — falling back to CPU. "
-            "This will be slower than MLX inference.",
-            stacklevel=2,
-        )
-        from gkmsvm.backend import to_cpu, to_mlx
+        # The l-mer path and the per-SV kernel run in Metal (window partials
+        # folded in float64 on the CPU), the explain table on CPU, from a CPU
+        # copy of the model; the result is NumPy float64
+        from gkmsvm.backend import to_cpu
 
         # A CPU copy of the model, kept with the model's caches so its packed
         # SVs, norms and l-mer weights are built once
@@ -556,52 +1156,74 @@ def gkmexplain(
                 model.bias,
                 model.kernel_type,
                 model._kernel_params,
+                sv_lengths=model.sv_lengths,
                 sv_chunk_size=model.sv_chunk_size,
             )
-            cpu_model.use_lmer_index = model.use_lmer_index
-            cpu_model.use_lmer_table = model.use_lmer_table
-            cpu_model.use_explain_table = model.use_explain_table
             model._sv_cache["cpu_model"] = cpu_model
-        return to_mlx(gkmexplain(cpu_model, to_cpu(x), mode=resolved,
-                                 batch_size=batch_size, verbose=verbose).astype(np.float32))
-
-    if resolved == "importance":
-        hyp = gkmexplain(
-            model, x, mode="hypothetical",
-            batch_size=batch_size, verbose=verbose,
+        # (checked on every call, as on the model itself)
+        cpu_model.use_lmer_index = model.use_lmer_index
+        cpu_model.use_lmer_table = model.use_lmer_table
+        cpu_model.use_explain_table = model.use_explain_table
+        out = _gkmexplain(
+            cpu_model, to_cpu(x), lengths, resolved, batch_size, verbose, metal=True
         )
-        return hyp * model._match_device(x)
+        return _per_position(out, lengths, short)
+    out = _gkmexplain(model, x, lengths, resolved, batch_size, verbose)
+    return _per_position(out, lengths, short)
+
+
+def _gkmexplain(model, x, lengths, resolved, batch_size, verbose, metal=False):
+    """gkmexplain on x on the model's device (not MLX), lengths None or [B].
+    metal: x and the model are a CPU copy of an MLX model's, and the l-mer
+    path and the per-SV kernel run in Metal."""
+    if resolved == "importance":
+        hyp = _gkmexplain(model, x, lengths, "hypothetical", batch_size, verbose, metal)
+        # N is stored as A, so its importance goes there, as in lsgkm (and the
+        # importance then sums to score - bias)
+        return hyp * codes_to_one_hot(x, hyp.dtype)
 
     is_perturbation = resolved == "perturbation"
 
-    x = model._match_device(x)
-
-
     kernel = model.kernel
     base = kernel.base
-    if getattr(base, "_mismatch_table", None) is None or base.window_weights(1) is not None:
-        raise ValueError(
-            f"GkmExplain attribution supports -t 0/1/2/3 kernels, not {model.kernel_type!r}; "
-            "use mutation_impact() or ism()"
-        )
-    # RBF (-t 3): each SV's contributions scale by _rbf_scale of its kernel value
+    # RBF (-t 3/-t 5): each SV's contributions scale by _rbf_scale of its kernel value
     gamma = kernel.gamma if base is not kernel else None
     xp = get_array_module(x)
-    B, _, seqlen = x.shape
+    B, seqlen = x.shape[0], x.shape[-1]
     l = base.l
-    d = getattr(base, "d", l)
+    d = l if base.d is None else base.d  # -t 0 without d counts every pair
     if is_perturbation:
         table_a, table_b = _build_perturbation_tables(base._mismatch_table, l, d)
     else:
         table_a = _build_alpha_table(base._mismatch_table, l, d)
         table_b = _build_kappa_table(base._mismatch_table, l, d)
     min_matches = _explain_min_matches(table_a, table_b, l)
-    A = _explain_table(model, B, "cpu" if xp is np else "cuda", table_a, table_b,
-                       is_perturbation, gamma)
+    A = _explain_table(
+        model,
+        B,
+        "cpu" if xp is np else "cuda",
+        table_a,
+        table_b,
+        is_perturbation,
+        gamma,
+    )
     if A is not None:
-        return _explain_with_table(model, x, A, is_perturbation, batch_size, verbose)
-    lmer = _explain_lmer(model, x, table_a, table_b, l - min_matches, is_perturbation,
-                         gamma, batch_size, verbose)
+        return _explain_with_table(
+            model, x, A, is_perturbation, batch_size, verbose, lengths
+        )
+    lmer = _explain_lmer(
+        model,
+        x,
+        lengths,
+        table_a,
+        table_b,
+        l - min_matches,
+        is_perturbation,
+        gamma,
+        batch_size,
+        verbose,
+        metal,
+    )
     if lmer is not None:
         return lmer
 
@@ -613,42 +1235,115 @@ def gkmexplain(
     if xp is not np:
         packed_sv = xp.ascontiguousarray(packed_sv.T)  # [Wy, S] for coalesced reads
     cs = model.sv_chunk_size if model.sv_chunk_size is not None else min(S, 2000)
+    # [S or 1, Wy] SV window weights, forward then RC (an RC window carries its
+    # forward weight); [1, 0] when unweighted
+    wy = base.row_weights(sv_fwd)
+    if wy is None:
+        wy = np.zeros((1, 0))
+    else:
+        if sv_rc is not None:
+            wy_rc = base.row_weights(sv_rc, rc=True)
+            n = max(len(wy), len(wy_rc))
+            wy = np.concatenate(
+                [
+                    np.broadcast_to(wy, (n, wy.shape[1])),
+                    np.broadcast_to(wy_rc, (n, wy_rc.shape[1])),
+                ],
+                axis=1,
+            )
+        wy = np.ascontiguousarray(wy, dtype=np.float64)
 
     result = xp.zeros((B, 4, seqlen), dtype=np.float64)
-    starts = range(0, B, batch_size)
-    if verbose:
-        from tqdm import tqdm
-        starts = tqdm(starts, desc="GkmExplain", total=(B + batch_size - 1) // batch_size)
-
-    for b0 in starts:
-        x_b = x[b0:b0 + batch_size]
-        packed_x, packed_x_rc = base.pack_both(x_b)
-        packed_x = xp.ascontiguousarray(packed_x)
+    for b0, packed_x, packed_x_rc, wx in _batches(
+        base, x, lengths, batch_size, verbose
+    ):
+        n = len(packed_x)
         diag_x = base.raw_diag_packed(packed_x, packed_x_rc) if base.normalize else None
         if gamma is not None:
             k_norm = model._sv_raw(packed_x) / xp.clip(
-                xp.sqrt(diag_x[:, None] * diag_sv[None, :]), 1e-10, None)
+                xp.sqrt(diag_x[:, None] * diag_sv[None, :]), 1e-10, None
+            )
             rbf = _rbf_scale(k_norm, gamma, xp)
         for s0 in range(0, S, cs):
             s1 = min(s0 + cs, S)
-            eff_coef = xp.broadcast_to(coefs[None, s0:s1], (x_b.shape[0], s1 - s0))
+            eff_coef = xp.broadcast_to(coefs[None, s0:s1], (n, s1 - s0))
             if diag_x is not None:
                 norm = xp.sqrt(diag_x[:, None] * diag_sv[None, s0:s1])
                 eff_coef = eff_coef / xp.clip(norm, 1e-10, None)
             if gamma is not None:
                 eff_coef = eff_coef * rbf[:, s0:s1]
+            eff_coef = xp.ascontiguousarray(eff_coef, dtype=np.float64)
+            wy_s = wy[s0:s1] if len(wy) > 1 else wy
             if xp is np:
-                result[b0:b0 + batch_size] += _explain_cpu(
-                    packed_x, np.ascontiguousarray(packed_sv[s0:s1]), table_a, table_b,
-                    np.ascontiguousarray(eff_coef, dtype=np.float64), l, min_matches,
-                    seqlen, is_perturbation)
+                fn = _explain_sv_metal if metal else _explain_cpu
+                result[b0 : b0 + n] += fn(
+                    packed_x,
+                    np.ascontiguousarray(packed_sv[s0:s1]),
+                    table_a,
+                    table_b,
+                    eff_coef,
+                    l,
+                    min_matches,
+                    seqlen,
+                    is_perturbation,
+                    wx,
+                    wy_s,
+                )
             else:
-                _explain_gpu(packed_x, xp.ascontiguousarray(packed_sv[:, s0:s1]),
-                             table_a, table_b, xp.ascontiguousarray(eff_coef, dtype=np.float64),
-                             result[b0:b0 + batch_size], s1 - s0, packed_sv.shape[0], l,
-                             min_matches, is_perturbation)
+                _explain_gpu(
+                    packed_x,
+                    xp.ascontiguousarray(packed_sv[:, s0:s1]),
+                    table_a,
+                    table_b,
+                    eff_coef,
+                    result[b0 : b0 + n],
+                    l,
+                    min_matches,
+                    is_perturbation,
+                    wx,
+                    wy_s,
+                )
 
     return result
+
+
+def _query_wts(base, packed):
+    """Window weights of packed query rows as float64 [R or 1, W] on CPU
+    (row_weights), [1, 0] when every window counts once."""
+    w = base.row_weights(packed)
+    return np.zeros((1, 0)) if w is None else w.astype(np.float64)
+
+
+def _batches(base, x, lengths, batch_size, verbose):
+    """(b0, packed_x, packed_x_rc, wx) for each batch of x's rows: their packed
+    windows (packed_x contiguous) and _query_wts, with a tqdm bar when verbose."""
+    xp = get_array_module(x)
+    B = x.shape[0]
+    starts = _progress(range(0, B, batch_size), verbose, "GkmExplain")
+    for b0 in starts:
+        packed_x, packed_x_rc = base.pack_both(
+            x[b0 : b0 + batch_size], _rows(lengths, b0, batch_size)
+        )
+        packed_x = xp.ascontiguousarray(packed_x)
+        yield b0, packed_x, packed_x_rc, _query_wts(base, packed_x)
+
+
+def _inv_dx(base, packed_x, packed_x_rc):
+    """1 / sqrt(K(x, x)) [B] on packed_x's device; ones without normalization."""
+    xp = get_array_module(packed_x)
+    if not base.normalize:
+        return xp.ones(len(packed_x))
+    return 1 / xp.sqrt(
+        xp.clip(base.raw_diag_packed(packed_x, packed_x_rc), 1e-20, None)
+    )
+
+
+def _rbf_weights(index, packed_x, inv_dx, coef, inv_ds, gamma):
+    """Per-query SV weights [B, S] of an RBF model's l-mer path: coef_s /
+    sqrt(K(sv, sv)) times _rbf_scale of the normalized kernel value (index
+    query on packed_x's device)."""
+    k_norm = index.pairwise(packed_x) * inv_dx[:, None] * inv_ds[None, :]
+    return coef * inv_ds * _rbf_scale(k_norm, gamma, get_array_module(packed_x))
 
 
 def _sv_weights(model):
@@ -656,27 +1351,25 @@ def _sv_weights(model):
     from gkmsvm.backend import to_cpu
 
     coef = to_cpu(model.coefficients).astype(np.float64)
-    inv_ds = (1 / np.sqrt(np.clip(to_cpu(model._sv_diag()).astype(np.float64), 1e-20, None))
-              if model.kernel.base.normalize else np.ones(len(coef)))
+    inv_ds = (
+        1 / np.sqrt(np.clip(to_cpu(model._sv_diag()).astype(np.float64), 1e-20, None))
+        if model.kernel.base.normalize
+        else np.ones(len(coef))
+    )
     return coef, inv_ds
 
 
 def _explain_V(model):
     """V[v] = sum_s coef_s / sqrt(K(sv, sv)) * (occurrences of l-mer v in sv_s and
-    its RC), 4^l float64 on CPU (cached)."""
+    its RC, each counted with its window weight), 4^l float64 on CPU (cached)."""
     from gkmsvm.backend import to_cpu
+    from gkmsvm.lmer_table import sv_lmer_weights
 
     c = model._sv_cache
     if "explain_V" not in c:
         coef, inv_ds = _sv_weights(model)
-        V = np.zeros(4**model.kernel.base.l)
-        for packed in model._sv_packed():
-            if packed is not None:
-                packed = to_cpu(packed)
-                V += np.bincount(packed.ravel().astype(np.int64),
-                                 weights=np.repeat(coef * inv_ds, packed.shape[1]),
-                                 minlength=len(V))
-        c["explain_V"] = V
+        fwd, rc = (None if p is None else to_cpu(p) for p in model._sv_packed())
+        c["explain_V"] = sv_lmer_weights(model.kernel.base, fwd, rc, coef * inv_ds)
     return c["explain_V"]
 
 
@@ -785,30 +1478,35 @@ def _build_explain_table(V, table_a, table_b, l):
 
 
 @njit(parallel=True, cache=True, fastmath=True)
-def _explain_table_cpu(packed_x, inv_dx, A, l, seqlen, perturbation):
+def _explain_table_cpu(packed_x, inv_dx, A, l, seqlen, perturbation, wx):
     """[B, 4, seqlen] attributions: each window u adds A[u, d, k] to base u_k ^ d
-    at position i + k (perturbation: d == 0 goes to the other three bases)."""
+    at position i + k (perturbation: d == 0 goes to the other three bases),
+    times its window weight wx[b, i] (wx [B or 1, W], [1, 0] when unweighted).
+    PAD (past a shorter sequence's windows) is no l-mer and adds nothing."""
     B, W = packed_x.shape
     n_lmers = A.shape[0]
+    weighted = wx.shape[1] > 0
     out = np.zeros((B, 4, seqlen))
     for b in prange(B):
         acc = out[b]
+        wxb = wx[min(np.int64(b), wx.shape[0] - 1)]
         for i in range(W):
             u = packed_x[b, i]
             if np.int64(u) >= n_lmers:
                 continue
+            a = wxb[i] if weighted else 1.0
             for k in range(l):
                 uk = int((u >> np.uint32(2 * k)) & np.uint32(3))
                 pos = i + k
                 if perturbation:
-                    a0 = A[u, 0, k]
+                    a0 = a * A[u, 0, k]
                     for h in range(4):
                         if h != uk:
                             acc[h, pos] += a0
                 else:
-                    acc[uk, pos] += A[u, 0, k]
+                    acc[uk, pos] += a * A[u, 0, k]
                 for d in range(1, 4):
-                    acc[uk ^ d, pos] += A[u, d, k]
+                    acc[uk ^ d, pos] += a * A[u, d, k]
         acc *= inv_dx[b]
     return out
 
@@ -824,40 +1522,57 @@ def _explain_table(model, n_rows, device, table_a, table_b, perturbation, gamma)
     tables = model._explain_tables
     if perturbation not in tables:
         build_s = _EXPLAIN_TABLE_BUILD_S * 4**l * l
-        if use == "auto" and (4**l * 4 * l * 8 > _EXPLAIN_TABLE_BYTES
-                              or n_rows * _EXPLAIN_SEQ_S[device] < build_s):
+        if use == "auto" and (
+            4**l * 4 * l * 8 > _EXPLAIN_TABLE_BYTES
+            or n_rows * _EXPLAIN_SEQ_S[device] < build_s
+        ):
             return None
-        tables[perturbation] = _build_explain_table(_explain_V(model), table_a, table_b, l)
+        tables[perturbation] = _build_explain_table(
+            _explain_V(model), table_a, table_b, l
+        )
     return tables[perturbation]
 
 
-def _explain_with_table(model, x, A, perturbation, batch_size, verbose):
+def _explain_with_table(model, x, A, perturbation, batch_size, verbose, lengths):
     """GkmExplain from the explain table, on CPU; results go back to x's device."""
     from gkmsvm.backend import to_cpu
 
     base = model.kernel.base
     xp = get_array_module(x)
     x_cpu = to_cpu(x)
-    B, _, seqlen = x_cpu.shape
-    starts = range(0, B, batch_size)
-    if verbose:
-        from tqdm import tqdm
-        starts = tqdm(starts, desc="GkmExplain", total=(B + batch_size - 1) // batch_size)
-    parts = []
-    for b0 in starts:
-        x_b = x_cpu[b0:b0 + batch_size]
-        packed_x, packed_x_rc = base.pack_both(x_b)
-        inv_dx = (1 / np.sqrt(np.clip(base.raw_diag_packed(packed_x, packed_x_rc),
-                                      1e-20, None)) if base.normalize
-                  else np.ones(x_b.shape[0]))
-        parts.append(_explain_table_cpu(np.ascontiguousarray(packed_x), inv_dx, A, base.l,
-                                        seqlen, perturbation))
-    out = np.concatenate(parts)
+    seqlen = x_cpu.shape[-1]
+    out = np.concatenate(
+        [
+            _explain_table_cpu(
+                packed_x,
+                _inv_dx(base, packed_x, packed_x_rc),
+                A,
+                base.l,
+                seqlen,
+                perturbation,
+                wx,
+            )
+            for _, packed_x, packed_x_rc, wx in _batches(
+                base, x_cpu, lengths, batch_size, verbose
+            )
+        ]
+    )
     return out if xp is np else xp.asarray(out)
 
 
-def _explain_lmer(model, x, table_a, table_b, dmax, perturbation, gamma, batch_size,
-                  verbose):
+def _explain_lmer(
+    model,
+    x,
+    lengths,
+    table_a,
+    table_b,
+    dmax,
+    perturbation,
+    gamma,
+    batch_size,
+    verbose,
+    metal=False,
+):
     """GkmExplain through the SVs' l-mer weights, or None when it doesn't apply.
 
     The attribution is linear in the SVs: with normalization each SV window
@@ -870,11 +1585,11 @@ def _explain_lmer(model, x, table_a, table_b, dmax, perturbation, gamma, batch_s
     RBF models (gamma given) scale each SV by _rbf_scale of its kernel value
     with the query, so V depends on the query: each neighbor sums the
     per-query SV weights over the l-mer index's entries instead (about one
-    more index query per call). Runs on CPU; results go back to x's device.
+    more index query per call). CuPy input runs in CUDA (_explain_lmer_cuda),
+    NumPy on CPU, or in Metal with metal (MLX input arrives as NumPy).
     """
     import numba
 
-    from gkmsvm.backend import to_cpu
     from gkmsvm.kernels import lmer_index
 
     base = model.kernel.base
@@ -886,8 +1601,13 @@ def _explain_lmer(model, x, table_a, table_b, dmax, perturbation, gamma, batch_s
         # A query window visits n_neighbors l-mers here and every SV window
         # in the per-SV kernel
         packed = model._sv_packed()
-        sv_windows = 0 if packed is None else sum(p.size for p in packed if p is not None)
-        if n_neighbors * _EXPLAIN_SV_WINDOWS_PER_NEIGHBOR > sv_windows:
+        sv_windows = sum(p.size for p in packed if p is not None)
+        per_neighbor = (
+            _EXPLAIN_SV_WINDOWS_PER_NEIGHBOR_METAL
+            if metal
+            else _EXPLAIN_SV_WINDOWS_PER_NEIGHBOR
+        )
+        if n_neighbors * per_neighbor > sv_windows:
             return None
     coef, inv_ds = _sv_weights(model)
     index = V = None
@@ -897,44 +1617,118 @@ def _explain_lmer(model, x, table_a, table_b, dmax, perturbation, gamma, batch_s
             return None
     else:
         V = _explain_V(model)
-    nonzero = np.maximum(np.abs(table_a), np.abs(table_b))
-    masks, levels = lmer_index.neighbor_masks(l, nonzero, dmax)
+    # Cached so the Metal path's device copies (keyed by the masks) are reused
+    key = ("explain_masks", perturbation, dmax)
+    if key not in model._sv_cache:
+        nonzero = np.maximum(np.abs(table_a), np.abs(table_b))
+        model._sv_cache[key] = lmer_index.neighbor_masks(l, nonzero, dmax)
+    masks, levels = model._sv_cache[key]
 
-    xp = get_array_module(x)
-    if xp is not np and not is_mlx(x):
-        return _explain_lmer_cuda(model, x, V, index, coef, inv_ds, masks, levels, table_a,
-                                  table_b, gamma, batch_size, verbose, perturbation)
-    x_cpu = to_cpu(x)
-    B, _, seqlen = x_cpu.shape
-    starts = range(0, B, batch_size)
-    if verbose:
-        from tqdm import tqdm
-        starts = tqdm(starts, desc="GkmExplain", total=(B + batch_size - 1) // batch_size)
+    if get_array_module(x) is not np:  # (MLX reaches here as NumPy, metal=True)
+        return _explain_lmer_cuda(
+            model,
+            x,
+            lengths,
+            V,
+            index,
+            coef,
+            inv_ds,
+            masks,
+            levels,
+            table_a,
+            table_b,
+            gamma,
+            batch_size,
+            verbose,
+            perturbation,
+        )
+    seqlen = x.shape[-1]
     parts = []
-    for b0 in starts:
-        x_b = x_cpu[b0:b0 + batch_size]
-        packed_x, packed_x_rc = base.pack_both(x_b)
-        packed_x = np.ascontiguousarray(packed_x)
-        inv_dx = (1 / np.sqrt(np.clip(base.raw_diag_packed(packed_x, packed_x_rc),
-                                      1e-20, None)) if base.normalize
-                  else np.ones(x_b.shape[0]))
-        W = packed_x.shape[1]
-        n_split = max(1, min(W, -(-numba.get_num_threads() // x_b.shape[0])))
-        if index is None:
-            parts.append(_explain_lmer_cpu(packed_x, inv_dx, V, masks, levels, table_a,
-                                           table_b, l, seqlen, perturbation, n_split))
-            continue
-        k_norm = index.pairwise(packed_x) * inv_dx[:, None] * inv_ds[None, :]
-        w = coef * inv_ds * _rbf_scale(k_norm, gamma)
-        parts.append(_explain_index_cpu(packed_x, inv_dx, index.offsets, index.ids,
-                                        np.ascontiguousarray(w), masks, levels, table_a,
-                                        table_b, l, seqlen, perturbation, n_split))
-    out = np.concatenate(parts)
-    return out if xp is np else xp.asarray(out)
+    for _, packed_x, packed_x_rc, wx in _batches(base, x, lengths, batch_size, verbose):
+        inv_dx = _inv_dx(base, packed_x, packed_x_rc)
+        B_b, W = packed_x.shape
+        n_split = max(1, min(W, -(-numba.get_num_threads() // B_b)))
+        # (on Metal too, the CPU query: exact in float64, and faster than the
+        # Metal one on large SV sets: contended atomics)
+        w = None
+        if index is not None:
+            w = _rbf_weights(index, packed_x, inv_dx, coef, inv_ds, gamma)
+        if metal:
+            parts.append(
+                _explain_lmer_metal(
+                    packed_x,
+                    inv_dx,
+                    V,
+                    index,
+                    w,
+                    masks,
+                    levels,
+                    table_a,
+                    table_b,
+                    l,
+                    seqlen,
+                    perturbation,
+                    wx,
+                    model._sv_cache,
+                )
+            )
+        elif index is None:
+            parts.append(
+                _explain_lmer_cpu(
+                    packed_x,
+                    inv_dx,
+                    V,
+                    masks,
+                    levels,
+                    table_a,
+                    table_b,
+                    l,
+                    seqlen,
+                    perturbation,
+                    n_split,
+                    wx,
+                )
+            )
+        else:
+            parts.append(
+                _explain_index_cpu(
+                    packed_x,
+                    inv_dx,
+                    index.offsets,
+                    index.ids,
+                    np.ascontiguousarray(w),
+                    masks,
+                    levels,
+                    table_a,
+                    table_b,
+                    l,
+                    seqlen,
+                    perturbation,
+                    n_split,
+                    wx,
+                    index.vals,
+                )
+            )
+    return np.concatenate(parts)
 
 
-def _explain_lmer_cuda(model, x, V, index, coef, inv_ds, masks, levels, table_a, table_b,
-                       gamma, batch_size, verbose, perturbation):
+def _explain_lmer_cuda(
+    model,
+    x,
+    lengths,
+    V,
+    index,
+    coef,
+    inv_ds,
+    masks,
+    levels,
+    table_a,
+    table_b,
+    gamma,
+    batch_size,
+    verbose,
+    perturbation,
+):
     """_explain_lmer's loop on CUDA (_explain_lmer_gpu); V, the masks and the
     l-mer index's arrays are uploaded once and kept in the model's caches."""
     import cupy as cp
@@ -946,43 +1740,51 @@ def _explain_lmer_cuda(model, x, V, index, coef, inv_ds, masks, levels, table_a,
         if "explain_V_cuda" not in c:
             c["explain_V_cuda"] = cp.asarray(V)
         V = c["explain_V_cuda"]
-        offsets = ids = None
+        offsets = ids = vals = None
     else:
-        offsets, ids = index._arrays("cuda")[:2]
+        offsets, ids, _, _, vals = index._arrays("cuda")
         coef_d = cp.asarray(coef)
         inv_ds_d = cp.asarray(inv_ds)
     masks, levels = cp.asarray(masks), cp.asarray(levels)
     table_a = cp.asarray(table_a, dtype=cp.float64)
     table_b = cp.asarray(table_b, dtype=cp.float64)
 
-    B, _, seqlen = x.shape
-    starts = range(0, B, batch_size)
-    if verbose:
-        from tqdm import tqdm
-        starts = tqdm(starts, desc="GkmExplain", total=(B + batch_size - 1) // batch_size)
+    B, seqlen = x.shape[0], x.shape[-1]
     out = cp.empty((B, 4, seqlen), dtype=cp.float64)
-    for b0 in starts:
-        x_b = x[b0:b0 + batch_size]
-        packed_x, packed_x_rc = base.pack_both(x_b)
-        packed_x = cp.ascontiguousarray(packed_x)
-        inv_dx = (1 / cp.sqrt(cp.clip(base.raw_diag_packed(packed_x, packed_x_rc),
-                                      1e-20, None)) if base.normalize
-                  else cp.ones(x_b.shape[0]))
+    for b0, packed_x, packed_x_rc, wx in _batches(
+        base, x, lengths, batch_size, verbose
+    ):
+        inv_dx = _inv_dx(base, packed_x, packed_x_rc)
         w = None
         if index is not None:
-            k_norm = index.pairwise(packed_x) * inv_dx[:, None] * inv_ds_d[None, :]
-            w = coef_d * inv_ds_d * _rbf_scale(k_norm, gamma, cp)
-        out[b0:b0 + batch_size] = _explain_lmer_gpu(
-            packed_x, inv_dx, V, offsets, ids, w, masks, levels, table_a, table_b, l,
-            seqlen, perturbation)
+            w = _rbf_weights(index, packed_x, inv_dx, coef_d, inv_ds_d, gamma)
+        out[b0 : b0 + batch_size] = _explain_lmer_gpu(
+            packed_x,
+            inv_dx,
+            V,
+            offsets,
+            ids,
+            w,
+            masks,
+            levels,
+            table_a,
+            table_b,
+            l,
+            seqlen,
+            perturbation,
+            wx,
+            vals,
+        )
     return out
 
 
 def mutation_impact(
     model: GkmSVM,
-    ref: np.ndarray,
-    alt: np.ndarray,
+    ref,
+    alt,
     *,
+    ref_lengths=None,
+    alt_lengths=None,
     batch_size: int | None = None,
     verbose: bool = False,
 ) -> np.ndarray:
@@ -1005,63 +1807,105 @@ def mutation_impact(
 
     Args:
         model: Trained GkmSVM.
-        ref: [B, 4, L] reference sequences.
-        alt: [B, 4, L] alternate sequences.
+        ref: [B, 4, L] reference sequences, or a list of [4, L_i] arrays or
+            DNA strings of different lengths.
+        alt: [B, 4, L'] alternate sequences, as ref.
+        ref_lengths, alt_lengths: [B] lengths of the rows of padded ref and
+            alt arrays when they differ.
         batch_size: Process inputs in batches of this size, raised as in
             ``GkmSVM.__call__``.
         verbose: Show tqdm progress bar over input batches.
 
     Returns:
-        [B, 1] mutation impact scores.
+        [B, 1] mutation impact scores; NaN when an allele is shorter than l
+        (with a warning).
     """
     from gkmsvm.backend import to_cpu
+    from gkmsvm.kernels.packed import device_of
 
     kernel = model.kernel
     base = kernel.base
     coef = model.coefficients
-    packed_svs = model._sv_packed() is not None
+    ref, alt, ref_lengths, alt_lengths = _allele_arrays(
+        ref, alt, ref_lengths, alt_lengths
+    )
+    L = ref.shape[-1]
+    short = None
+    if ref_lengths is not None or alt_lengths is not None:
+        both_lengths = _joint_lengths(
+            L, (ref.shape[0], ref_lengths), (ref.shape[0], alt_lengths)
+        )
+        short = _short_rows(both_lengths, base.l, "mutation impacts")
+        if short is not None:
+            short = short.reshape(2, -1).any(axis=0)
 
     B = ref.shape[0]
-    bs = B if batch_size is None else model._min_batch_size(batch_size, table=False)
-    starts = range(0, B, bs)
-    if verbose:
-        from tqdm import tqdm
-        starts = tqdm(starts, desc="Mutation impact", total=(B + bs - 1) // bs)
+    bs = B if batch_size is None else model._min_batch_size(batch_size)
+    starts = _progress(range(0, B, bs), verbose, "Mutation impact")
 
+    gamma = kernel.gamma if base is not kernel else np.nan  # RBF
     parts = []
     for s in starts:
-        r = model._match_device(ref[s:s + bs])
-        a = model._match_device(alt[s:s + bs])
+        r = model._match_device(ref[s : s + bs])
+        a = model._match_device(alt[s : s + bs])
         xp = get_array_module(r)
         n = r.shape[0]
         both = xp.concatenate([r, a])
-        if packed_svs:
-            # One call for both alleles (the masked join builds its SV index once)
-            bx, bx_rc = base.pack_both(both)
-            k_both = model._sv_raw(bx)
-            diag_r = base.raw_diag_packed(bx[:n], None if bx_rc is None else bx_rc[:n])
-        else:
-            k_both = base._raw_pairwise(both, model.support_sequences)
-            diag_r = base._raw_diagonal(r)
-        gamma = kernel.gamma if base is not kernel else np.nan  # RBF
+        # One call for both alleles (the masked join builds its SV index once)
+        bx, bx_rc = base.pack_both(
+            both,
+            _joint_lengths(
+                L, (n, _rows(ref_lengths, s, bs)), (n, _rows(alt_lengths, s, bs))
+            ),
+        )
+        diag_r = base.raw_diag_packed(bx[:n], None if bx_rc is None else bx_rc[:n])
+        table = model._lmer_table_for(xp)
+        if table is not None:
+            # Non-RBF: linear in the SVs, so sum_s coef_s dK_raw / sqrt(K(sv, sv))
+            # is the l-mer table's alt minus ref (the table holds the SV norms)
+            raw = model._table_raw(bx, table)
+            dk = raw[n:] - raw[:n]
+            if base.normalize:
+                dk = dk / xp.sqrt(xp.clip(diag_r.astype(dk.dtype), 1e-10, None))
+            parts.append(to_cpu(dk)[:, None])
+            continue
+        index = model._sv_index()
+        if index is not None and (
+            xp is np or not index.queries_on_device(device_of(bx))
+        ):
+            # RBF through the index on CPU: one fused pass per variant, the
+            # alt row visiting only the windows that differ from ref
+            inv_dr, inv_ds = model._inv_norms(
+                to_cpu(diag_r) if base.normalize else None, n
+            )
+            out = index.impact(to_cpu(bx), inv_dr, inv_ds, to_cpu(coef), gamma)
+            parts.append(out[:, None])
+            continue
+        k_both = model._sv_raw(bx)
         if xp is np:
-            parts.append(_impact_cpu(
-                np.ascontiguousarray(k_both, dtype=np.float64),
-                diag_r.astype(np.float64) if base.normalize else np.ones(n),
-                model._sv_diag().astype(np.float64) if base.normalize else np.ones(1),
-                base.normalize, coef.astype(np.float64), float(gamma))[:, None])
+            parts.append(
+                _impact_cpu(
+                    np.ascontiguousarray(k_both, dtype=np.float64),
+                    diag_r.astype(np.float64) if base.normalize else np.ones(n),
+                    model._sv_diag().astype(np.float64)
+                    if base.normalize
+                    else np.ones(1),
+                    base.normalize,
+                    coef.astype(np.float64),
+                    float(gamma),
+                )[:, None]
+            )
             continue
         k_ref = k_both[:n]
         dk = k_both[n:] - k_ref
         if base.normalize:
-            norm = xp.clip(xp.sqrt(diag_r[:, None] * model._sv_diag()[None, :]), 1e-10, None)
+            norm = xp.clip(
+                xp.sqrt(diag_r[:, None] * model._sv_diag()[None, :]), 1e-10, None
+            )
             k_ref = k_ref / norm
             dk = dk / norm
         if not np.isnan(gamma):
-            pos = k_ref > 0
-            safe_k = xp.where(pos, k_ref, 1.0)
-            scale = (kernel.finish(k_ref) - np.exp(-gamma)) / safe_k
-            dk = xp.where(pos, dk * scale, 0.0)
+            dk = dk * _rbf_scale(k_ref, gamma, xp)
         parts.append(to_cpu((dk * coef).sum(axis=1, keepdims=True)))
 
-    return np.concatenate(parts, axis=0)
+    return _nan_rows(np.concatenate(parts, axis=0), short)

@@ -8,14 +8,12 @@ from pathlib import Path
 
 import numpy as np
 
-from gkmsvm.codec import one_hot_decode
-from gkmsvm.importers.lsgkm import KERNEL_TYPE_REVERSE
+from gkmsvm.backend import to_cpu
+from gkmsvm.codec import decode_codes
 
 
 def save_npz(model, path: str | Path) -> None:
     """Save a GkmSVM model in native npz format."""
-    from gkmsvm.backend import to_cpu
-
     metadata = {
         "bias": float(model.bias),
         "kernel_type": model.kernel_type,
@@ -24,18 +22,18 @@ def save_npz(model, path: str | Path) -> None:
     if model.sv_chunk_size is not None:
         metadata["sv_chunk_size"] = model.sv_chunk_size
 
+    extra = {} if model.sv_lengths is None else {"sv_lengths": model.sv_lengths}
     np.savez(
         path,
         support_sequences=to_cpu(model.support_sequences),
         coefficients=to_cpu(model.coefficients),
         metadata=np.void(json.dumps(metadata).encode("utf-8")),
+        **extra,
     )
 
 
 def save_deltasvm_npz(model, path: str | Path) -> None:
     """Save a DeltaSVM model in npz format."""
-    from gkmsvm.backend import to_cpu
-
     metadata = {
         "model_type": "deltasvm",
         "l": model.l,
@@ -50,12 +48,17 @@ def save_deltasvm_npz(model, path: str | Path) -> None:
     )
 
 
+def _read_npz(path):
+    """(the npz file, its metadata dict)."""
+    data = np.load(path, allow_pickle=False)
+    return data, json.loads(bytes(data["metadata"]))
+
+
 def load_deltasvm_npz(path: str | Path, *, device: str = "cpu"):
     """Load a DeltaSVM model from npz format."""
     from gkmsvm.deltasvm import DeltaSVM
 
-    data = np.load(path, allow_pickle=False)
-    metadata = json.loads(bytes(data["metadata"]))
+    data, metadata = _read_npz(path)
 
     return DeltaSVM(
         weights=data["weights"],
@@ -71,11 +74,12 @@ def load_npz(path: str | Path, *, device: str = "cpu"):
     """Load a GkmSVM model from native npz format."""
     from gkmsvm.svm import GkmSVM
 
-    data = np.load(path, allow_pickle=False)
-    metadata = json.loads(bytes(data["metadata"]))
+    data, metadata = _read_npz(path)
 
     return GkmSVM(
         support_sequences=data["support_sequences"],
+        # Files from before SVs of different lengths have none: uniform
+        sv_lengths=data["sv_lengths"] if "sv_lengths" in data.files else None,
         coefficients=data["coefficients"],
         bias=metadata["bias"],
         kernel_type=metadata["kernel_type"],
@@ -87,8 +91,6 @@ def load_npz(path: str | Path, *, device: str = "cpu"):
 
 def save_lsgkm(model, path: str | Path) -> None:
     """Save a GkmSVM model in LS-GKM text format."""
-    from gkmsvm.backend import to_cpu
-
     path = Path(path)
     params = model._kernel_params
     coefs = to_cpu(model.coefficients)
@@ -122,8 +124,10 @@ def save_lsgkm(model, path: str | Path) -> None:
     lines.append(f"nr_sv {n_pos} {n_neg}")
     lines.append("SV")
 
+    lengths = model.sv_lengths
     for i in range(len(coefs)):
-        seq_str = one_hot_decode(svs[i])
+        sv = svs[i] if lengths is None else svs[i][: lengths[i]]  # drop the padding
+        seq_str = decode_codes(sv)
         lines.append(f"{coefs[i]} {seq_str}")
 
     text = "\n".join(lines) + "\n"
@@ -151,12 +155,12 @@ def load_model(path: str | Path, *, device: str = "cpu"):
     name = path.name.lower()
 
     if name.endswith(".npz"):
-        data = np.load(path, allow_pickle=False)
-        metadata = json.loads(bytes(data["metadata"]))
+        data, metadata = _read_npz(path)
         data.close()
         if metadata.get("model_type") == "deltasvm":
             return load_deltasvm_npz(path, device=device)
         return load_npz(path, device=device)
 
     from gkmsvm.importers.lsgkm import load_lsgkm_model
+
     return load_lsgkm_model(str(path), device=device)

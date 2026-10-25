@@ -76,12 +76,38 @@ PAPER_MODEL_URL = (
 PARAM_SETS = {
     "l10k6": {"l": 10, "k": 6, "d": 3, "kernel_type": "estimated"},
     "l11k7": {"l": 11, "k": 7, "d": 3, "kernel_type": "estimated"},
-    "l10k6_rbf": {"l": 10, "k": 6, "d": 3, "kernel_type": "rbf", "gamma": 2.0, "C": 10.0},
-    "l11k7_rbf": {"l": 11, "k": 7, "d": 3, "kernel_type": "rbf", "gamma": 2.0, "C": 10.0},
-    "paper_t2": {"l": 10, "k": 6, "d": 3, "kernel_type": "estimated",
-                 "paper": "t2_l10_k6_d3_t16"},
-    "paper_t3": {"l": 10, "k": 6, "d": 3, "kernel_type": "rbf", "gamma": 2.0, "C": 10.0,
-                 "paper": "t3_l10_k6_d3_c10_g2_t16"},
+    "l10k6_rbf": {
+        "l": 10,
+        "k": 6,
+        "d": 3,
+        "kernel_type": "rbf",
+        "gamma": 2.0,
+        "C": 10.0,
+    },
+    "l11k7_rbf": {
+        "l": 11,
+        "k": 7,
+        "d": 3,
+        "kernel_type": "rbf",
+        "gamma": 2.0,
+        "C": 10.0,
+    },
+    "paper_t2": {
+        "l": 10,
+        "k": 6,
+        "d": 3,
+        "kernel_type": "estimated",
+        "paper": "t2_l10_k6_d3_t16",
+    },
+    "paper_t3": {
+        "l": 10,
+        "k": 6,
+        "d": 3,
+        "kernel_type": "rbf",
+        "gamma": 2.0,
+        "C": 10.0,
+        "paper": "t3_l10_k6_d3_c10_g2_t16",
+    },
 }
 
 # Shrikumar et al. 2019 per-negset AUPRCs (gkmexplain repo, summarize_auprcs.sh).
@@ -224,8 +250,10 @@ def _context_seqs(major, minor, genome):
     for (name, maj), (_, mnr) in zip(major, minor):
         chrom, rng = name.split(":")
         center = int(rng.split("-")[0]) + FLANK
-        ctx = str(genome[chrom][center - CONTEXT_HALF - 1:center + CONTEXT_HALF]).upper()
-        left, right = ctx[:CONTEXT_HALF], ctx[CONTEXT_HALF + 1:]
+        ctx = str(
+            genome[chrom][center - CONTEXT_HALF - 1 : center + CONTEXT_HALF]
+        ).upper()
+        left, right = ctx[:CONTEXT_HALF], ctx[CONTEXT_HALF + 1 :]
         ref_seqs.append(left + maj[FLANK].upper() + right)
         alt_seqs.append(left + mnr[FLANK].upper() + right)
     return ref_seqs, alt_seqs
@@ -246,7 +274,9 @@ def load_test_variants():
     labels = np.array([1] * len(pos_major) + [0] * len(neg_major))
 
     def _enc(seqs):
-        return np.stack([one_hot_encode(s, dtype=np.float64, allow_n=True) for s in seqs])
+        return np.stack(
+            [one_hot_encode(s, dtype=np.float64, allow_n=True) for s in seqs]
+        )
 
     X19 = (_enc([s for _, s in major]), _enc([s for _, s in minor]))
     genome = pyfaidx.Fasta(str(DATA_DIR / "hg18.fa"))
@@ -449,7 +479,12 @@ def deltasvm_pl(dsvm):
 
 
 def score_vep(
-    model, X_ref, X_alt, device: str, method: str, batch_size: int = 64,
+    model,
+    X_ref,
+    X_alt,
+    device: str,
+    method: str,
+    batch_size: int = 64,
     verbose: bool = False,
 ):
     from gkmsvm.backend import to_cpu
@@ -463,7 +498,11 @@ def score_vep(
     t0 = time.time()
     scores = to_cpu(
         model.score_variants(
-            X_ref, X_alt, method=method, batch_size=batch_size, verbose=verbose,
+            X_ref,
+            X_alt,
+            method=method,
+            batch_size=batch_size,
+            verbose=verbose,
         )
     ).flatten()
     elapsed = time.time() - t0
@@ -687,12 +726,20 @@ def main():
     parser.add_argument(
         "--force-train", action="store_true", help="Retrain even if cached models exist"
     )
-    parser.add_argument("--output", default=None,
-                        help="Save summed-score results to TSV file")
-    parser.add_argument("--per-model-output", default=None,
-                        help="Save per-model AUPRCs (with paper values) to TSV file")
-    parser.add_argument("-v", "--verbose", action="store_true",
-                        help="Show progress bars during scoring and training")
+    parser.add_argument(
+        "--output", default=None, help="Save summed-score results to TSV file"
+    )
+    parser.add_argument(
+        "--per-model-output",
+        default=None,
+        help="Save per-model AUPRCs (with paper values) to TSV file",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Show progress bars during scoring and training",
+    )
     args = parser.parse_args()
     param_keys = list(PARAM_SETS) if args.params == "all" else args.params.split(",")
     unknown = [pk for pk in param_keys if pk not in PARAM_SETS]
@@ -700,9 +747,9 @@ def main():
         parser.error(f"unknown parameter set(s): {', '.join(unknown)}")
 
     if args.device == "auto":
-        from gkmsvm.backend import HAS_CUPY, HAS_MLX
+        from gkmsvm.backend import HAS_MLX, cuda_available
 
-        if HAS_CUPY:
+        if cuda_available():
             args.device = "cuda"
         elif HAS_MLX:
             args.device = "mlx"
@@ -731,7 +778,6 @@ def main():
     pos_seqs, neg_sets = load_training_data(n_negsets=args.n_negsets)
     X19, X51, labels, effect_sizes = load_test_variants()
 
-
     all_results = []
     per_model_rows = []
 
@@ -748,8 +794,13 @@ def main():
         print(f"{'=' * 70}")
 
         models, dsvms = train_models(
-            pos_seqs, neg_sets, params, args.device, pk=pk,
-            force_train=args.force_train, verbose=args.verbose,
+            pos_seqs,
+            neg_sets,
+            params,
+            args.device,
+            pk=pk,
+            force_train=args.force_train,
+            verbose=args.verbose,
         )
 
         results = []
@@ -765,17 +816,26 @@ def main():
                 deltasvm_pl(dsvms[mi]), X19_ref, X19_alt
             )
             per_model["ISM"][mi] = score_vep(
-                models[mi], X51_ref, X51_alt, args.device, "kernel",
+                models[mi],
+                X51_ref,
+                X51_alt,
+                args.device,
+                "kernel",
                 verbose=args.verbose,
             )
             per_model["GkmExplain"][mi] = score_vep(
-                models[mi], X51_ref, X51_alt, args.device, "gkmexplain",
+                models[mi],
+                X51_ref,
+                X51_alt,
+                args.device,
+                "gkmexplain",
                 verbose=args.verbose,
             )
 
         paper_cols = (
             PAPER_REF_COLUMNS[params["kernel_type"]]
-            if (params["l"], params["k"]) == (10, 6) else {}
+            if (params["l"], params["k"]) == (10, 6)
+            else {}
         )
         header = "".join(f"  {name:>11s}" for name in methods)
         header += "".join(f"  {'paper ' + name:>17s}" for name in paper_cols)
@@ -793,21 +853,32 @@ def main():
             print(f"  {mi + 1:>5d}{row}")
             for name in methods:
                 ref = paper_cols.get(name)
-                per_model_rows.append({
-                    "params": pk, "negset": mi + 1, "method": name,
-                    "auprc": auprcs[name],
-                    "paper_auprc": PAPER_AUPRC[ref][mi] if ref else None,
-                })
+                per_model_rows.append(
+                    {
+                        "params": pk,
+                        "negset": mi + 1,
+                        "method": name,
+                        "auprc": auprcs[name],
+                        "paper_auprc": PAPER_AUPRC[ref][mi] if ref else None,
+                    }
+                )
 
         # Retrained models share the paper's settings, so compare their sums too
         paper_pk = next(
-            (k for k, v in PARAM_SETS.items() if "paper" in v
-             and {**v, "paper": None} == {**params, "paper": None}), pk,
+            (
+                k
+                for k, v in PARAM_SETS.items()
+                if "paper" in v and {**v, "paper": None} == {**params, "paper": None}
+            ),
+            pk,
         )
         paper_sums = PAPER_SUM_AUPRC.get(paper_pk, {}) if len(models) == 5 else {}
         for name in methods:
             r = evaluate(
-                per_model[name].sum(axis=0), labels, effect_sizes, f"{name}-sum ({pk})",
+                per_model[name].sum(axis=0),
+                labels,
+                effect_sizes,
+                f"{name}-sum ({pk})",
             )
             r["params"] = pk
             r["paper_auprc"] = paper_sums.get(name)
@@ -827,11 +898,21 @@ def main():
 
         meta = {"params": ",".join(param_keys), "negsets": args.n_negsets}
         if args.output:
-            write_tsv(args.output, pd.DataFrame(all_results),
-                      "dsQTL AUPRC, scores summed over models", args.device, **meta)
+            write_tsv(
+                args.output,
+                pd.DataFrame(all_results),
+                "dsQTL AUPRC, scores summed over models",
+                args.device,
+                **meta,
+            )
         if args.per_model_output:
-            write_tsv(args.per_model_output, pd.DataFrame(per_model_rows),
-                      "dsQTL AUPRC per model", args.device, **meta)
+            write_tsv(
+                args.per_model_output,
+                pd.DataFrame(per_model_rows),
+                "dsQTL AUPRC per model",
+                args.device,
+                **meta,
+            )
 
 
 if __name__ == "__main__":

@@ -48,16 +48,20 @@ def test_masked_equals_brute(name):
     assert plan is not None
 
     ref = _fused_pairwise_packed_numba(bx, by, t, l, mm)
-    np.testing.assert_allclose(masked_pairwise(bx, by, plan), ref, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(
+        masked_pairwise(bx, by, plan), ref, rtol=1e-12, atol=1e-12
+    )
 
     ref_rc = ref + _fused_pairwise_packed_numba(bx, by_rc, t, l, mm)
-    np.testing.assert_allclose(masked_pairwise(bx, by, plan, by_rc), ref_rc,
-                               rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(
+        masked_pairwise(bx, by, plan, by_rc), ref_rc, rtol=1e-12, atol=1e-12
+    )
 
 
 @pytest.mark.parametrize("kind", ["t2", "t3"])
 def test_pairwise_dispatch_matches_brute(kind):
     """kernel.pairwise uses the masked path above _MASKED_MIN_ROWS; compare to forced brute."""
+
     def make():
         if kind == "t3":
             return RbfGkmKernel(9, 6, d=3, gamma=2.0)
@@ -82,7 +86,10 @@ class TestWeighted:
 
     @staticmethod
     def _pair(rc, rbf=False):
-        from gkmsvm.kernels.weighted import CenterWeightedGkmKernel, CenterWeightedRbfGkmKernel
+        from gkmsvm.kernels.weighted import (
+            CenterWeightedGkmKernel,
+            CenterWeightedRbfGkmKernel,
+        )
 
         if rbf:
             a = CenterWeightedRbfGkmKernel(8, 5, M=3, H=2.0, gamma=2.0, include_rc=rc)
@@ -103,7 +110,9 @@ class TestWeighted:
         fast, ref = self._pair(rc, rbf)
         np.testing.assert_allclose(fast.pairwise(X, Y), ref.pairwise(X, Y), rtol=1e-12)
         if not rbf:
-            np.testing.assert_allclose(fast._raw_diagonal(X), ref._raw_diagonal(X), rtol=1e-12)
+            np.testing.assert_allclose(
+                fast._raw_diagonal(X), ref._raw_diagonal(X), rtol=1e-12
+            )
 
     def test_self_gram_panels(self):
         """Self-Gram column panels (diag_offset) weight windows too."""
@@ -117,3 +126,52 @@ class TestWeighted:
         upper = kernel.raw_packed(bx, bx[10:], brc[10:], diag_offset=10)
         keep = np.arange(40)[:, None] <= np.arange(10, 40)[None, :]
         np.testing.assert_allclose(upper[keep], full[:, 10:][keep], rtol=1e-12)
+
+
+class TestRcRows:
+    """With more column windows than row windows, raw_packed probes with both
+    strands of the rows against the forward columns only."""
+
+    @staticmethod
+    def _kernels(kind):
+        from gkmsvm.kernels.weighted import CenterWeightedGkmKernel
+
+        make = {
+            "t0": lambda: DirectGkmKernel(8, 5),
+            "t2": lambda: EstTruncGkmKernel(9, 6, d=3),
+            "t3": lambda: RbfGkmKernel(9, 6, d=3, gamma=2.0).base,
+            "t4": lambda: CenterWeightedGkmKernel(8, 5, M=20, H=3.0),
+        }[kind]
+        fast, brute = make(), make()
+        brute.use_masked = False
+        return fast, brute
+
+    @pytest.mark.parametrize("kind", ["t0", "t2", "t3", "t4"])
+    def test_matches_brute(self, kind):
+        rng = np.random.default_rng(6)
+        X, Y = _onehot(17, 40, rng), _onehot(30, 61, rng)  # even and odd W
+        X[2, :, 5:35] = Y[4, :, 20:50]
+        fast, brute = self._kernels(kind)
+        by, by_rc = fast.pack_both(Y)
+        bx = fast.pack(X)
+        assert by.size > bx.size
+        np.testing.assert_allclose(
+            fast.raw_packed(bx, by, by_rc), brute.raw_packed(bx, by, by_rc), rtol=1e-12
+        )
+
+    @pytest.mark.parametrize("kind", ["t2", "t4"])
+    def test_padded_rows(self, kind):
+        """Variable-length rows, and ISM-style rows with PAD at both ends."""
+        from gkmsvm.kernels.packed import PAD_WINDOW
+
+        rng = np.random.default_rng(7)
+        X, Y = _onehot(20, 40, rng), _onehot(30, 61, rng)
+        fast, brute = self._kernels(kind)
+        by, by_rc = fast.pack_both(Y, rng.integers(20, 62, 30))
+        bx = fast.pack(X, rng.integers(10, 41, 20))
+        bx[3, :4] = PAD_WINDOW
+        bx[5, :2] = PAD_WINDOW
+        bx[5, 10:] = PAD_WINDOW
+        np.testing.assert_allclose(
+            fast.raw_packed(bx, by, by_rc), brute.raw_packed(bx, by, by_rc), rtol=1e-12
+        )

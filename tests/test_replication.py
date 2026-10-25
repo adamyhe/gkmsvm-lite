@@ -9,6 +9,7 @@ These tests verify:
   2. Training from scratch reproduces similar class separation
   3. ISM and GkmExplain produce valid attributions on real data
 """
+
 import gzip
 from pathlib import Path
 
@@ -24,9 +25,11 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 def _read_fasta_gz(path):
     import tempfile
-    with gzip.open(path, "rt") as gz, tempfile.NamedTemporaryFile(
-        mode="w", suffix=".fa", delete=False
-    ) as tmp:
+
+    with (
+        gzip.open(path, "rt") as gz,
+        tempfile.NamedTemporaryFile(mode="w", suffix=".fa", delete=False) as tmp,
+    ):
         tmp.write(gz.read())
         tmp.flush()
         return read_fasta(tmp.name)
@@ -83,12 +86,16 @@ class TestReferenceModelScoring:
 
         for i, name in enumerate(pos_names):
             np.testing.assert_allclose(
-                pos_scores[i], oracle_scores[name], atol=1e-4,
+                pos_scores[i],
+                oracle_scores[name],
+                atol=1e-4,
                 err_msg=f"Pos {name}",
             )
         for i, name in enumerate(neg_names):
             np.testing.assert_allclose(
-                neg_scores[i], oracle_scores[name], atol=1e-4,
+                neg_scores[i],
+                oracle_scores[name],
+                atol=1e-4,
                 err_msg=f"Neg {name}",
             )
 
@@ -100,6 +107,7 @@ class TestReferenceModelScoring:
 
     def test_rc_invariance(self, reference_model, test_data):
         from gkmsvm.codec import reverse_complement
+
         pos_x, _, _, _ = test_data
         x = pos_x[:3]
         scores = reference_model(x)
@@ -117,10 +125,16 @@ class TestTrainFromScratch:
     @classmethod
     def trained_model(cls, train_seqs):
         from gkmsvm import train_gkmsvm
+
         pos, neg = train_seqs
         return train_gkmsvm(
-            pos, neg,
-            kernel_type="estimated", l=11, k=7, d=3, C=1.0,
+            pos,
+            neg,
+            kernel_type="estimated",
+            l=11,
+            k=7,
+            d=3,
+            C=1.0,
             device="cpu",
         )
 
@@ -135,11 +149,18 @@ class TestTrainFromScratch:
 
     def test_smo_separates_classes(self, train_seqs, test_data):
         from gkmsvm import train_gkmsvm
+
         pos, neg = train_seqs
         model = train_gkmsvm(
-            pos, neg,
-            kernel_type="estimated", l=11, k=7, d=3, C=1.0,
-            solver="smo", device="cpu",
+            pos,
+            neg,
+            kernel_type="estimated",
+            l=11,
+            k=7,
+            d=3,
+            C=1.0,
+            solver="smo",
+            device="cpu",
         )
         pos_x, neg_x, _, _ = test_data
         pos_mean = model(pos_x).mean()
@@ -155,6 +176,7 @@ class TestTrainFromScratch:
 class TestISMReplication:
     def test_ism_ref_base_zero(self, reference_model, test_data):
         from gkmsvm.ism import ism
+
         pos_x, _, _, _ = test_data
         x = pos_x[:2]
         result = ism(reference_model, x)
@@ -166,6 +188,7 @@ class TestISMReplication:
 
     def test_ism_shape(self, reference_model, test_data):
         from gkmsvm.ism import ism
+
         pos_x, _, _, _ = test_data
         x = pos_x[:1]
         result = ism(reference_model, x)
@@ -180,6 +203,7 @@ class TestISMReplication:
 class TestGkmExplainReplication:
     def test_completeness_axiom(self, reference_model, test_data):
         from gkmsvm.explain import gkmexplain
+
         pos_x, _, _, _ = test_data
         x = pos_x[:2]
         exp = gkmexplain(reference_model, x, mode=0)
@@ -187,11 +211,14 @@ class TestGkmExplainReplication:
         exp_sum = (exp * x).sum(axis=(1, 2))
         expected = scores - reference_model.bias
         np.testing.assert_allclose(
-            exp_sum, expected.astype(np.float64), atol=1e-4,
+            exp_sum,
+            expected.astype(np.float64),
+            atol=1e-4,
         )
 
     def test_nonref_bases_zero(self, reference_model, test_data):
         from gkmsvm.explain import gkmexplain
+
         pos_x, _, _, _ = test_data
         x = pos_x[:1]
         exp = gkmexplain(reference_model, x, mode=0)
@@ -200,6 +227,7 @@ class TestGkmExplainReplication:
 
     def test_mode1_produces_output(self, reference_model, test_data):
         from gkmsvm.explain import gkmexplain
+
         pos_x, _, _, _ = test_data
         x = pos_x[:1]
         exp = gkmexplain(reference_model, x, mode=1)

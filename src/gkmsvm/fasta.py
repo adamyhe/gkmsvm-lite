@@ -13,11 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
-
-_BASES = "ACGT"
-_BASE_TO_IDX = {b: i for i, b in enumerate(_BASES)}
-_BASE_TO_IDX.update({b.lower(): i for i, b in enumerate(_BASES)})
-_IDX_TO_BASE = dict(enumerate(_BASES))
+from gkmsvm.codec import one_hot_decode, one_hot_encode
 
 
 def read_fasta(path: str | Path) -> list[tuple[str, str]]:
@@ -71,9 +67,7 @@ def write_fasta(
             )
 
 
-def _write_onehot_fasta(
-    arr: np.ndarray, path: Path, headers: list[str] | None
-) -> None:
+def _write_onehot_fasta(arr: np.ndarray, path: Path, headers: list[str] | None) -> None:
     """Convert [B, 4, L] one-hot array to FASTA."""
     if arr.ndim != 3 or arr.shape[1] != 4:
         raise ValueError(f"Expected [B, 4, L] array, got shape {list(arr.shape)}")
@@ -82,13 +76,41 @@ def _write_onehot_fasta(
     if headers is None:
         headers = [f"seq_{i}" for i in range(B)]
 
-    indices = arr.argmax(axis=1)  # [B, L]
-
     with open(path, "w") as f:
         for i in range(B):
             f.write(f">{headers[i]}\n")
-            seq = "".join(_IDX_TO_BASE[int(idx)] for idx in indices[i])
-            f.write(seq + "\n")
+            f.write(one_hot_decode(arr[i]) + "\n")
+
+
+def read_loci(path) -> dict:
+    """BED or narrowPeak file as columns {chrom, start, end, name, summit}
+    (NumPy arrays): name is column 4, else chrom:start-end; summit is start +
+    column 10 for narrowPeak, when it is not -1, else the midpoint. Lines
+    starting with #, track or browser are skipped."""
+    rows = []
+    with open(path) as f:
+        for line in f:
+            if not line.strip() or line.startswith(("#", "track", "browser")):
+                continue
+            rows.append(line.rstrip("\n").split("\t"))
+    out = []
+    for c in rows:
+        chrom, start, end = c[0], int(c[1]), int(c[2])
+        name = (
+            c[3] if len(c) > 3 and c[3] not in ("", ".") else f"{chrom}:{start}-{end}"
+        )
+        peak = int(c[9]) if len(c) > 9 else -1
+        out.append(
+            (chrom, start, end, name, start + peak if peak >= 0 else (start + end) // 2)
+        )
+    cols = list(zip(*out)) if out else [()] * 5
+    return {
+        "chrom": np.array(cols[0], dtype=str),
+        "start": np.array(cols[1], dtype=np.int64),
+        "end": np.array(cols[2], dtype=np.int64),
+        "name": np.array(cols[3], dtype=str),
+        "summit": np.array(cols[4], dtype=np.int64),
+    }
 
 
 def extract_loci(
@@ -98,76 +120,86 @@ def extract_loci(
     in_window: int = 2114,
     chroms: list[str] | None = None,
     return_mask: bool = False,
+    summit: bool = True,
     **kwargs,
 ) -> tuple:
     """Extract one-hot encoded sequences from genomic coordinates.
 
-    Requires pyfaidx. Accepts BED file paths or DataFrames for loci,
-    and FASTA path for sequences.
+    Requires pyfaidx. Accepts BED/narrowPeak file paths, read_loci's columns
+    or a DataFrame for loci, and FASTA path for sequences.
 
+    Each window is ``in_window`` bp starting at ``center - in_window // 2``,
+    where center is the narrowPeak summit (``read_loci``; a DataFrame's
+    ``summit`` column) when ``summit`` and one is given, else the midpoint.
     Loci on chromosomes outside ``chroms`` or missing from ``sequences``, and
-    loci whose window runs off a chromosome end, are dropped.
+    loci whose window runs off a chromosome end, are dropped. Bases other
+    than ACGT (N, IUPAC codes) encode as all-zero, scored as A.
 
     Args:
-        loci: BED file path or DataFrame.
+        loci: BED/narrowPeak file path, or columns chrom, start, end and
+            optionally summit (a dict of arrays, as read_loci gives, or a
+            DataFrame).
         sequences: Genome FASTA path or pyfaidx.Fasta object.
-        in_window: Sequence window size to extract (centered on locus).
+        in_window: Sequence window size to extract.
         chroms: Restrict to these chromosomes.
         return_mask: Also return a boolean mask over the input loci, True
             for each locus kept. ``loci[mask]`` lines up with the returned
             sequences.
+        summit: Center windows on the summit when the loci give one.
 
     Returns:
         ``(sequences_array,)``, or ``(sequences_array, mask)`` when
-        ``return_mask`` is True.
+        ``return_mask`` is True; sequences_array is [N, 4, in_window] int8.
     """
+    seqs, mask = loci_sequences(
+        loci, sequences, in_window=in_window, chroms=chroms, summit=summit
+    )
+    # Letters other than ACGT encode as all-zero (N)
+    results = [
+        one_hot_encode(seq, dtype=np.int8, allow_n=True, allow_other=True)
+        for seq in seqs
+    ]
+    if results:
+        X = np.ascontiguousarray(np.stack(results))
+    else:
+        X = np.zeros((0, 4, in_window), dtype=np.int8)
+
+    return (X, mask) if return_mask else (X,)
+
+
+def loci_sequences(loci, sequences, *, in_window, chroms=None, summit=True):
+    """(DNA strings, mask over the loci) of extract_loci's windows."""
     try:
-        import pandas as pd
         import pyfaidx
     except ImportError as e:
         raise ImportError(
-            "extract_loci requires pyfaidx and pandas. "
-            "Install with: pip install pyfaidx pandas"
+            "extract_loci requires pyfaidx. Install with: uv pip install pyfaidx"
         ) from e
 
     if isinstance(sequences, (str, Path)):
         sequences = pyfaidx.Fasta(str(sequences))
 
     if isinstance(loci, (str, Path)):
-        loci = pd.read_csv(
-            loci, sep="\t", header=None, names=["chrom", "start", "end"],
-            usecols=[0, 1, 2],
-        )
+        loci = read_loci(loci)
+    centers = (
+        loci["summit"]
+        if summit and "summit" in loci
+        else (np.asarray(loci["start"]) + np.asarray(loci["end"])) // 2
+    )
 
-    mask = np.zeros(len(loci), dtype=bool)
-    results = []
-    for i, (chrom, start, end) in enumerate(
-        zip(loci["chrom"], loci["start"], loci["end"])
-    ):
+    mask = np.zeros(len(loci["chrom"]), dtype=bool)
+    seqs = []
+    for i, (chrom, mid) in enumerate(zip(loci["chrom"], centers)):
         if chroms is not None and chrom not in chroms:
             continue
         if chrom not in sequences:
             continue
 
-        mid = (start + end) // 2
-        start = mid - in_window // 2
+        start = int(mid) - in_window // 2
         end = start + in_window
         if start < 0 or end > len(sequences[chrom]):
             continue
 
-        seq = str(sequences[chrom][start:end]).upper()
-        arr = np.zeros((4, in_window), dtype=np.float32)
-        for j, base in enumerate(seq):
-            idx = _BASE_TO_IDX.get(base)
-            if idx is not None:
-                arr[idx, j] = 1.0
-
-        results.append(arr)
+        seqs.append(str(sequences[chrom][start:end]))
         mask[i] = True
-
-    if results:
-        X = np.stack(results)
-    else:
-        X = np.zeros((0, 4, in_window), dtype=np.float32)
-
-    return (X, mask) if return_mask else (X,)
+    return seqs, mask

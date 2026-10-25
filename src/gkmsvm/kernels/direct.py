@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from functools import cache
 from math import comb
 
 import numpy as np
 from numba import njit, prange
 
-from gkmsvm.kernels.packed import PackedGkmKernel, device_of
+from gkmsvm.kernels.packed import PAD_WINDOW, PackedGkmKernel, device_of
+
+_PAD = PAD_WINDOW
 
 # ---------------------------------------------------------------------------
 # Numba-accelerated kernels
@@ -28,21 +31,57 @@ def _packed_mismatches(a, b):
     return _popcount(((x >> 1) | x) & np.uint32(0x55555555))
 
 
+def row_stride(w, W: int) -> int:
+    """Row stride of [rows or 1, W] window weights: 0 when every row shares one."""
+    return W if w.shape[0] > 1 else 0
+
+
+@njit(cache=True)
+def _spans(packed):
+    """[R, 2] (start, end) of each row's non-PAD windows (one contiguous run:
+    first in forward rows, last in RC rows)."""
+    R, W = packed.shape
+    out = np.zeros((R, 2), dtype=np.int64)
+    for r in range(R):
+        start = 0
+        while start < W and packed[r, start] == _PAD:
+            start += 1
+        end = start
+        while end < W and packed[r, end] != _PAD:
+            end += 1
+        out[r, 0] = start
+        out[r, 1] = end
+    return out
+
+
+@njit(cache=True)
+def _counts(packed):
+    """Number of windows before the first PAD in each row (forward rows)."""
+    R, W = packed.shape
+    out = np.empty(R, dtype=np.int64)
+    for r in range(R):
+        n = 0
+        while n < W and packed[r, n] != _PAD:
+            n += 1
+        out[r] = n
+    return out
+
+
 @njit(parallel=True, cache=True, fastmath=True)
 def _fused_pairwise_packed_numba(bx, by, table, l, min_matches):
-    """Fused pairwise using packed uint32 comparison with min-matches skip."""
+    """Fused pairwise using packed uint32 comparison with min-matches skip;
+    PAD windows (rows of shorter sequences) are skipped."""
     B = bx.shape[0]
-    Wx = bx.shape[1]
     S = by.shape[0]
-    Wy = by.shape[1]
+    sx, sy = _spans(bx), _spans(by)
     result = np.empty((B, S), dtype=np.float64)
     for idx in prange(B * S):
         b = idx // S
         s = idx % S
         acc = 0.0
-        for i in range(Wx):
+        for i in range(sx[b, 0], sx[b, 1]):
             bx_val = bx[b, i]
-            for j in range(Wy):
+            for j in range(sy[s, 0], sy[s, 1]):
                 matches = l - _packed_mismatches(bx_val, by[s, j])
                 if matches >= min_matches:
                     acc += table[l - matches]
@@ -55,7 +94,9 @@ def _rc_window(w, l):
     """Packed reverse complement of one packed l-mer."""
     out = np.uint32(0)
     for k in range(l):
-        out |= (np.uint32(3) - ((w >> np.uint32(2 * k)) & np.uint32(3))) << np.uint32(2 * (l - 1 - k))
+        out |= (np.uint32(3) - ((w >> np.uint32(2 * k)) & np.uint32(3))) << np.uint32(
+            2 * (l - 1 - k)
+        )
     return out
 
 
@@ -82,17 +123,36 @@ def _block_sum(a, c, symmetric, table):
             u0, u1, u2, u3 = a[i0], a[i0 + 1], a[i0 + 2], a[i0 + 3]
             for j in range(W):
                 v = c[j]
-                off += _g(u0, v, table) + _g(u1, v, table) + _g(u2, v, table) + _g(u3, v, table)
+                off += (
+                    _g(u0, v, table)
+                    + _g(u1, v, table)
+                    + _g(u2, v, table)
+                    + _g(u3, v, table)
+                )
         elif n == 4:
             u0, u1, u2, u3 = a[i0], a[i0 + 1], a[i0 + 2], a[i0 + 3]
-            diag += (_g(u0, c[i0], table) + _g(u1, c[i0 + 1], table)
-                     + _g(u2, c[i0 + 2], table) + _g(u3, c[i0 + 3], table))
-            off += (_g(u0, c[i0 + 1], table) + _g(u0, c[i0 + 2], table)
-                    + _g(u0, c[i0 + 3], table) + _g(u1, c[i0 + 2], table)
-                    + _g(u1, c[i0 + 3], table) + _g(u2, c[i0 + 3], table))
+            diag += (
+                _g(u0, c[i0], table)
+                + _g(u1, c[i0 + 1], table)
+                + _g(u2, c[i0 + 2], table)
+                + _g(u3, c[i0 + 3], table)
+            )
+            off += (
+                _g(u0, c[i0 + 1], table)
+                + _g(u0, c[i0 + 2], table)
+                + _g(u0, c[i0 + 3], table)
+                + _g(u1, c[i0 + 2], table)
+                + _g(u1, c[i0 + 3], table)
+                + _g(u2, c[i0 + 3], table)
+            )
             for j in range(i0 + 4, W):
                 v = c[j]
-                off += _g(u0, v, table) + _g(u1, v, table) + _g(u2, v, table) + _g(u3, v, table)
+                off += (
+                    _g(u0, v, table)
+                    + _g(u1, v, table)
+                    + _g(u2, v, table)
+                    + _g(u3, v, table)
+                )
         else:
             for i in range(i0, W):
                 for j in range(i if symmetric else 0, W):
@@ -111,19 +171,22 @@ def _self_diagonal_packed_numba(bx, by, table, l):
     Both blocks are symmetric, so each unordered pair is visited once: the
     forward block as (i, j), the RC block as (i, W-1-j), since its column j is
     rc(window W-1-j). A row whose RC block isn't the reverse complement of its
-    forward one visits every RC pair.
+    forward one visits every RC pair. A padded row (a shorter sequence) is
+    its first n windows, and its RC block reversed, whose pads come last too.
     """
     B, W = bx.shape
     has_rc = by.shape[1] > W
+    counts = _counts(bx)
     result = np.empty(B, dtype=np.float64)
     for b in prange(B):
-        fwd = bx[b]
+        n = counts[b]
+        fwd = bx[b, :n]
         acc = _block_sum(fwd, fwd, True, table)
         if has_rc:
             # RC windows in forward order: rev[k] = rc(fwd[k]) when paired
-            rev = by[b, W:][::-1].copy()
+            rev = by[b, W:][::-1][:n].copy()
             paired = True
-            for k in range(W):
+            for k in range(n):
                 if rev[k] != _rc_window(fwd[k], l):
                     paired = False
                     break
@@ -156,21 +219,42 @@ def _block_delta(f, nf, a_s, a_e, c, nc, c_s, c_e, table):
 def _mutant_diag_numba(fwd, rc, new, new_rc, diag, table, l):
     """K_raw(mutant, mutant) [4, L, B]: the reference's plus the pairs touching a
     changed window (see PackedGkmKernel.raw_diag_mutants; rc has 0 columns
-    without RC)."""
+    without RC). A padded row is its first n windows (its RC row's last n);
+    a position past them changes nothing."""
     B, W = fwd.shape
     L = new.shape[1]
     has_rc = rc.shape[1] > 0
+    counts = _counts(fwd)
     out = np.empty((4, L, B))
     for item in prange(L * B):
         p, b = item // B, item % B
-        a_s, a_e = max(0, p - l + 1), min(p + 1, W)
+        n = counts[b]
+        a_s, a_e = max(0, p - l + 1), min(p + 1, n)
+        if a_s >= a_e:
+            for v in range(4):
+                out[v, p, b] = diag[b]
+            continue
+        f = fwd[b, :n]
+        # RC windows r_s..r_e change; the row's own are W-n.. (new_rc from r_s)
         q = L - 1 - p
         r_s, r_e = max(0, q - l + 1), min(q + 1, W)
+        o = W - n
+        c_s = max(r_s, o)
         for v in range(4):
             nf = new[v, p, b]
-            d = _block_delta(fwd[b], nf, a_s, a_e, fwd[b], nf, a_s, a_e, table)
+            d = _block_delta(f, nf, a_s, a_e, f, nf, a_s, a_e, table)
             if has_rc:
-                d += _block_delta(fwd[b], nf, a_s, a_e, rc[b], new_rc[v, p, b], r_s, r_e, table)
+                d += _block_delta(
+                    f,
+                    nf,
+                    a_s,
+                    a_e,
+                    rc[b, o:],
+                    new_rc[v, p, b, c_s - r_s :],
+                    c_s - o,
+                    r_e - o,
+                    table,
+                )
             out[v, p, b] = diag[b] + d
     return out
 
@@ -227,12 +311,15 @@ void fused_pairwise_idx(
 
     const bool use_shared = (b_first == b_last);
 
+    // PAD windows (0xFFFFFFFF, past a shorter sequence's) are skipped
     double acc = 0.0;
     for (int i = 0; i < Wx; i++) {
         unsigned int bx_val = use_shared ? s_bx[i]
                                          : bx_packed[b * Wx + i];
+        if (bx_val == 0xFFFFFFFFu) continue;
         for (int j = 0; j < Wy; j++) {
             unsigned int by_val = by_packed[j * S + s];
+            if (by_val == 0xFFFFFFFFu) continue;
             unsigned int x = bx_val ^ by_val;
             unsigned int mismatches = ((x >> 1) | x) & 0x55555555u;
             int mismatch_count = __popc(mismatches);
@@ -268,11 +355,15 @@ void fused_cross_diagonal(
     const int b = blockDim.x * blockIdx.x + threadIdx.x;
     if (b >= B) return;
 
+    // PAD windows (0xFFFFFFFF, past a shorter sequence's) are skipped
     double acc = 0.0;
     for (int i = 0; i < W; i++) {
         unsigned int bx_val = bx_packed[b * W + i];
+        if (bx_val == 0xFFFFFFFFu) continue;
         for (int j = 0; j < W_rc; j++) {
-            unsigned int x = bx_val ^ bx_rc_packed[b * W_rc + j];
+            unsigned int y = bx_rc_packed[b * W_rc + j];
+            if (y == 0xFFFFFFFFu) continue;
+            unsigned int x = bx_val ^ y;
             unsigned int mismatches = ((x >> 1) | x) & 0x55555555u;
             int mismatch_count = __popc(mismatches);
             int matches = l - mismatch_count;
@@ -285,21 +376,17 @@ void fused_cross_diagonal(
 }
 """
 
-_cupy_fused_idx_kernel = None
-_cupy_fused_cross_diag_kernel = None
+
+@cache
+def _cuda_kernel(source, name):
+    import cupy as cp
+
+    return cp.RawKernel(source, name, options=("--use_fast_math",))
 
 
 def _fused_cross_diagonal_packed_gpu(bx_packed, bx_rc_packed, table, l, min_matches):
     """Cross-kernel diagonal (fwd x RC) via CUDA RawKernel."""
-    global _cupy_fused_cross_diag_kernel
     import cupy as cp
-
-    if _cupy_fused_cross_diag_kernel is None:
-        _cupy_fused_cross_diag_kernel = cp.RawKernel(
-            _FUSED_CROSS_DIAGONAL_CUDA,
-            "fused_cross_diagonal",
-            options=("--use_fast_math",),
-        )
 
     B, W = bx_packed.shape
     _, W_rc = bx_rc_packed.shape
@@ -309,66 +396,54 @@ def _fused_cross_diagonal_packed_gpu(bx_packed, bx_rc_packed, table, l, min_matc
     block = 256
     grid = (B + block - 1) // block
 
-    _cupy_fused_cross_diag_kernel(
+    _cuda_kernel(_FUSED_CROSS_DIAGONAL_CUDA, "fused_cross_diagonal")(
         (grid,),
         (block,),
-        (bx_packed, bx_rc_packed, table_gpu, result,
-         np.int32(B), np.int32(W), np.int32(W_rc),
-         np.int32(l), np.int32(min_matches)),
+        (
+            bx_packed,
+            bx_rc_packed,
+            table_gpu,
+            result,
+            np.int32(B),
+            np.int32(W),
+            np.int32(W_rc),
+            np.int32(l),
+            np.int32(min_matches),
+        ),
         shared_mem=(l + 1) * 8,
     )
     return result
 
 
 # ---------------------------------------------------------------------------
-# MLX Metal kernels — fused XOR + popcount with per-thread early exit
+# MLX Metal kernels — fused XOR + popcount, one thread per output
 # ---------------------------------------------------------------------------
 
+# params: total, S, Wx, Wy, l, min_matches
 _METAL_PAIRWISE_SOURCE = """
     uint idx = thread_position_in_grid.x;
-    uint total_pairs = (uint)params[0];
+    uint total = (uint)params[0];
     uint S = (uint)params[1];
     uint Wx = (uint)params[2];
     uint Wy = (uint)params[3];
     uint l = (uint)params[4];
     uint min_matches = (uint)params[5];
 
-    if (idx >= total_pairs) return;
+    if (idx >= total) return;
 
-    uint b = idx / S;
-    uint s = idx % S;
+    // DIAG: row b against row b of by (self-kernels), else column c
+    uint b = DIAG ? idx : idx / S;
+    uint c = DIAG ? idx : idx % S;
 
+    // PAD windows (0xFFFFFFFF, past a shorter sequence's) are skipped
     float acc = 0.0f;
     for (uint i = 0; i < Wx; i++) {
         uint32_t bx_val = bx_packed[b * Wx + i];
+        if (bx_val == 0xFFFFFFFFu) continue;
         for (uint j = 0; j < Wy; j++) {
-            uint32_t xored = bx_val ^ by_packed[s * Wy + j];
-            uint32_t mask = ((xored >> 1) | xored) & 0x55555555u;
-            uint mm = popcount(mask);
-            uint matches = l - mm;
-            if (matches >= min_matches) {
-                acc += table[l - matches];
-            }
-        }
-    }
-    result[b * S + s] = acc;
-"""
-
-_METAL_CROSS_DIAGONAL_SOURCE = """
-    uint idx = thread_position_in_grid.x;
-    uint B = (uint)params[0];
-    uint W = (uint)params[1];
-    uint W_rc = (uint)params[2];
-    uint l = (uint)params[3];
-    uint min_matches = (uint)params[4];
-
-    if (idx >= B) return;
-
-    float acc = 0.0f;
-    for (uint i = 0; i < W; i++) {
-        uint32_t bx_val = bx_packed[idx * W + i];
-        for (uint j = 0; j < W_rc; j++) {
-            uint32_t xored = bx_val ^ bx_rc_packed[idx * W_rc + j];
+            uint32_t by_val = by_packed[c * Wy + j];
+            if (by_val == 0xFFFFFFFFu) continue;
+            uint32_t xored = bx_val ^ by_val;
             uint32_t mask = ((xored >> 1) | xored) & 0x55555555u;
             uint mm = popcount(mask);
             uint matches = l - mm;
@@ -380,47 +455,32 @@ _METAL_CROSS_DIAGONAL_SOURCE = """
     result[idx] = acc;
 """
 
-_mlx_pairwise_kernel = None
-_mlx_cross_diagonal_kernel = None
 
-
-def _get_mlx_pairwise_kernel():
-    global _mlx_pairwise_kernel
-    if _mlx_pairwise_kernel is None:
-        import mlx.core as mx
-        _mlx_pairwise_kernel = mx.fast.metal_kernel(
-            name="gkm_fused_pairwise",
-            input_names=["bx_packed", "by_packed", "table", "params"],
-            output_names=["result"],
-            source=_METAL_PAIRWISE_SOURCE,
-        )
-    return _mlx_pairwise_kernel
-
-
-def _get_mlx_cross_diagonal_kernel():
-    global _mlx_cross_diagonal_kernel
-    if _mlx_cross_diagonal_kernel is None:
-        import mlx.core as mx
-        _mlx_cross_diagonal_kernel = mx.fast.metal_kernel(
-            name="gkm_fused_cross_diagonal",
-            input_names=["bx_packed", "bx_rc_packed", "table", "params"],
-            output_names=["result"],
-            source=_METAL_CROSS_DIAGONAL_SOURCE,
-        )
-    return _mlx_cross_diagonal_kernel
-
-
-def _fused_pairwise_packed_mlx(bx_packed, by_packed, table, l, min_matches):
-    """Fused pairwise via Metal kernel — per-thread XOR+popcount with early exit."""
+@cache
+def _mlx_pairwise_kernel(diag: bool):
     import mlx.core as mx
+
+    return mx.fast.metal_kernel(
+        name="gkm_fused_cross_diagonal" if diag else "gkm_fused_pairwise",
+        input_names=["bx_packed", "by_packed", "table", "params"],
+        output_names=["result"],
+        source=_METAL_PAIRWISE_SOURCE.replace("DIAG", "true" if diag else "false"),
+    )
+
+
+def _fused_pairwise_packed_mlx(bx_packed, by_packed, table, l, min_matches, diag=False):
+    """Fused pairwise [B, S] via Metal kernel, one thread per pair (diag: [B],
+    row b against row b of by_packed)."""
+    import mlx.core as mx
+
     B, Wx = bx_packed.shape
     S, Wy = by_packed.shape
-    total = B * S
+    total = B if diag else B * S
     table_mlx = mx.array(np.asarray(table, dtype=np.float32))
     params = mx.array([total, S, Wx, Wy, l, min_matches], dtype=mx.int32)
     block = min(total, 256)
     grid = ((total + block - 1) // block) * block
-    result = _get_mlx_pairwise_kernel()(
+    result = _mlx_pairwise_kernel(diag)(
         inputs=[bx_packed, by_packed, table_mlx, params],
         template=[],
         grid=(grid, 1, 1),
@@ -428,26 +488,203 @@ def _fused_pairwise_packed_mlx(bx_packed, by_packed, table, l, min_matches):
         output_shapes=[(total,)],
         output_dtypes=[mx.float32],
     )[0]
-    return result.reshape(B, S)
+    return result if diag else result.reshape(B, S)
 
 
-def _fused_cross_diagonal_packed_mlx(bx_packed, bx_rc_packed, table, l, min_matches):
-    """Cross-kernel diagonal (fwd × RC) via Metal kernel."""
+# ---------------------------------------------------------------------------
+# CUDA and Metal: mutant self-kernels (_mutant_diag_numba on the GPU). One
+# thread block per (base, position, sequence); its threads stride over the
+# pairs touching a changed window: changed rows x every column, then
+# unchanged rows x changed columns, for the forward block and the RC block.
+# Window weights are [rows or 1, W] with a row stride (0 when shared; all
+# ones for the unweighted kernels).
+# ---------------------------------------------------------------------------
+
+_MUTANT_DIAG_BODY = """
+    long long item = BLOCK_ID;  // (v * L + p) * B + b
+    int b = (int)(item % B), p = (int)((item / B) % L);
+    int n = counts[b];
+    int a_s = max(0, p - l + 1), a_e = min(p + 1, n);
+    const REAL_W* wb = w + (long long)b * w_stride;
+    const unsigned int* f = fwd + (long long)b * W;
+    const unsigned int* nf = new_f + item * l - a_s;  // nf[i]: window i after
+    bool same = true;  // the reference base: nothing changes
+    for (int i = a_s; i < a_e; i++) same = same && nf[i] == f[i];
+    // RC block: the row's windows are W-n.., column j weighs forward window n-1-j
+    int q = L - 1 - p, r_s = max(0, q - l + 1), r_e = min(q + 1, W);
+    int o = W - n;
+    const unsigned int* c = rc + (long long)b * W + o;
+    const unsigned int* nc = new_rc + item * l + (o - r_s);
+    ACC d = 0;
+    for (int blk = 0; !same && blk < (has_rc ? 2 : 1); blk++) {
+        bool fw = blk == 0;
+        const unsigned int* cc = fw ? f : c;
+        const unsigned int* ncc = fw ? nf : nc;
+        int c_s = fw ? a_s : max(r_s, o) - o, c_e = fw ? a_e : r_e - o;
+        // changed rows, every column
+        for (int i = a_s; i < a_e; i++) {
+            unsigned int u = f[i], u2 = nf[i];
+            ACC row = 0;
+            for (int j = TID; j < n; j += NT) {
+                unsigned int cj = cc[j];
+                unsigned int c2 = (j >= c_s && j < c_e) ? ncc[j] : cj;
+                ACC wj = fw ? wb[j] : wb[n - 1 - j];
+                row += wj * ((ACC)table[n_mismatch(u2, c2)] - (ACC)table[n_mismatch(u, cj)]);
+            }
+            d += (ACC)wb[i] * row;
+        }
+        // unchanged rows, changed columns
+        for (int i = TID; i < n; i += NT) {
+            if (i >= a_s && i < a_e) continue;
+            unsigned int u = f[i];
+            ACC row = 0;
+            for (int j = c_s; j < c_e; j++) {
+                ACC wj = fw ? wb[j] : wb[n - 1 - j];
+                row += wj * ((ACC)table[n_mismatch(u, ncc[j])] - (ACC)table[n_mismatch(u, cc[j])]);
+            }
+            d += (ACC)wb[i] * row;
+        }
+    }
+"""
+
+_MUTANT_DIAG_CUDA = (
+    r"""
+__device__ __forceinline__ int n_mismatch(unsigned int a, unsigned int b)
+{
+    unsigned int x = a ^ b;
+    return __popc(((x >> 1) | x) & 0x55555555u);
+}
+
+extern "C" __global__ void mutant_diag(
+    const unsigned int* __restrict__ fwd, const unsigned int* __restrict__ rc,
+    const unsigned int* __restrict__ new_f, const unsigned int* __restrict__ new_rc,
+    const int* __restrict__ counts, const double* __restrict__ w, int w_stride,
+    const double* __restrict__ table, const double* __restrict__ diag,
+    double* __restrict__ out, int B, int L, int W, int l, int has_rc)
+{
+    __shared__ double partial[256];
+"""
+    + _MUTANT_DIAG_BODY.replace("BLOCK_ID", "blockIdx.x")
+    .replace("REAL_W", "double")
+    .replace("ACC", "double")
+    .replace("TID", "threadIdx.x")
+    .replace("NT", "blockDim.x")
+    + r"""
+    partial[threadIdx.x] = d;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) partial[threadIdx.x] += partial[threadIdx.x + s];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) out[item] = diag[b] + partial[0];
+}
+"""
+)
+
+_METAL_MUTANT_DIAG = (
+    """
+    int B = params[0], L = params[1], W = params[2], l = params[3];
+    int has_rc = params[4], w_stride = params[5];
+    uint tid = thread_position_in_threadgroup.x;
+    uint nt = threads_per_threadgroup.x;
+    threadgroup float partial[32];
+"""
+    + _MUTANT_DIAG_BODY.replace("BLOCK_ID", "threadgroup_position_in_grid.x")
+    .replace("const REAL_W*", "const device float*")
+    .replace("const unsigned int*", "const device uint*")
+    .replace("ACC", "float")
+    .replace("TID", "tid")
+    .replace("NT", "nt")
+    .replace("long long", "long")
+    + """
+    d = simd_sum(d);
+    if (thread_index_in_simdgroup == 0) partial[simdgroup_index_in_threadgroup] = d;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float s = 0.0f;
+        for (uint g = 0; g < (nt + 31) / 32; g++) s += partial[g];
+        out[item] = diag[b] + s;
+    }
+"""
+)
+
+_METAL_MUTANT_DIAG_HEADER = """
+inline int n_mismatch(uint a, uint b) {
+    uint x = a ^ b;
+    return popcount(((x >> 1) | x) & 0x55555555u);
+}
+"""
+
+_MUTANT_DIAG_THREADS = 128
+
+
+@cache
+def _cuda_mutant_diag():
+    import cupy as cp
+
+    return cp.RawKernel(_MUTANT_DIAG_CUDA, "mutant_diag")
+
+
+@cache
+def _metal_mutant_diag():
     import mlx.core as mx
-    B, W = bx_packed.shape
-    _, W_rc = bx_rc_packed.shape
-    table_mlx = mx.array(np.asarray(table, dtype=np.float32))
-    params = mx.array([B, W, W_rc, l, min_matches], dtype=mx.int32)
-    block = min(B, 256)
-    grid = ((B + block - 1) // block) * block
-    return _get_mlx_cross_diagonal_kernel()(
-        inputs=[bx_packed, bx_rc_packed, table_mlx, params],
+
+    return mx.fast.metal_kernel(
+        name="gkm_mutant_diag",
+        input_names=["fwd", "rc", "new_f", "new_rc", "counts", "w", "table"]
+        + ["diag", "params"],
+        output_names=["out"],
+        source=_METAL_MUTANT_DIAG,
+        header=_METAL_MUTANT_DIAG_HEADER,
+    )
+
+
+def _mutant_diag_device(bx, bx_rc, new, new_rc, diag, w, table, l):
+    """K_raw(mutant, mutant) [4, L, B] on bx's device (CUDA or MLX); the
+    arguments as for _mutant_diag_numba, on bx's device or on CPU. w: [B or 1,
+    W] window weights, or None (all 1)."""
+    dev = device_of(bx)
+    B, W = bx.shape
+    L = new.shape[1]
+    has_rc = bx_rc is not None
+    w = np.ones((1, W)) if w is None else w
+    params = (B, L, W, l, int(has_rc), row_stride(w, W))
+    new = np.ascontiguousarray(new, dtype=np.uint32)
+    new_rc = new if new_rc is None else np.ascontiguousarray(new_rc, dtype=np.uint32)
+    if dev == "cuda":
+        import cupy as cp
+
+        fwd = cp.ascontiguousarray(bx, dtype=cp.uint32)
+        rc = fwd if bx_rc is None else cp.ascontiguousarray(bx_rc, dtype=cp.uint32)
+        out = cp.empty(4 * L * B, dtype=cp.float64)
+        _cuda_mutant_diag()(
+            (4 * L * B,),
+            (_MUTANT_DIAG_THREADS,),
+            (fwd, rc, cp.asarray(new), cp.asarray(new_rc))
+            + ((fwd != PAD_WINDOW).sum(axis=1, dtype=cp.int32),)
+            + (cp.asarray(w, dtype=cp.float64), np.int32(params[5]))
+            + (cp.asarray(table, dtype=cp.float64),)
+            + (cp.asarray(diag, dtype=cp.float64), out)
+            + tuple(np.int32(a) for a in params[:5]),
+        )
+        return out.reshape(4, L, B)
+    import mlx.core as mx
+
+    fwd = mx.array(bx).astype(mx.uint32)
+    rc = fwd if bx_rc is None else mx.array(bx_rc).astype(mx.uint32)
+    out = _metal_mutant_diag()(
+        inputs=[fwd, rc, mx.array(new), mx.array(new_rc)]
+        + [(fwd != PAD_WINDOW).astype(mx.int32).sum(axis=1)]
+        + [mx.array(np.asarray(w, dtype=np.float32))]
+        + [mx.array(np.asarray(table, dtype=np.float32))]
+        + [mx.array(diag).astype(mx.float32), mx.array(params, dtype=mx.int32)],
         template=[],
-        grid=(grid, 1, 1),
-        threadgroup=(block, 1, 1),
-        output_shapes=[(B,)],
+        grid=(4 * L * B * _MUTANT_DIAG_THREADS, 1, 1),
+        threadgroup=(_MUTANT_DIAG_THREADS, 1, 1),
+        output_shapes=[(4 * L * B,)],
         output_dtypes=[mx.float32],
     )[0]
+    return out.reshape(4, L, B)
 
 
 def _fused_pairwise_packed_gpu(bx_packed, by_packed, table, l, min_matches):
@@ -456,15 +693,7 @@ def _fused_pairwise_packed_gpu(bx_packed, by_packed, table, l, min_matches):
     The kernel reads columns as [Wy, S] (adjacent threads, adjacent SVs), so
     by is transposed per call.
     """
-    global _cupy_fused_idx_kernel
     import cupy as cp
-
-    if _cupy_fused_idx_kernel is None:
-        _cupy_fused_idx_kernel = cp.RawKernel(
-            _FUSED_PAIRWISE_IDX_CUDA,
-            "fused_pairwise_idx",
-            options=("--use_fast_math",),
-        )
 
     bx_packed = cp.ascontiguousarray(bx_packed)
     B, Wx = bx_packed.shape
@@ -478,11 +707,21 @@ def _fused_pairwise_packed_gpu(bx_packed, by_packed, table, l, min_matches):
     grid = (total + block - 1) // block
     shared_mem = (l + 1) * 8 + Wx * 4
 
-    _cupy_fused_idx_kernel(
+    _cuda_kernel(_FUSED_PAIRWISE_IDX_CUDA, "fused_pairwise_idx")(
         (grid,),
         (block,),
-        (bx_packed, by_t, table_gpu, result, np.int64(total), np.int32(S),
-         np.int32(Wx), np.int32(Wy), np.int32(l), np.int32(min_matches)),
+        (
+            bx_packed,
+            by_t,
+            table_gpu,
+            result,
+            np.int64(total),
+            np.int32(S),
+            np.int32(Wx),
+            np.int32(Wy),
+            np.int32(l),
+            np.int32(min_matches),
+        ),
         shared_mem=shared_mem,
     )
     return result.reshape(B, S)
@@ -499,14 +738,29 @@ class DirectGkmKernel(PackedGkmKernel):
     For window length l and k informative positions, two windows differing
     in m positions share C(l-m, k) gapped k-mer features. The kernel sums
     these shared features over all pairs of windows from the two sequences.
+
+    d: pairs with more than d mismatches count 0, as in LS-GKM, whose
+    search visits only pairs within d mismatches for every kernel type
+    (default 3, which drops m = 4 at l = 11, k = 7). None counts every
+    pair (the full gapped k-mer count).
     """
 
     def __init__(
-        self, l: int, k: int, *, normalize: bool = True, include_rc: bool = True
+        self,
+        l: int,
+        k: int,
+        *,
+        d: int | None = None,
+        normalize: bool = True,
+        include_rc: bool = True,
     ):
         super().__init__(l, k, normalize=normalize, include_rc=include_rc)
+        self.d = d
         self._mismatch_table = np.array(
-            [comb(l - m, k) if l - m >= k else 0 for m in range(l + 1)],
+            [
+                comb(l - m, k) if l - m >= k and (d is None or m <= d) else 0
+                for m in range(l + 1)
+            ],
             dtype=np.float64,
         )
         self._min_matches = self._get_min_matches()
@@ -524,39 +778,55 @@ class DirectGkmKernel(PackedGkmKernel):
                 return self.l - m
         return self.l + 1
 
-
-    _HAS_BRUTE = True
-
     def _brute(self, bx, by, dev):
         args = (self._mismatch_table, self.l, self._min_matches)
         if dev == "cpu":
             return _fused_pairwise_packed_numba(
-                np.ascontiguousarray(bx), np.ascontiguousarray(by), *args)
+                np.ascontiguousarray(bx), np.ascontiguousarray(by), *args
+            )
         if dev == "cuda":
             return _fused_pairwise_packed_gpu(bx, by, *args)
         return _fused_pairwise_packed_mlx(bx, by, *args)
 
     def raw_diag_mutants(self, bx, bx_rc, new, new_rc, diag):
-        """See PackedGkmKernel.raw_diag_mutants; on CPU only pairs touching a
-        changed window are visited (about 4 l W per mutant instead of W^2)."""
+        """See PackedGkmKernel.raw_diag_mutants; only pairs touching a changed
+        window are visited (about 4 l W per mutant instead of W^2)."""
+        w = self.row_weights(bx)
         if device_of(bx) != "cpu":
-            return super().raw_diag_mutants(bx, bx_rc, new, new_rc, diag)
+            return _mutant_diag_device(
+                bx, bx_rc, new, new_rc, diag, w, self._mismatch_table, self.l
+            )
         B = bx.shape[0]
-        rc = np.zeros((B, 0), np.uint32) if bx_rc is None else np.ascontiguousarray(bx_rc)
+        rc = (
+            np.zeros((B, 0), np.uint32)
+            if bx_rc is None
+            else np.ascontiguousarray(bx_rc)
+        )
         new_rc = np.zeros((4, 1, 1, 1), np.uint32) if new_rc is None else new_rc
-        return _mutant_diag_numba(np.ascontiguousarray(bx), rc, np.ascontiguousarray(new),
-                                  np.ascontiguousarray(new_rc),
-                                  np.asarray(diag, dtype=np.float64),
-                                  self._mismatch_table, self.l)
+        args = (
+            np.ascontiguousarray(bx),
+            rc,
+            np.ascontiguousarray(new),
+            np.ascontiguousarray(new_rc),
+            np.asarray(diag, dtype=np.float64),
+        )
+        return self._mutant_diag_cpu(args, w)
+
+    def _mutant_diag_cpu(self, args, w):
+        """raw_diag_mutants on CPU: args (bx, bx_rc, new, new_rc, diag); w the
+        rows' window weights (None here)."""
+        return _mutant_diag_numba(*args, self._mismatch_table, self.l)
 
     def _brute_cross_diag(self, bx, by, dev):
         args = (self._mismatch_table, self.l, self._min_matches)
         if dev == "cpu":
             return _self_diagonal_packed_numba(
-                np.ascontiguousarray(bx), np.ascontiguousarray(by), *args[:2])
+                np.ascontiguousarray(bx), np.ascontiguousarray(by), *args[:2]
+            )
         if dev == "cuda":
             import cupy as cp
 
             return _fused_cross_diagonal_packed_gpu(
-                cp.ascontiguousarray(bx), cp.ascontiguousarray(by), *args)
-        return _fused_cross_diagonal_packed_mlx(bx, by, *args)
+                cp.ascontiguousarray(bx), cp.ascontiguousarray(by), *args
+            )
+        return _fused_pairwise_packed_mlx(bx, by, *args, diag=True)

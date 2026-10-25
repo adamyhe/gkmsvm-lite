@@ -64,14 +64,19 @@ def _paper_scores(kind: str, tag: str, negset: int, names19: list[str]) -> np.nd
     elif kind == "ISM":
         files = [f"ism_out/ism_diff_pos_51_{full}", f"ism_out/ism_diff_neg_51_{full}"]
     else:
-        files = [f"gkmexplain_out/positives_51_{full}", f"gkmexplain_out/negatives_51_{full}"]
+        files = [
+            f"gkmexplain_out/positives_51_{full}",
+            f"gkmexplain_out/negatives_51_{full}",
+        ]
     rows = _paper_file(files[0]) + _paper_file(files[1])
     names = [n for n, _ in rows]
     if kind != "deltaSVM":
         # 51bp files are keyed by the context window; map back to the 19bp name.
         names = [_name51_to_19(n) for n in names]
     if names != names19:
-        raise RuntimeError(f"{kind} {tag} negset{negset}: variant order differs from Beer lab files")
+        raise RuntimeError(
+            f"{kind} {tag} negset{negset}: variant order differs from Beer lab files"
+        )
     return np.array([v for _, v in rows])
 
 
@@ -86,7 +91,7 @@ def _lmer_index(X: np.ndarray) -> np.ndarray:
     b = X.argmax(axis=1).astype(np.int64)
     W = X.shape[2] - L + 1
     powers = 4 ** np.arange(L - 1, -1, -1, dtype=np.int64)
-    return np.stack([(b[:, w:w + L] * powers).sum(axis=1) for w in range(W)], axis=1)
+    return np.stack([(b[:, w : w + L] * powers).sum(axis=1) for w in range(W)], axis=1)
 
 
 def _lmer_onehot(idx: np.ndarray) -> np.ndarray:
@@ -111,26 +116,42 @@ def _lmer_weights(model, idx: np.ndarray, device: str) -> np.ndarray:
     if device == "cuda":
         model.cuda()
     try:
-        w = to_cpu(model(_lmer_onehot(idx), batch_size=8192)).ravel() - float(model.bias)
+        w = to_cpu(model(_lmer_onehot(idx), batch_size=8192)).ravel() - float(
+            model.bias
+        )
     finally:
         model.cpu()
         model.use_lmer_table, model.use_lmer_index = saved
     return w
 
 
-def _compare(rows: list, label: str, ours: np.ndarray, ref: np.ndarray, labels: np.ndarray):
+def _compare(
+    rows: list, label: str, ours: np.ndarray, ref: np.ndarray, labels: np.ndarray
+):
     err = np.abs(ours - ref)
-    rows.append({
-        "check": label,
-        "max_abs_err": float(err.max()),
-        "max_rel_err": float((err / np.maximum(np.abs(ref), 1e-3)).max()),
-        "corr": float(np.corrcoef(ours, ref)[0, 1]),
-        "auprc_ours": float(average_precision_score(labels, np.abs(ours))) if labels is not None else np.nan,
-        "auprc_ref": float(average_precision_score(labels, np.abs(ref))) if labels is not None else np.nan,
-    })
+    rows.append(
+        {
+            "check": label,
+            "max_abs_err": float(err.max()),
+            "max_rel_err": float((err / np.maximum(np.abs(ref), 1e-3)).max()),
+            "corr": float(np.corrcoef(ours, ref)[0, 1]),
+            "auprc_ours": float(average_precision_score(labels, np.abs(ours)))
+            if labels is not None
+            else np.nan,
+            "auprc_ref": float(average_precision_score(labels, np.abs(ref)))
+            if labels is not None
+            else np.nan,
+        }
+    )
     r = rows[-1]
-    print(f"  {label:<38s} max|err| {r['max_abs_err']:.3e}  corr {r['corr']:.8f}"
-          + (f"  AUPRC ours {r['auprc_ours']:.5f} ref {r['auprc_ref']:.5f}" if labels is not None else ""))
+    print(
+        f"  {label:<38s} max|err| {r['max_abs_err']:.3e}  corr {r['corr']:.8f}"
+        + (
+            f"  AUPRC ours {r['auprc_ours']:.5f} ref {r['auprc_ref']:.5f}"
+            if labels is not None
+            else ""
+        )
+    )
 
 
 def main():
@@ -139,30 +160,40 @@ def main():
     )
     parser.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
     parser.add_argument("--negsets", type=int, nargs="+", default=[1, 2, 3, 4, 5])
-    parser.add_argument("--tags", nargs="+", default=["t3", "t2"], choices=list(PAPER_TAGS))
-    parser.add_argument("--n-cpu-lmers", type=int, default=2000,
-                        help="10-mers checked against a CPU forward pass (default: 2000)")
+    parser.add_argument(
+        "--tags", nargs="+", default=["t3", "t2"], choices=list(PAPER_TAGS)
+    )
+    parser.add_argument(
+        "--n-cpu-lmers",
+        type=int,
+        default=2000,
+        help="10-mers checked against a CPU forward pass (default: 2000)",
+    )
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--output", default=None, help="Save checks to TSV")
-    parser.add_argument("--dump", default=None,
-                        help="Save per-variant scores, ours and lsgkm's, to TSV")
+    parser.add_argument(
+        "--dump", default=None, help="Save per-variant scores, ours and lsgkm's, to TSV"
+    )
     args = parser.parse_args()
 
     from gkmsvm import read_fasta
 
     bench.download_data()
     X19, X51, labels, _ = bench.load_test_variants()
-    names19 = (
-        [n for n, _ in read_fasta(str(bench.SEQ_DIR / "dsqtl_test_pos.major.fa"))]
-        + [n for n, _ in read_fasta(str(bench.SEQ_DIR / "dsqtl_test_neg.major.fa"))]
-    )
+    names19 = [
+        n for n, _ in read_fasta(str(bench.SEQ_DIR / "dsqtl_test_pos.major.fa"))
+    ] + [n for n, _ in read_fasta(str(bench.SEQ_DIR / "dsqtl_test_neg.major.fa"))]
     ref_idx, alt_idx = _lmer_index(X19[0]), _lmer_index(X19[1])
-    uniq, inv = np.unique(np.concatenate([ref_idx, alt_idx], axis=1), return_inverse=True)
+    uniq, inv = np.unique(
+        np.concatenate([ref_idx, alt_idx], axis=1), return_inverse=True
+    )
     inv = inv.reshape(len(ref_idx), -1)
     W = ref_idx.shape[1]
     print(f"{len(uniq):,} distinct 10-mers across {len(labels):,} variants")
     rng = np.random.default_rng(0)
-    cpu_sel = rng.choice(len(uniq), size=min(args.n_cpu_lmers, len(uniq)), replace=False)
+    cpu_sel = rng.choice(
+        len(uniq), size=min(args.n_cpu_lmers, len(uniq)), replace=False
+    )
 
     rows = []
     dump = {"variant": names19, "label": labels.astype(int)}
@@ -197,9 +228,15 @@ def main():
             p = f"{t} neg{negset}"
             _compare(rows, f"{p} weights table vs direct", table[uniq], w_direct, None)
             _compare(rows, f"{p} weights direct vs cpu", w_direct[cpu_sel], w_cpu, None)
-            _compare(rows, f"{p} weights table vs cpu", table[uniq[cpu_sel]], w_cpu, None)
-            _compare(rows, f"{p} deltaSVM table vs paper", table_scores, paper_dsvm, labels)
-            _compare(rows, f"{p} deltaSVM direct vs paper", direct_scores, paper_dsvm, labels)
+            _compare(
+                rows, f"{p} weights table vs cpu", table[uniq[cpu_sel]], w_cpu, None
+            )
+            _compare(
+                rows, f"{p} deltaSVM table vs paper", table_scores, paper_dsvm, labels
+            )
+            _compare(
+                rows, f"{p} deltaSVM direct vs paper", direct_scores, paper_dsvm, labels
+            )
             pl_scores = bench.deltasvm_pl(dsvm).score_variants(X19[0], X19[1]).ravel()
             _compare(rows, f"{p} deltaSVM.pl vs paper", pl_scores, paper_dsvm, labels)
             dump[f"{t}_neg{negset}_deltaSVM.pl_lite"] = pl_scores
@@ -211,9 +248,15 @@ def main():
                     if args.device == "cuda":
                         model.cuda()
                     from gkmsvm.backend import to_cpu
-                    ours = to_cpu(model.score_variants(
-                        X51[0], X51[1], method=method, batch_size=args.batch_size,
-                    )).ravel()
+
+                    ours = to_cpu(
+                        model.score_variants(
+                            X51[0],
+                            X51[1],
+                            method=method,
+                            batch_size=args.batch_size,
+                        )
+                    ).ravel()
                     model.cpu()
                     ref = _paper_scores(kind, tag, negset, names19)
                     _compare(rows, f"{p} {kind} vs paper", ours, ref, labels)
@@ -231,14 +274,26 @@ def main():
         import pandas as pd
         from _common import write_tsv
 
-        meta = {"tags": ",".join(args.tags), "negsets": ",".join(map(str, args.negsets))}
+        meta = {
+            "tags": ",".join(args.tags),
+            "negsets": ",".join(map(str, args.negsets)),
+        }
         if args.output:
-            write_tsv(args.output, pd.DataFrame(rows),
-                      "Agreement with lsgkm dsQTL outputs", args.device, **meta)
+            write_tsv(
+                args.output,
+                pd.DataFrame(rows),
+                "Agreement with lsgkm dsQTL outputs",
+                args.device,
+                **meta,
+            )
         if args.dump:
-            write_tsv(args.dump, pd.DataFrame(dump),
-                      "Per-variant dsQTL scores, gkmsvm-lite and lsgkm", args.device,
-                      **meta)
+            write_tsv(
+                args.dump,
+                pd.DataFrame(dump),
+                "Per-variant dsQTL scores, gkmsvm-lite and lsgkm",
+                args.device,
+                **meta,
+            )
 
 
 if __name__ == "__main__":

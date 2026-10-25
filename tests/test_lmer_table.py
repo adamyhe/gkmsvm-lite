@@ -3,6 +3,7 @@
 import numpy as np
 import pytest
 
+from gkmsvm.codec import codes_to_one_hot
 from gkmsvm.svm import GkmSVM
 
 
@@ -26,8 +27,13 @@ def _model(case, include_rc, rng, n_sv=30):
     kernel_type, params = CASES[case]
     sv = _onehot(n_sv, 40, rng)
     coef = rng.normal(size=n_sv)
-    return GkmSVM(sv, coef, 0.3, kernel_type=kernel_type,
-                  kernel_params={**params, "include_rc": include_rc})
+    return GkmSVM(
+        sv,
+        coef,
+        0.3,
+        kernel_type=kernel_type,
+        kernel_params={**params, "include_rc": include_rc},
+    )
 
 
 @pytest.mark.parametrize("case", CASES)
@@ -38,7 +44,8 @@ def test_table_matches_kernel(case, include_rc, normalize):
     model = _model(case, include_rc, rng)
     model.kernel.normalize = normalize
     X = _onehot(25, 50, rng)
-    X[3, :, 5:35] = model.support_sequences[2, :, 0:30]  # near-identical to an SV
+    # near-identical to an SV
+    X[3, :, 5:35] = codes_to_one_hot(model.support_sequences[2:3, 0:30])[0]
 
     model.use_lmer_table = False
     ref = np.asarray(model(X))
@@ -58,8 +65,13 @@ def test_auto_skips_small_models():
 def test_rbf_uses_kernel_path():
     rng = np.random.default_rng(2)
     sv = _onehot(30, 40, rng)
-    model = GkmSVM(sv, rng.normal(size=30), 0.1, kernel_type="gkmrbf",
-                   kernel_params={"L": 8, "k": 5, "d": 3, "gamma": 2.0})
+    model = GkmSVM(
+        sv,
+        rng.normal(size=30),
+        0.1,
+        kernel_type="gkmrbf",
+        kernel_params={"L": 8, "k": 5, "d": 3, "gamma": 2.0},
+    )
     model.use_lmer_table = True
     model(_onehot(4, 50, rng))
     assert model._lmer_table is None  # RBF never builds a table
@@ -79,8 +91,9 @@ def test_to_deltasvm_matches_brute(case, include_rc, query_norm):
     brute_model._lmer_table = False  # forces the scoring loop over all l-mers
     brute = brute_model.to_deltasvm(query_norm=query_norm)
 
-    np.testing.assert_allclose(np.asarray(fast.weights), np.asarray(brute.weights),
-                               rtol=1e-6, atol=1e-7)
+    np.testing.assert_allclose(
+        np.asarray(fast.weights), np.asarray(brute.weights), rtol=1e-6, atol=1e-7
+    )
     # to_deltasvm must not disturb the model's own scoring
     np.testing.assert_array_equal(np.asarray(model(X)), before)
 
@@ -91,11 +104,18 @@ def test_to_deltasvm_rbf_weights_are_lmer_scores(query_norm):
     score on that l-mer alone minus bias, whatever query_norm says."""
     rng = np.random.default_rng(4)
     sv = _onehot(30, 40, rng)
-    model = GkmSVM(sv, rng.normal(size=30), 0.1, kernel_type="gkmrbf",
-                   kernel_params={"L": 6, "k": 4, "d": 2, "gamma": 2.0})
+    model = GkmSVM(
+        sv,
+        rng.normal(size=30),
+        0.1,
+        kernel_type="gkmrbf",
+        kernel_params={"L": 6, "k": 4, "d": 2, "gamma": 2.0},
+    )
     weights = np.asarray(model.to_deltasvm(query_norm=query_norm).weights)
     idx = rng.choice(4**6, 50, replace=False)
-    lmers = np.eye(4)[(idx[:, None] // 4 ** np.arange(5, -1, -1)) % 4].transpose(0, 2, 1)
+    lmers = np.eye(4)[(idx[:, None] // 4 ** np.arange(5, -1, -1)) % 4].transpose(
+        0, 2, 1
+    )
     expected = np.asarray(model(np.ascontiguousarray(lmers))).ravel() - model.bias
     np.testing.assert_allclose(weights[idx], expected, rtol=1e-6, atol=1e-7)
 

@@ -28,9 +28,9 @@
   #define EXPORT __attribute__((visibility("default")))
 #endif
 
-/* Callback: fill out[0..N-1] with normalized K(idx, :). `cache` is the
- * solver's column cache, so the callback may add extra (prefetched) columns
- * with csmo_cache_insert(). */
+/* Callback: fill out[0..N-1] with normalized K(idx, :) over the N training
+ * sequences. `cache` is the solver's column cache, so the callback may add
+ * extra (prefetched) columns with csmo_cache_insert(). */
 typedef void (*column_callback_t)(int idx, int N, double *out, void *cache);
 
 /* ------------------------------------------------------------------ */
@@ -172,16 +172,24 @@ EXPORT int csmo_cache_insert(void *cache, int idx, const double *col) {
 /* ------------------------------------------------------------------ */
 
 /*
+ * Solves min 1/2 a'Qa + p'a, y'a = 0, 0 <= a_t <= C_t over n dual
+ * variables, Q_st = y_s y_t K(s mod N, t mod N) (LIBSVM's form): C-SVC is
+ * n = N with p = -1; epsilon-SVR is n = 2N, y = (+1, -1), p = (eps - z,
+ * eps + z), so variable t and t + N share sequence t's kernel column.
+ *
  * Returns: number of iterations performed.
- *   alpha_out[0..N-1] = y[i] * alpha[i]  (signed dual coefficients)
+ *   alpha_out[0..n-1] = y[t] * alpha[t]  (signed dual coefficients)
  *   *rho_out = bias  (score = K*coef + bias)
  */
 
 
 EXPORT int csmo_solve(
+    int n,
     int N,
     const double *y,
-    double C,
+    const double *p,
+    double Cp,
+    double Cn,
     double tol,
     int max_iter,
     int cache_columns,
@@ -191,24 +199,26 @@ EXPORT int csmo_solve(
     int verbose,
     double *state
 ) {
-    /* state is caller-owned [3N]: the solver keeps alpha in state[0:N] and
-     * the gradient G in state[N:2N], and flags cached columns in
-     * state[2N:3N], so the column callback can see them (to prefetch
+    /* state is caller-owned [2n + N]: the solver keeps alpha in state[0:n]
+     * and the gradient G in state[n:2n], and flags cached columns in
+     * state[2n:2n+N], so the column callback can see them (to prefetch
      * columns the solver will likely need). */
     double *alpha = state;
-    double *G     = state + N;
-    for (int i = 0; i < N; i++) alpha[i] = 0.0;
-    int    *active = (int *)malloc(N * sizeof(int));
-    int n_active = N;
+    double *G     = state + n;
+    /* Upper bound of alpha[t]: Cp for positives, Cn for negatives (LS-GKM -w) */
+#define C_OF(t) (y[t] > 0 ? Cp : Cn)
+    for (int i = 0; i < n; i++) alpha[i] = 0.0;
+    int    *active = (int *)malloc(n * sizeof(int));
+    int n_active = n;
 
-    for (int i = 0; i < N; i++) {
-        G[i] = -1.0;
+    for (int i = 0; i < n; i++) {
+        G[i] = p[i];
         active[i] = 1;
     }
 
-    ColumnCache *cache = cache_create(cache_columns, N, get_column, state + 2 * N);
+    ColumnCache *cache = cache_create(cache_columns, N, get_column, state + 2 * n);
 
-    int shrink_interval = N > 1000 ? N : 1000;
+    int shrink_interval = n > 1000 ? n : 1000;
     int unshrink_needed = 0;
 
     double gap = INFINITY;
@@ -225,11 +235,11 @@ EXPORT int csmo_solve(
         M_val = INFINITY;
         int i_best = -1;
 
-        for (int t = 0; t < N; t++) {
+        for (int t = 0; t < n; t++) {
             if (!active[t]) continue;
             double neg_yG = -y[t] * G[t];
-            int in_up  = (y[t] > 0 && alpha[t] < C) || (y[t] < 0 && alpha[t] > 0);
-            int in_low = (y[t] > 0 && alpha[t] > 0) || (y[t] < 0 && alpha[t] < C);
+            int in_up  = (y[t] > 0 && alpha[t] < Cp) || (y[t] < 0 && alpha[t] > 0);
+            int in_low = (y[t] > 0 && alpha[t] > 0) || (y[t] < 0 && alpha[t] < Cn);
             if (in_up && neg_yG > m_val) {
                 m_val = neg_yG;
                 i_best = t;
@@ -241,8 +251,8 @@ EXPORT int csmo_solve(
 
         if (i_best < 0) {
             if (unshrink_needed) {
-                for (int t = 0; t < N; t++) active[t] = 1;
-                n_active = N;
+                for (int t = 0; t < n; t++) active[t] = 1;
+                n_active = n;
                 unshrink_needed = 0;
                 continue;
             }
@@ -253,7 +263,7 @@ EXPORT int csmo_solve(
 
         if (verbose && iteration % 1000 == 0) {
             int n_sv = 0;
-            for (int t = 0; t < N; t++)
+            for (int t = 0; t < n; t++)
                 if (alpha[t] > 1e-10) n_sv++;
             clock_gettime(CLOCK_MONOTONIC, &t_now);
             double elapsed = (t_now.tv_sec - t_start.tv_sec)
@@ -263,14 +273,14 @@ EXPORT int csmo_solve(
             fprintf(stderr,
                 "  iter %8d  gap=%.4e  SVs=%d  active=%d/%d  "
                 "cache hit=%.0f%%  %.1fs\n",
-                iteration, gap, n_sv, n_active, N, hr, elapsed);
+                iteration, gap, n_sv, n_active, n, hr, elapsed);
             fflush(stderr);
         }
 
         if (gap < tol) {
             if (unshrink_needed) {
-                for (int t = 0; t < N; t++) active[t] = 1;
-                n_active = N;
+                for (int t = 0; t < n; t++) active[t] = 1;
+                n_active = n;
                 unshrink_needed = 0;
                 continue;
             }
@@ -280,11 +290,11 @@ EXPORT int csmo_solve(
         /* Shrinking */
         if (iteration > 0 && iteration % shrink_interval == 0) {
             int shrunk = 0;
-            for (int t = 0; t < N; t++) {
+            for (int t = 0; t < n; t++) {
                 if (!active[t]) continue;
                 double neg_yG = -y[t] * G[t];
                 int at_zero = alpha[t] < 1e-10;
-                int at_C = alpha[t] > C - 1e-10;
+                int at_C = alpha[t] > C_OF(t) - 1e-10;
                 int do_shrink = 0;
                 if (at_zero && y[t] > 0 && neg_yG < M_val) do_shrink = 1;
                 if (at_zero && y[t] < 0 && neg_yG > m_val) do_shrink = 1;
@@ -300,7 +310,7 @@ EXPORT int csmo_solve(
                 unshrink_needed = 1;
                 if (verbose) {
                     fprintf(stderr, "  shrink: removed %d, active=%d/%d\n",
-                            shrunk, n_active, N);
+                            shrunk, n_active, n);
                     fflush(stderr);
                 }
                 continue;
@@ -308,22 +318,22 @@ EXPORT int csmo_solve(
         }
 
         /* WSS3: select j by second-order gain */
-        double *K_col_i = cache_get(cache, i_best);
+        double *K_col_i = cache_get(cache, i_best < N ? i_best : i_best - N);
 
         int j_best = -1;
         double best_gain = -INFINITY;
 
-        for (int t = 0; t < N; t++) {
+        for (int t = 0; t < n; t++) {
             if (!active[t]) continue;
             double neg_yG = -y[t] * G[t];
-            int in_low = (y[t] > 0 && alpha[t] > 0) || (y[t] < 0 && alpha[t] < C);
+            int in_low = (y[t] > 0 && alpha[t] > 0) || (y[t] < 0 && alpha[t] < Cn);
             if (!in_low || neg_yG >= m_val) continue;
 
             double b = m_val - neg_yG;
             /* Q_ii = 1 for normalized, K_col_i[i_best] = 1,
                Q_jj = 1, a = 2 - 2*K(i,j) for normalized.
                General: a = Q_diag[i] + Q_diag[j] - 2*K(i,j). */
-            double a = 1.0 + 1.0 - 2.0 * K_col_i[t];
+            double a = 1.0 + 1.0 - 2.0 * K_col_i[t < N ? t : t - N];
             if (a < 1e-12) a = 1e-12;
             double gain = b * b / a;
             if (gain > best_gain) {
@@ -334,19 +344,19 @@ EXPORT int csmo_solve(
 
         if (j_best < 0) {
             if (unshrink_needed) {
-                for (int t = 0; t < N; t++) active[t] = 1;
-                n_active = N;
+                for (int t = 0; t < n; t++) active[t] = 1;
+                n_active = n;
                 unshrink_needed = 0;
                 continue;
             }
             break;
         }
 
-        double *K_col_j = cache_get(cache, j_best);
+        double *K_col_j = cache_get(cache, j_best < N ? j_best : j_best - N);
 
         /* Compute step */
         int i = i_best, j = j_best;
-        double K_ij = K_col_i[j];
+        double K_ij = K_col_i[j < N ? j : j - N];
         double a = 1.0 + 1.0 - 2.0 * K_ij;
         if (a <= 0) a = 1e-12;
 
@@ -354,14 +364,15 @@ EXPORT int csmo_solve(
         double b = -s * G[i] + G[j];
         double d_j = -b / a;
 
-        /* Box constraints */
+        /* Box constraints: 0 <= alpha[i] + d_i <= C_i, 0 <= alpha[j] + d_j <= C_j */
         double lo, hi;
+        double C_i = C_OF(i), C_j = C_OF(j);
         if (s > 0) {
-            lo = (alpha[i] - C > -alpha[j]) ? alpha[i] - C : -alpha[j];
-            hi = (C - alpha[j] < alpha[i]) ? C - alpha[j] : alpha[i];
+            lo = (alpha[i] - C_i > -alpha[j]) ? alpha[i] - C_i : -alpha[j];
+            hi = (C_j - alpha[j] < alpha[i]) ? C_j - alpha[j] : alpha[i];
         } else {
             lo = (-alpha[i] > -alpha[j]) ? -alpha[i] : -alpha[j];
-            hi = (C - alpha[i] < C - alpha[j]) ? C - alpha[i] : C - alpha[j];
+            hi = (C_i - alpha[i] < C_j - alpha[j]) ? C_i - alpha[i] : C_j - alpha[j];
         }
         if (d_j < lo) d_j = lo;
         if (d_j > hi) d_j = hi;
@@ -375,11 +386,15 @@ EXPORT int csmo_solve(
             G[t] += d_i * y[i] * y[t] * K_col_i[t]
                   + d_j * y[j] * y[t] * K_col_j[t];
         }
+        for (int t = N; t < n; t++) {
+            G[t] += d_i * y[i] * y[t] * K_col_i[t - N]
+                  + d_j * y[j] * y[t] * K_col_j[t - N];
+        }
     }
 
     if (verbose) {
         int n_sv = 0;
-        for (int t = 0; t < N; t++)
+        for (int t = 0; t < n; t++)
             if (alpha[t] > 1e-10) n_sv++;
         clock_gettime(CLOCK_MONOTONIC, &t_now);
         double elapsed = (t_now.tv_sec - t_start.tv_sec)
@@ -397,8 +412,8 @@ EXPORT int csmo_solve(
     double rho;
     int n_free = 0;
     double sum_free = 0.0;
-    for (int t = 0; t < N; t++) {
-        if (alpha[t] > 1e-10 && alpha[t] < C - 1e-10) {
+    for (int t = 0; t < n; t++) {
+        if (alpha[t] > 1e-10 && alpha[t] < C_OF(t) - 1e-10) {
             sum_free += y[t] * G[t];
             n_free++;
         }
@@ -409,7 +424,7 @@ EXPORT int csmo_solve(
         rho = -(m_val + M_val) / 2.0;
 
     /* Output: signed coefficients */
-    for (int t = 0; t < N; t++)
+    for (int t = 0; t < n; t++)
         alpha_out[t] = alpha[t] * y[t];
     *rho_out = -rho;
 
@@ -417,6 +432,7 @@ EXPORT int csmo_solve(
     free(active);
 
     return iteration;
+#undef C_OF
 }
 
 /* Python extension module — allows setuptools to compile and install

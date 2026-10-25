@@ -6,12 +6,13 @@ transparently.
 
 Install extras for GPU support::
 
-    pip install gkmsvm-lite[gpu]   # NVIDIA (CuPy)
-    pip install gkmsvm-lite[mlx]   # Apple Silicon (MLX)
+    uv pip install "gkmsvm-lite[gpu]"   # NVIDIA (CuPy)
+    uv pip install "gkmsvm-lite[mlx]"   # Apple Silicon (MLX)
 """
 
 from __future__ import annotations
 
+import functools
 from typing import Any
 
 import numpy as np
@@ -23,6 +24,20 @@ try:
 except ImportError:
     cp = None  # type: ignore[assignment]
     HAS_CUPY = False
+
+
+@functools.lru_cache(maxsize=None)
+def cuda_available() -> bool:
+    """Whether CuPy has a CUDA GPU to run on. HAS_CUPY only says CuPy imports,
+    which it also does on machines without a GPU (a cluster's CPU nodes can carry
+    an NVIDIA driver library, often an old one), so ``"auto"`` checks this."""
+    if not HAS_CUPY:
+        return False
+    try:
+        return cp.cuda.runtime.getDeviceCount() > 0
+    except Exception:  # no driver, a driver too old for CuPy's runtime, no device
+        return False
+
 
 try:
     import mlx.core as mx
@@ -46,7 +61,7 @@ def to_gpu(x: np.ndarray) -> Any:
     """Move a numpy array to GPU (CuPy)."""
     if not HAS_CUPY:
         raise RuntimeError(
-            "CuPy is not installed. Install with: pip install gkmsvm-lite[gpu]"
+            'CuPy is not installed. Install with: uv pip install "gkmsvm-lite[gpu]"'
         )
     return cp.asarray(x)
 
@@ -55,7 +70,7 @@ def to_mlx(x: np.ndarray) -> Any:
     """Move a numpy array to MLX."""
     if not HAS_MLX:
         raise RuntimeError(
-            "MLX is not installed. Install with: pip install gkmsvm-lite[mlx]"
+            'MLX is not installed. Install with: uv pip install "gkmsvm-lite[mlx]"'
         )
     return mx.array(x)
 
@@ -137,7 +152,7 @@ class DeviceModel:
         elif device == "mlx":
             self.mlx()
         elif device == "auto":
-            if HAS_CUPY:
+            if cuda_available():
                 self.cuda()
             elif HAS_MLX:
                 self.mlx()
@@ -182,17 +197,14 @@ class _MlxShim:
     """Wraps mlx.core to provide numpy-compatible operations.
 
     Forwards most attributes to mlx.core. Overrides operations where
-    the API differs: rint, ascontiguousarray, as_strided, einsum
-    argument order, etc.
+    the API differs (ascontiguousarray, asarray, as_strided) and the 64-bit
+    dtypes, which Metal lacks (float64 -> float32, int64 -> int32).
     """
 
     def __getattr__(self, name: str) -> Any:
         return getattr(mx, name)
 
     # --- numpy-compatible aliases ---
-
-    def rint(self, x: Any) -> Any:
-        return mx.round(x)
 
     def ascontiguousarray(self, x: Any, dtype: Any = None) -> Any:
         if dtype is not None:
@@ -209,13 +221,6 @@ class _MlxShim:
         if dtype is not None:
             arr = arr.astype(dtype)
         return arr
-
-    def asnumpy(self, x: Any) -> np.ndarray:
-        return np.array(x)
-
-    @property
-    def newaxis(self) -> None:
-        return None
 
     # --- stride tricks ---
 
@@ -236,24 +241,8 @@ class _MlxShim:
         return mx.float32
 
     @property
-    def float32(self) -> Any:
-        return mx.float32
-
-    @property
     def int64(self) -> Any:
         return mx.int32
-
-    @property
-    def int8(self) -> Any:
-        return mx.int8
-
-    @property
-    def uint32(self) -> Any:
-        return mx.uint32
-
-    @property
-    def bool_(self) -> Any:
-        return mx.bool_
 
     # --- module identity ---
 
@@ -265,17 +254,11 @@ class _MlxShim:
 def _mlx_sliding_windows(x: Any, shape: tuple, strides: tuple) -> Any:
     """Implement as_strided for MLX using mx.as_strided.
 
-    Only handles the sliding-window patterns used in gkmsvm:
-    - [B, C, W, l] from [B, C, L] (one-hot windows: weighted kernels, DeltaSVM)
-    - [B, W, l] from [B, L]
+    Only handles the sliding-window pattern used in gkmsvm: [B, W, l] from
+    [B, L] (DeltaSVM's windows of base codes).
     """
     ndim_in = x.ndim
     ndim_out = len(shape)
-
-    if ndim_in == 3 and ndim_out == 4:
-        B, C, L = x.shape
-        _, _, W, l = shape
-        return mx.as_strided(x, shape=(B, C, W, l), strides=(C * L, L, 1, 1))
 
     if ndim_in == 2 and ndim_out == 3:
         B, L = x.shape

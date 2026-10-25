@@ -31,7 +31,7 @@ Timed runs each execute in their own process, so the reported peak memory is tha
 | 1C | Time and memory to score the 28,309 dsQTL variants: ISM and GkmExplain per variant; deltaSVM as a one-time 10-mer table build, then scoring with the table | `fig1c` | `timing_variants.py` | `timing_variants.tsv` |
 | 1D | dsQTL AUPRC with the paper's models | `fig1d` | `dsqtl_auprc.py` | `dsqtl_summed.tsv`, `dsqtl_per_model.tsv` |
 | S1 | Models trained with gkmsvm-lite vs the paper's LS-GKM models | `s1` | `dsqtl_auprc.py` | `dsqtl_retrained_*.tsv` |
-| S2 | Prediction throughput vs number of SVs (`-t 2` l-mer table, `-t 3` l-mer index, masked join, LS-GKM) | `s2` | `throughput_sweep.py` | `throughput.tsv` |
+| S2 | Prediction throughput vs number of SVs (`-t 2` l-mer table, `-t 3` l-mer index, LS-GKM) | `s2` | `throughput_sweep.py` | `throughput.tsv` |
 | S3 | Training time, peak memory and held-out accuracy by solver (precomputed Gram, SMO, Nyström, LS-GKM), gkmsvm-lite on GPU and on CPU | `s3` | `training_memory.py` | `training_memory.tsv`, `training_memory_cpu.tsv` |
 | S3B | Large-N scaling on LS-GKM's own design (Lee 2016, Fig. 1): H1-hESC CTCF ChIP-seq vs GC/repeat-matched hg19 windows, 5k–90k, LS-GKM with 100 MB and 8 GB caches. Not part of `paper`: up to a day | `s3b` | `ctcf_data.py`, `training_memory.py --data ctcf` | `training_memory_ctcf.tsv` |
 | S4 | GkmExplain completeness | `s4` | `completeness.py` | `completeness.tsv` |
@@ -64,7 +64,7 @@ Each set reruns the whole panel, LS-GKM included, since the host's CPU changes t
 
 ## Running on a server
 
-`run.sh` sets up a machine and runs targets from its existing checkout. It creates the `lsgkm` and `gkmsvm-bench` conda envs if missing, installs the checkout into `gkmsvm-bench` (`[examples,gpu]` extras), and runs `make` there. It doesn't touch git, so check out the commit you want first; result headers record it.
+`run.sh` sets up a machine and runs targets from its existing checkout. It creates the `lsgkm` and `gkmsvm-bench` conda envs if missing, installs the checkout into `gkmsvm-bench` with uv (`[examples,gpu]` extras), and runs `make` there. It doesn't touch git, so check out the commit you want first; result headers record it.
 
 ```bash
 bash benchmarks/run.sh fig1b s2
@@ -139,6 +139,8 @@ bash benchmarks/run.sh --mlsgkm-bin <path>/mLS-GKM/bin
 
 With it, 1C adds mLS-GKM rows at every CPU thread count (`gkmpredict -D -t N -T 1`, `gkmexplain -D -m 5 -t N`), S2 adds its `gkmpredict` at `THREADS`, and 1B adds `t_mlsgkm_infer` (prediction with the LS-GKM-trained model). Training stays LS-GKM's `gkmtrain`. 1C's mLS-GKM rows record `max_abs_diff` against LS-GKM's output, a check that both compute the same scores.
 
+mLS-GKM's `gkmexplain` (commit 2bb06be, 2026-08-30) is wrong for non-RBF models in every mode: on `-t 2` it logs "kmertree for SVs has not been initialized", writes zeros (mode 5) or near-zero attributions, and exits 0. On `-t 3` it equals the kundajelab fork exactly. 1C uses the paper's `-t 3` models; `timing_variants.py` skips mLS-GKM's `gkmexplain` for any other kernel.
+
 ## `dev/`
 
-Experiments that don't feed a figure: the CUDA masked-join ablation, the Nanog replication, and SVR and caQTL training. Finished experiments are deleted once their result is recorded (the earlier solver comparisons, the Nyström landmark sweep and the mask-join prototypes are in git history). Run them from the repo root, e.g. `python benchmarks/dev/replicate_nanog.py`.
+Experiments that don't feed a figure: the CUDA masked-join ablation, the self-Gram through the l-mer index vs the masked join (`gram_index_vs_masked.py`), the Nanog replication, and SVR and caQTL training. Finished experiments are deleted once their result is recorded (the earlier solver comparisons, the Nyström landmark sweep and the mask-join prototypes are in git history). Run them from the repo root, e.g. `python benchmarks/dev/replicate_nanog.py`.

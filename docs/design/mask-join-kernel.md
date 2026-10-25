@@ -1,6 +1,6 @@
 # Masked-join gkm kernel: handoff
 
-Status: implemented on `main`. The masked join serves Gram tiles and SMO columns for `-t 0` to `-t 5` on CPU, CUDA and MLX (Metal join with int32 counts); the exact l-mer table serves prediction and `to_deltasvm` for `-t 0/1/2/4`; a cached l-mer index serves scoring, ISM and mutation impact against a model's SVs, and SMO columns over the training set, for `-t 1/2/3`. Open: CUDA join tuning from a hardware profile, and the optimizations listed near the end. The sections below keep the design rationale and the measurements that motivated each step.
+Status: implemented on `main`. The masked join serves Gram tiles and SMO columns for `-t 0` to `-t 5` on CPU, CUDA and MLX (Metal join with int32 counts); the exact l-mer table serves prediction and `to_deltasvm` for `-t 0/1/2/4`; a cached l-mer index serves scoring, ISM and mutation impact against a model's SVs, and SMO columns over the training set, for `-t 1`-`-t 5`. Open: CUDA join tuning from a hardware profile, and the optimizations listed near the end. The sections below keep the design rationale and the measurements that motivated each step.
 
 ## Goal
 
@@ -71,6 +71,8 @@ Work tile by tile, like `compute_gram` does now: a block of A query sequences ag
 
 Then normalize with the diagonal and, for `-t 3`, apply `exp(γ(K − 1))`, exactly as `compute_gram` does now.
 
+Which strand gets the RC: the column-side build costs about twice as much per window as a query-side probe, and it scales with the SV count when scoring. Since K(x, rc(y)) = K(rc(x), y), `raw_packed` indexes only the forward columns and probes with each query row's RC and forward windows (`packed._with_rc_rows`) whenever the columns hold more windows than the rows. On an M4, `-t 2` l11 k7 d3 with 930 queries took 1.2x less time at 4k SVs, 1.56x at 16k and 1.49x at 72k. With more rows than columns (Gram panels, SMO columns) it lost (0.81x at 4,000 rows × 1,000 columns), so those keep the RC on the column side. Indexing the queries and streaming the SVs instead gained nothing (0.9x): every SV window still computes a key per mask. Larger mask chunks (more threads building at once) were slower (0.5 GiB 38.8 s, 1.5 GiB 54.8 s at 72k SVs): the build is bound by memory bandwidth.
+
 Diagonal tiles keep the symmetry trick: process only query < column, plus the diagonal, and mirror. The self-kernel diagonal K(x, x) can stay brute force (O(N W²), small) or use the same join with A = B = one sequence.
 
 ### CPU (Numba)
@@ -130,8 +132,8 @@ SMO columns use the same index built over the training set: a column K(i, :) is 
 
 | Entry point | Path today | File |
 |---|---|---|
-| Gram tiles (`compute_gram`: libsvm, Nyström) | Masked join in column panels | `gram.py` |
-| SMO kernel columns (`KernelColumnCache.compute_columns`) | l-mer index over the training set (`-t 1/2/3`), else batched masked join | `solver.py` |
+| Gram tiles (`compute_gram`: libsvm, Nyström) | l-mer index over the columns (self-Gram rows from the diagonal on; not on MLX), else masked join in column panels | `gram.py` |
+| SMO kernel columns (`KernelColumnCache.compute_columns`) | l-mer index over the training set (`-t 1`-`-t 5`), else batched masked join | `solver.py` |
 | Prediction `-t 0/1/2/4` | Exact l-mer table | `svm.py`, `lmer_table.py` |
 | Prediction `-t 3`, other kernels; ISM; mutation impact | Cached l-mer index over the SVs, else masked join | `svm.py`, `ism.py`, `explain.py` |
 | `to_deltasvm` | l-mer table, else scoring all 4^l l-mers | `svm.py` |
@@ -199,7 +201,7 @@ Targets:
 ## Files
 
 - `src/gkmsvm/kernels/packed.py`: `PackedGkmKernel` (`pack`, `raw_packed`, `raw_diag_packed`), `PAD_WINDOW`.
-- `src/gkmsvm/kernels/direct.py`: brute-force packed kernels (`_fused_pairwise_packed_numba`, `_fused_pairwise_packed_sym_numba`, CUDA and Metal equivalents), `_min_matches`.
+- `src/gkmsvm/kernels/direct.py`: brute-force packed kernels (`_fused_pairwise_packed_numba`, CUDA and Metal equivalents), `_min_matches`.
 - `src/gkmsvm/kernels/masked.py`: mask plans (`mask_plan`) and the joins on CPU, CUDA and Metal.
 - `src/gkmsvm/kernels/lmer_index.py`: the cached l-mer index.
 - `src/gkmsvm/lmer_table.py`: exact l-mer table build.

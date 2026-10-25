@@ -8,7 +8,11 @@ from numba import njit, prange
 from gkmsvm.backend import DeviceModel, float_dtype, get_array_module, to_cpu
 from gkmsvm.kernels.direct import DirectGkmKernel
 from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
-from gkmsvm.kernels.packed import PackedGkmKernel
+from gkmsvm.kernels.packed import (
+    PAD_WINDOW,
+    PackedGkmKernel,
+    is_padded,
+)
 from gkmsvm.kernels.rbf import RbfGkmKernel, RbfKernel
 from gkmsvm.kernels.weighted import (
     CenterWeightedGkmKernel,
@@ -40,76 +44,66 @@ def _normalized_dot(raw, diag_x, diag_sv, norm, coef, gamma):
         out[b] = acc
     return out
 
+
 # Kernel modes:
-#   -t 0  gkm_cnt       / direct          Exact gapped k-mer count
+#   -t 0  gkm_cnt       / direct          Gapped k-mer count (pairs within d mismatches)
 #   -t 1  gkm_estfull   / estimated_full  Estimated l-mer kernel, full
 #   -t 2  gkm_esttrunc  / estimated       Estimated l-mer kernel, truncated (default)
 #   -t 3  gkmrbf        / rbf             RBF on estimated kernel
 #   -t 4  wgkm          / weighted        Center-weighted gapped k-mer
 #   -t 5  wgkmrbf       / weighted_rbf    Center-weighted RBF
+#   -t 6  gkm_cnt_rbf   / direct_rbf      RBF on the gapped k-mer count kernel
+#                                         (kundajelab/lsgkm fork)
+
+
+def _kernel_args(p, d=3, **extra):
+    """The keyword arguments every kernel builder shares; d is d's default."""
+    return dict(
+        l=p["L"],
+        k=p["k"],
+        d=p.get("d", d),
+        normalize=True,
+        include_rc=p.get("include_rc", True),
+        **extra,
+    )
+
+
+def _gamma(p):
+    return {"gamma": p.get("gamma", 1.0)}
+
+
+def _weights(p):
+    return {"M": p.get("M", 50), "H": p.get("H", 50.0)}
+
 
 KERNEL_BUILDERS = {
-    "gkm_cnt": lambda p: DirectGkmKernel(
-        l=p["L"], k=p["k"], normalize=True, include_rc=p.get("include_rc", True)
-    ),
-    "gkm_esttrunc": lambda p: EstTruncGkmKernel(
-        l=p["L"],
-        k=p["k"],
-        d=p.get("d", 3),
-        normalize=True,
-        include_rc=p.get("include_rc", True),
-        truncate=True,
-    ),
-    "gkm_estfull": lambda p: EstTruncGkmKernel(
-        l=p["L"],
-        k=p["k"],
-        d=p.get("d", 3),
-        normalize=True,
-        include_rc=p.get("include_rc", True),
-        truncate=False,
-    ),
-    "gkmrbf": lambda p: RbfGkmKernel(
-        l=p["L"],
-        k=p["k"],
-        d=p.get("d", 3),
-        gamma=p.get("gamma", 1.0),
-        normalize=True,
-        include_rc=p.get("include_rc", True),
-    ),
-    "wgkm": lambda p: CenterWeightedGkmKernel(
-        l=p["L"],
-        k=p["k"],
-        d=p.get("d", 3),
-        M=p.get("M", 50),
-        H=p.get("H", 50.0),
-        normalize=True,
-        include_rc=p.get("include_rc", True),
-    ),
+    # No d: every pair counts (models saved before d applied to -t 0)
+    "gkm_cnt": lambda p: DirectGkmKernel(**_kernel_args(p, d=None)),
+    "gkm_esttrunc": lambda p: EstTruncGkmKernel(**_kernel_args(p, truncate=True)),
+    "gkm_estfull": lambda p: EstTruncGkmKernel(**_kernel_args(p, truncate=False)),
+    "gkmrbf": lambda p: RbfGkmKernel(**_kernel_args(p, **_gamma(p))),
+    "wgkm": lambda p: CenterWeightedGkmKernel(**_kernel_args(p, **_weights(p))),
     "wgkmrbf": lambda p: CenterWeightedRbfGkmKernel(
-        l=p["L"],
-        k=p["k"],
-        d=p.get("d", 3),
-        M=p.get("M", 50),
-        H=p.get("H", 50.0),
-        gamma=p.get("gamma", 1.0),
-        normalize=True,
-        include_rc=p.get("include_rc", True),
+        **_kernel_args(p, **_weights(p), **_gamma(p))
     ),
+    "gkm_cnt_rbf": lambda p: RbfKernel(DirectGkmKernel(**_kernel_args(p)), **_gamma(p)),
 }
 
 KERNEL_ALIASES: dict[str | int, str] = {
-    "direct":         "gkm_cnt",
-    "estimated":      "gkm_esttrunc",
+    "direct": "gkm_cnt",
+    "estimated": "gkm_esttrunc",
     "estimated_full": "gkm_estfull",
-    "rbf":            "gkmrbf",
-    "weighted":       "wgkm",
-    "weighted_rbf":   "wgkmrbf",
+    "rbf": "gkmrbf",
+    "weighted": "wgkm",
+    "weighted_rbf": "wgkmrbf",
+    "direct_rbf": "gkm_cnt_rbf",
     0: "gkm_cnt",
     1: "gkm_estfull",
     2: "gkm_esttrunc",
     3: "gkmrbf",
     4: "wgkm",
     5: "wgkmrbf",
+    6: "gkm_cnt_rbf",
 }
 
 
@@ -117,14 +111,16 @@ def resolve_kernel_type(kernel_type: str | int) -> str:
     """Resolve a kernel type alias or ``-t N`` integer to the internal name.
 
     Accepts: internal names (``gkm_cnt``), aliases (``direct``),
-    or LS-GKM ``-t`` integers (``0``).
+    or LS-GKM ``-t`` integers (``0``, or ``"0"`` as the CLI passes it).
     """
+    if isinstance(kernel_type, str) and kernel_type.strip().isdigit():
+        kernel_type = int(kernel_type)
     if isinstance(kernel_type, int):
         canonical = KERNEL_ALIASES.get(kernel_type)
         if canonical is None:
             raise ValueError(
                 f"Unknown kernel type integer {kernel_type}. "
-                f"Valid: 0-5 (LS-GKM -t flag)"
+                f"Valid: 0-6 (LS-GKM -t flag; 6 from the kundajelab fork)"
             )
         return canonical
     if kernel_type in KERNEL_BUILDERS:
@@ -132,14 +128,149 @@ def resolve_kernel_type(kernel_type: str | int) -> str:
     canonical = KERNEL_ALIASES.get(kernel_type)
     if canonical is not None:
         return canonical
-    supported = ", ".join(
-        f"{a!r}" for a in KERNEL_ALIASES if isinstance(a, str)
-    )
+    supported = ", ".join(f"{a!r}" for a in KERNEL_ALIASES if isinstance(a, str))
     raise NotImplementedError(
         f"Unknown kernel type {kernel_type!r}. "
         f"Aliases: {supported}. "
         f"Internal names: {', '.join(KERNEL_BUILDERS)}"
     )
+
+
+# LS-GKM's MAX_SEQ_LENGTH (libsvm_gkm.h) is 2048: gkmtrain/gkmpredict read
+# at most this many bases of a sequence, with a warning
+LSGKM_MAX_LENGTH = 2047
+
+
+def _uniform_or_lengths(lengths, shape) -> np.ndarray | None:
+    """lengths as host int64 [B], or None when every row is shape[-1] long."""
+    if lengths is None:
+        return None
+    lengths = np.asarray(to_cpu(lengths), dtype=np.int64).reshape(-1)
+    B, L = shape[0], shape[-1]
+    if lengths.shape[0] != B or (lengths < 0).any() or (lengths > L).any():
+        raise ValueError(f"lengths must be {B} values in 0..{L}")
+    return None if (lengths == L).all() else lengths
+
+
+def as_batch(x, lengths=None):
+    """(x [B, L_max] base codes, lengths or None) from a [B, 4, L] one-hot
+    array or [B, L] codes (with lengths of its rows when they differ), or a
+    list of [4, L_i] one-hot arrays, [L_i] codes or DNA strings (N allowed).
+    Warns about sequences longer than LS-GKM reads."""
+    import warnings
+
+    from gkmsvm.codec import encode_codes, to_codes
+
+    if isinstance(x, (list, tuple)):
+        if lengths is not None:
+            raise ValueError("lengths go with a padded array, not a list")
+        if not len(x):
+            raise ValueError("no sequences")
+        if isinstance(x[0], str):
+            x = [encode_codes(s, allow_n=True) for s in x]
+        else:
+            x = [to_codes(a[None])[0] for a in x]  # [4, L_i] one-hot or [L_i] codes
+        lens = np.array([a.shape[-1] for a in x], dtype=np.int64)
+        xp = get_array_module(x[0])
+        out = xp.zeros((len(x), int(lens.max())), dtype=xp.uint8)
+        for i, a in enumerate(x):
+            out[i, : a.shape[-1]] = a
+        x, lengths = out, lens
+    else:
+        x = to_codes(x)
+    lengths = _uniform_or_lengths(lengths, x.shape)
+    longest = int(x.shape[-1] if lengths is None else lengths.max())
+    if longest > LSGKM_MAX_LENGTH:
+        warnings.warn(
+            f"sequences up to {longest} bp: LS-GKM reads only the first "
+            f"{LSGKM_MAX_LENGTH} bases of longer ones",
+            stacklevel=3,
+        )
+    return x, lengths
+
+
+def _allele_arrays(ref, alt, ref_lengths=None, alt_lengths=None):
+    """(ref, alt, ref_lengths, alt_lengths): both as batches (svm.as_batch) of
+    one length L, padded on the host when they differ; lengths None when
+    every row is L long."""
+    ref, ref_lengths = as_batch(ref, ref_lengths)
+    alt, alt_lengths = as_batch(alt, alt_lengths)
+    if ref.shape[0] != alt.shape[0]:
+        raise ValueError(
+            f"ref and alt hold {ref.shape[0]} and {alt.shape[0]} sequences"
+        )
+    L = max(ref.shape[-1], alt.shape[-1])
+
+    def widen(x, n):
+        if x.shape[-1] == L:
+            return x, n
+        n = np.full(x.shape[0], x.shape[-1], dtype=np.int64) if n is None else n
+        x = to_cpu(x)
+        return np.pad(x, ((0, 0), (0, L - x.shape[-1]))), n
+
+    ref, ref_lengths = widen(ref, ref_lengths)
+    alt, alt_lengths = widen(alt, alt_lengths)
+    return ref, alt, ref_lengths, alt_lengths
+
+
+def _joint_lengths(L, *parts):
+    """Lengths of rows from several batches of one length L (each part a
+    (rows, lengths or None) pair), or None when every row is L long."""
+    if all(n is None for _, n in parts):
+        return None
+    return np.concatenate(
+        [np.full(rows, L, dtype=np.int64) if n is None else n for rows, n in parts]
+    )
+
+
+def _rows(lengths, start, n):
+    """lengths[start:start + n], or None."""
+    return None if lengths is None else lengths[start : start + n]
+
+
+def _progress(chunks, verbose, desc):
+    """chunks, under a tqdm progress bar when verbose."""
+    if not verbose:
+        return chunks
+    from tqdm import tqdm
+
+    return tqdm(chunks, desc=desc)
+
+
+def _short_rows(lengths, l, what="scores"):
+    """[B] bool, rows shorter than l (no windows), or None when there are none."""
+    if lengths is None:
+        return None
+    short = lengths < l
+    if not short.any():
+        return None
+    import warnings
+
+    warnings.warn(
+        f"{int(short.sum())} sequences are shorter than l = {l}: their {what} are NaN",
+        stacklevel=3,
+    )
+    return short
+
+
+def _nan_rows(out, short):
+    """out [B, ...] with the rows in short set to NaN (on out's device)."""
+    if short is None:
+        return out
+    xp = get_array_module(out)
+    mask = xp.asarray(short.reshape(-1, *[1] * (out.ndim - 1)))
+    return xp.where(mask, float("nan"), out)
+
+
+def _per_position(out, lengths, short):
+    """Per-position results out [B, 4, L] with positions past each row's length
+    0 and rows in short NaN (on out's device)."""
+    if lengths is None:
+        return out
+    xp = get_array_module(out)
+    inside = np.arange(out.shape[2])[None, None, :] < lengths[:, None, None]
+    out = xp.where(xp.asarray(inside), out, 0.0).astype(out.dtype)
+    return _nan_rows(out, short)
 
 
 class GkmSVM(DeviceModel):
@@ -162,13 +293,20 @@ class GkmSVM(DeviceModel):
         kernel_type: str | int,
         kernel_params: dict,
         *,
+        sv_lengths=None,
         sv_chunk_size: int | None = None,
         device: str = "cpu",
     ):
-        if support_sequences.ndim != 3 or support_sequences.shape[1] != 4:
+        from gkmsvm.codec import to_codes
+
+        if support_sequences.ndim == 3 and support_sequences.shape[1] != 4:
             raise ValueError(
-                f"support_sequences must be [S, 4, L], got {list(support_sequences.shape)}"
+                f"support_sequences must be [S, 4, L] one-hot or [S, L] base "
+                f"codes, got {list(support_sequences.shape)}"
             )
+        # Stored as [S, L] uint8 base codes (A=0, C=1, G=2, T=3), what the
+        # kernels read; one-hot SVs are converted (N as A)
+        support_sequences = to_codes(support_sequences)
         if coefficients.ndim != 1:
             raise ValueError(
                 f"coefficients must be [S], got {list(coefficients.shape)}"
@@ -180,7 +318,10 @@ class GkmSVM(DeviceModel):
             )
 
         self.support_sequences = support_sequences
-        # One-hot SVs keep the caller's dtype; coefficients are float64 (float32 on MLX)
+        # SVs of different lengths: support_sequences is padded to the longest
+        # and sv_lengths [S] (host int64) gives each one's; None when uniform
+        self.sv_lengths = _uniform_or_lengths(sv_lengths, support_sequences.shape)
+        # Coefficients are float64 (float32 on MLX)
         self.coefficients = coefficients.astype(float_dtype(coefficients))
         self.bias = bias
         self.kernel_type = resolve_kernel_type(kernel_type)
@@ -236,12 +377,14 @@ class GkmSVM(DeviceModel):
         if self._on_mlx:
             try:
                 import mlx.core as mx
+
                 mx.clear_cache()
             except (ImportError, AttributeError):
                 pass
         if self._on_gpu:
             try:
                 import cupy as cp
+
                 cp.get_default_memory_pool().free_all_blocks()
                 cp.get_default_pinned_memory_pool().free_all_blocks()
             except (ImportError, AttributeError):
@@ -275,13 +418,12 @@ class GkmSVM(DeviceModel):
             raise ValueError(f"Unknown format {fmt!r}. Use 'npz' or 'lsgkm'.")
 
     def _sv_packed(self):
-        """(fwd, rc or None) packed SV windows, or None when the base kernel has
-        no packed path."""
+        """(fwd, rc or None) packed SV windows (cached)."""
         c = self._sv_cache
         if "packed" not in c:
-            base = self.kernel.base
-            sv = self.support_sequences
-            c["packed"] = base.pack_both(sv) if isinstance(base, PackedGkmKernel) else None
+            c["packed"] = self.kernel.base.pack_both(
+                self.support_sequences, self.sv_lengths
+            )
         return c["packed"]
 
     def _inv_norms(self, diag_x, B):
@@ -289,19 +431,17 @@ class GkmSVM(DeviceModel):
         normalization)."""
         if diag_x is None:
             return np.ones(B), np.ones(self.num_support_vectors)
-        return (1 / np.sqrt(np.clip(np.asarray(diag_x, dtype=np.float64), 1e-20, None)),
-                1 / np.sqrt(np.clip(to_cpu(self._sv_diag()).astype(np.float64), 1e-20, None)))
+        return (
+            1 / np.sqrt(np.clip(np.asarray(diag_x, dtype=np.float64), 1e-20, None)),
+            1
+            / np.sqrt(np.clip(to_cpu(self._sv_diag()).astype(np.float64), 1e-20, None)),
+        )
 
     def _sv_diag(self) -> np.ndarray:
         """Base-kernel K_raw(sv, sv) on the model's device (cached)."""
         c = self._sv_cache
         if "diag" not in c:
-            packed = self._sv_packed()
-            base = self.kernel.base
-            if packed is None:
-                diag = base._raw_diagonal(self.support_sequences, chunk_size=1000)
-            else:
-                diag = base.raw_diag_packed(*packed)
+            diag = self.kernel.base.raw_diag_packed(*self._sv_packed())
             c["diag"] = diag.astype(float_dtype(diag))
         return c["diag"]
 
@@ -316,7 +456,7 @@ class GkmSVM(DeviceModel):
 
             packed = self._sv_packed()
             base = self.kernel.base
-            n_windows = 0 if packed is None else sum(p.size for p in packed if p is not None)
+            n_windows = sum(p.size for p in packed if p is not None)
             use = n_windows > 0 and lmer_index.applies(base, n_windows)
             c["index"] = lmer_index.LmerIndex(base, *packed) if use else None
         return c["index"]
@@ -328,15 +468,13 @@ class GkmSVM(DeviceModel):
             return index.pairwise(bx)
         return self.kernel.base.raw_packed(bx, *self._sv_packed())
 
-    def _sv_scores(self, x):
-        """sum_s coef_s K(x, sv_s) [B, 1] of one-hot x (on the model's device)."""
+    def _sv_scores(self, x, lengths=None):
+        """sum_s coef_s K(x, sv_s) [B, 1] of one-hot x (on the model's device);
+        lengths: each row's length when they differ."""
         kernel = self.kernel
         base = kernel.base
-        if self._sv_packed() is None:
-            return (kernel.pairwise(x, self.support_sequences)
-                    * self.coefficients).sum(axis=1, keepdims=True)
         xp = get_array_module(x)
-        bx, bx_rc = base.pack_both(x)
+        bx, bx_rc = base.pack_both(x, lengths)
         diag_x = base.raw_diag_packed(bx, bx_rc) if base.normalize else None
         gamma = kernel.gamma if isinstance(kernel, RbfKernel) else np.nan
         index = self._sv_index()
@@ -352,24 +490,38 @@ class GkmSVM(DeviceModel):
                 np.ascontiguousarray(raw, dtype=np.float64),
                 diag_x.astype(np.float64) if norm else np.ones(1),
                 self._sv_diag().astype(np.float64) if norm else np.ones(1),
-                norm, self.coefficients.astype(np.float64), float(gamma))
+                norm,
+                self.coefficients.astype(np.float64),
+                float(gamma),
+            )
             return out[:, None]
         k = raw.astype(float_dtype(x))
         if diag_x is not None:
-            k = k / xp.clip(xp.sqrt(diag_x.astype(float_dtype(x))[:, None]
-                                    * self._sv_diag()[None, :]),
-                            1e-10, None)
+            k = k / xp.clip(
+                xp.sqrt(
+                    diag_x.astype(float_dtype(x))[:, None] * self._sv_diag()[None, :]
+                ),
+                1e-10,
+                None,
+            )
         return (kernel.finish(k) * self.coefficients).sum(axis=1, keepdims=True)
 
     def __call__(
-        self, x: np.ndarray, *,
+        self,
+        x,
+        *,
+        lengths=None,
         batch_size: int | None = None,
         verbose: bool = False,
     ) -> np.ndarray:
         """Compute SVM decision values.
 
         Args:
-            x: [B, 4, L] one-hot encoded DNA sequences.
+            x: [B, 4, L] one-hot encoded DNA sequences, or a list of [4, L_i]
+                arrays or DNA strings of any lengths.
+            lengths: [B] lengths of the rows of a padded x (sequences of
+                different lengths, all-zero past each one's end); None when
+                every row is L long.
             batch_size: Process inputs in batches of this size.  ``None``
                 means process all at once (internally in blocks that cap the
                 [batch, S] kernel values at ``_MAX_SCORE_BYTES``).  Raised to
@@ -377,25 +529,24 @@ class GkmSVM(DeviceModel):
             verbose: Show a tqdm progress bar over input batches.
 
         Returns:
-            [B, 1] uncalibrated decision values.
+            [B, 1] uncalibrated decision values; NaN for sequences shorter
+            than the window length l (with a warning), as LS-GKM gives.
         """
+        x, lengths = as_batch(x, lengths)
+        short = _short_rows(lengths, self.kernel.base.l)
+        if short is not None and short.all():
+            return _nan_rows(np.zeros((x.shape[0], 1)), short)
         batch_size = self._min_batch_size(batch_size)
         if batch_size is not None and x.shape[0] > batch_size:
             chunks = range(0, x.shape[0], batch_size)
-            if verbose:
-                from tqdm import tqdm
-                chunks = tqdm(
-                    chunks, desc="Scoring",
-                    total=(x.shape[0] + batch_size - 1) // batch_size,
-                )
             parts = []
-            for start in chunks:
-                end = min(start + batch_size, x.shape[0])
-                batch = self._match_device(x[start:end])
-                parts.append(to_cpu(self._score_unbatched(batch)))
-            return np.concatenate(parts, axis=0)
+            for start in _progress(chunks, verbose, "Scoring"):
+                batch = self._match_device(x[start : start + batch_size])
+                lb = _rows(lengths, start, batch_size)
+                parts.append(to_cpu(self._score_unbatched(batch, lb)))
+            return _nan_rows(np.concatenate(parts, axis=0), short)
 
-        return self._score_unbatched(self._match_device(x))
+        return _nan_rows(self._score_unbatched(self._match_device(x), lengths), short)
 
     # "auto" builds the l-mer table only for models at least this large
     _LMER_TABLE_MIN_SVS = 500
@@ -407,14 +558,11 @@ class GkmSVM(DeviceModel):
     # Kernel scoring computes [rows, S] kernel values in blocks of at most this
     _MAX_SCORE_BYTES = 512 * 2**20
 
-    def _min_batch_size(self, batch_size: int | None, *, table: bool = True) -> int | None:
-        """batch_size, raised when calls go through the masked join.
-
-        table: the caller scores through the l-mer table when it applies.
-        """
+    def _min_batch_size(self, batch_size: int | None) -> int | None:
+        """batch_size, raised when calls go through the masked join."""
         if batch_size is None:
             return None
-        if (table and self._lmer_table_for(np) is not None) or self._sv_index() is not None:
+        if self._lmer_table_for(np) is not None or self._sv_index() is not None:
             return batch_size
         return max(batch_size, self._MIN_BATCH_BYTES // (8 * self.num_support_vectors))
 
@@ -431,8 +579,8 @@ class GkmSVM(DeviceModel):
             if not isinstance(kernel, PackedGkmKernel) or kernel._join_plan() is None:
                 self._lmer_table = False
                 return None
-            sv = to_cpu(self.support_sequences).astype(np.float64)
-            fwd, rc = kernel.pack_both(sv)
+            sv = to_cpu(self.support_sequences)
+            fwd, rc = kernel.pack_both(sv, self.sv_lengths)
             coef = to_cpu(self.coefficients).astype(np.float64)
             if kernel.normalize:
                 diag = to_cpu(self._sv_diag()).astype(np.float64)
@@ -453,80 +601,116 @@ class GkmSVM(DeviceModel):
             return None
         if xp is np:
             return self._lmer_table
-        if self._lmer_table_dev is None or get_array_module(self._lmer_table_dev) is not xp:
-            # Metal has no float64: MLX gets a float32 copy (scores are float32 there)
-            table = (self._lmer_table.astype(np.float32)
-                     if getattr(xp, "__name__", "") == "mlx.core" else self._lmer_table)
-            self._lmer_table_dev = xp.asarray(table)
+        if (
+            self._lmer_table_dev is None
+            or get_array_module(self._lmer_table_dev) is not xp
+        ):
+            # (MLX's asarray makes it float32: scores are float32 there)
+            self._lmer_table_dev = xp.asarray(self._lmer_table)
         return self._lmer_table_dev
 
-    def _score_lmer_table(self, x, table):
+    def _table_raw(self, packed, table):
+        """[R] sum of table weights over packed rows' windows, times their
+        window weights (PAD adds 0)."""
+        xp = get_array_module(packed)
+        wx = self.kernel.row_weights(packed)  # 0 on PAD
+        pad = packed == PAD_WINDOW if is_padded(packed) else None
+        vals = table[packed] if pad is None else table[xp.where(pad, 0, packed)]
+        if wx is not None:
+            return (vals * xp.asarray(wx)).sum(axis=1)
+        if pad is not None:
+            return xp.where(pad, 0.0, vals).sum(axis=1)
+        return vals.sum(axis=1)
+
+    def _score_lmer_table(self, x, table, lengths=None):
         """f(x) = sum of table weights over x's windows (times their window
         weights) / sqrt(K(x, x)) + b."""
         xp = get_array_module(x)
         kernel = self.kernel
-        packed, packed_rc = kernel.pack_both(x)
-        wx = kernel.window_weights(packed.shape[1])
-        if wx is None:
-            raw = table[packed].sum(axis=1)
-        else:
-            raw = (table[packed] * xp.asarray(wx)).sum(axis=1)
+        packed, packed_rc = kernel.pack_both(x, lengths)
+        raw = self._table_raw(packed, table)
         if kernel.normalize:
             diag_x = kernel.raw_diag_packed(packed, packed_rc).astype(raw.dtype)
             raw = raw / xp.sqrt(xp.clip(diag_x, 1e-10, None))
         return raw[:, None] + self.bias
 
-    def _score_unbatched(self, x: np.ndarray) -> np.ndarray:
+    def _score_unbatched(self, x: np.ndarray, lengths=None) -> np.ndarray:
         """Score one batch on the model's device."""
         xp = get_array_module(x)
         table = self._lmer_table_for(xp)
         if table is not None:
-            return self._score_lmer_table(x, table)
+            return self._score_lmer_table(x, table, lengths)
         rows = max(1, self._MAX_SCORE_BYTES // (8 * self.num_support_vectors))
-        parts = [self._sv_scores(x[s:s + rows]) for s in range(0, x.shape[0], rows)]
+        parts = [
+            self._sv_scores(x[s : s + rows], _rows(lengths, s, rows))
+            for s in range(0, x.shape[0], rows)
+        ]
         scores = parts[0] if len(parts) == 1 else xp.concatenate(parts, axis=0)
         return scores + self.bias
 
     def score_variants(
-        self, ref: np.ndarray, alt: np.ndarray, *,
+        self,
+        ref,
+        alt,
+        *,
         method: str = "kernel",
+        ref_lengths=None,
+        alt_lengths=None,
         batch_size: int | None = None,
         verbose: bool = False,
     ) -> np.ndarray:
         """Variant effect scores.
 
         Args:
-            ref: [B, 4, L] reference sequences.
-            alt: [B, 4, L] alternate sequences.
+            ref: [B, 4, L] reference sequences, or a list of [4, L_i] arrays
+                or DNA strings of different lengths.
+            alt: [B, 4, L'] alternate sequences, as ref (an indel changes
+                the length).
             method: Scoring strategy.
                 "kernel" — score(alt) - score(ref) via full kernel (default).
                 "gkmexplain" — GkmExplain mutation impact score
                     (Shrikumar et al. 2019, lsgkm ``gkmexplain -m 5``).
                     See :func:`gkmsvm.explain.mutation_impact`.
+            ref_lengths, alt_lengths: [B] lengths of the rows of padded ref
+                and alt arrays when they differ.
             batch_size: Process inputs in batches of this size.  ``None``
                 means process all at once.
             verbose: Show tqdm progress bar.
 
         Returns:
-            [B, 1] score differences.
+            [B, 1] score differences (NaN when an allele is shorter than l).
         """
         if method == "kernel":
+            ref, alt, ref_lengths, alt_lengths = _allele_arrays(
+                ref, alt, ref_lengths, alt_lengths
+            )
             # Both alleles in the same calls share the per-call SV cost
             n = ref.shape[0]
-            scores = self(get_array_module(ref).concatenate([alt, ref]),
-                          batch_size=batch_size, verbose=verbose)
+            alt, ref = self._match_device(alt), self._match_device(ref)
+            scores = self(
+                get_array_module(ref).concatenate([alt, ref]),
+                lengths=_joint_lengths(
+                    ref.shape[-1], (n, alt_lengths), (n, ref_lengths)
+                ),
+                batch_size=batch_size,
+                verbose=verbose,
+            )
             return scores[:n] - scores[n:]
 
         if method == "gkmexplain":
             from gkmsvm.explain import mutation_impact
 
             return mutation_impact(
-                self, ref, alt, batch_size=batch_size, verbose=verbose,
+                self,
+                ref,
+                alt,
+                ref_lengths=ref_lengths,
+                alt_lengths=alt_lengths,
+                batch_size=batch_size,
+                verbose=verbose,
             )
 
-        raise ValueError(
-            f"method must be 'kernel' or 'gkmexplain', got {method!r}"
-        )
+        raise ValueError(f"method must be 'kernel' or 'gkmexplain', got {method!r}")
 
     # Largest l to_deltasvm() accepts: 4^14 float64 weights = 2 GB
     _MAX_DELTASVM_L = 14
@@ -559,8 +743,10 @@ class GkmSVM(DeviceModel):
         """
         kernel = self.kernel.base
         l = kernel.l
-        idx = np.arange(4 ** l)
-        digits = (idx[:, None] // 4 ** np.arange(l - 1, -1, -1)) % 4  # [:, p] = base at p
+        idx = np.arange(4**l)
+        digits = (
+            idx[:, None] // 4 ** np.arange(l - 1, -1, -1)
+        ) % 4  # [:, p] = base at p
         agree = digits == 3 - digits[:, ::-1]
         h = np.asarray(kernel._mismatch_table, dtype=np.float64)
         self_k = np.full(len(idx), h[0])
@@ -570,7 +756,10 @@ class GkmSVM(DeviceModel):
         return self_k if wt is None else self_k * float(wt[0]) ** 2
 
     def to_deltasvm(
-        self, *, device: str = "cpu", query_norm: bool = False,
+        self,
+        *,
+        device: str = "cpu",
+        query_norm: bool = False,
         verbose: bool = False,
     ) -> DeltaSVM:
         """Convert to a DeltaSVM linear scoring model: one weight per l-mer.
@@ -615,7 +804,9 @@ class GkmSVM(DeviceModel):
     # works in [rows, S] blocks of _MAX_SCORE_BYTES)
     _DELTASVM_CHUNK = 65536
 
-    def _deltasvm_weights_from_kernel(self, query_norm: bool, verbose: bool) -> np.ndarray:
+    def _deltasvm_weights_from_kernel(
+        self, query_norm: bool, verbose: bool
+    ) -> np.ndarray:
         """DeltaSVM weights by scoring every l-mer (DeltaSVM index order).
 
         With RC, an l-mer and its reverse complement score the same, so only
@@ -632,13 +823,9 @@ class GkmSVM(DeviceModel):
         todo = idx_all[idx_all <= rc] if base.include_rc else idx_all
         weights = np.empty(4**l, dtype=np.float64)
         starts = range(0, len(todo), self._DELTASVM_CHUNK)
-        if verbose:
-            from tqdm import tqdm
-            starts = tqdm(starts, desc="to_deltasvm", total=len(starts))
-        for start in starts:
-            idx = todo[start:start + self._DELTASVM_CHUNK]
-            x = np.eye(4, dtype=np.float32)[digits[idx]].transpose(0, 2, 1)
-            x = self._match_device(np.ascontiguousarray(x))
+        for start in _progress(starts, verbose, "to_deltasvm"):
+            idx = todo[start : start + self._DELTASVM_CHUNK]
+            x = self._match_device(digits[idx].astype(np.uint8))  # [n, l] codes
             w = to_cpu(self._score_unbatched(x)).ravel().astype(np.float64) - self.bias
             if unnorm:
                 diag = to_cpu(base._raw_diagonal(x)).astype(np.float64)

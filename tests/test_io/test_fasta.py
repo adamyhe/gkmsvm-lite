@@ -79,11 +79,13 @@ class TestExtractLoci:
         pd = pytest.importorskip("pandas")
         from gkmsvm.fasta import extract_loci
 
-        loci = pd.DataFrame({
-            "chrom": ["chr1", "chr1", "chr1", "chr3", "chr2"],
-            "start": [4, 0, 18, 4, 4],
-            "end": [6, 2, 20, 6, 6],
-        })
+        loci = pd.DataFrame(
+            {
+                "chrom": ["chr1", "chr1", "chr1", "chr3", "chr2"],
+                "start": [4, 0, 18, 4, 4],
+                "end": [6, 2, 20, 6, 6],
+            }
+        )
         X, mask = extract_loci(loci, genome, in_window=4, return_mask=True)
         # Second and third run off chr1, fourth is not in the genome.
         assert mask.tolist() == [True, False, False, False, True]
@@ -95,9 +97,13 @@ class TestExtractLoci:
         pd = pytest.importorskip("pandas")
         from gkmsvm.fasta import extract_loci
 
-        loci = pd.DataFrame({
-            "chrom": ["chr2", "chr1"], "start": [4, 4], "end": [6, 6],
-        })
+        loci = pd.DataFrame(
+            {
+                "chrom": ["chr2", "chr1"],
+                "start": [4, 4],
+                "end": [6, 6],
+            }
+        )
         X, mask = extract_loci(
             loci, genome, in_window=4, chroms=["chr1"], return_mask=True
         )
@@ -112,3 +118,24 @@ class TestExtractLoci:
         out = extract_loci(loci, genome, in_window=4)
         assert len(out) == 1
         assert out[0].shape == (0, 4, 4)
+
+    def test_narrowpeak_summit_centers_windows(self, genome, tmp_path):
+        """narrowPeak column 10 is the summit offset; -1 (and BED) means midpoint."""
+        from gkmsvm.fasta import extract_loci, read_loci
+
+        bed = tmp_path / "peaks.narrowPeak"
+        bed.write_text(
+            "track name=x\n"
+            "chr1\t2\t14\tp1\t0\t.\t1\t1\t1\t9\n"  # summit 11
+            "chr1\t2\t14\t.\t0\t.\t1\t1\t1\t-1\n"  # midpoint 8
+            "chr1\t6\t8\n"  # BED: midpoint 7
+        )
+        loci = read_loci(bed)
+        assert loci["summit"].tolist() == [11, 8, 7]
+        assert loci["name"].tolist() == ["p1", "chr1:2-14", "chr1:6-8"]
+        X, mask = extract_loci(bed, genome, in_window=4, return_mask=True)
+        seq = "ACGTACGTACGTACGTACGT"
+        got = ["".join("ACGT"[i] for i in x.argmax(axis=0)) for x in X]
+        assert got == [seq[9:13], seq[6:10], seq[5:9]]  # center - 4 // 2
+        mid = extract_loci(bed, genome, in_window=4, summit=False)[0]
+        assert "".join("ACGT"[i] for i in mid[0].argmax(axis=0)) == seq[6:10]

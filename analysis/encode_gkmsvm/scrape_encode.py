@@ -132,8 +132,7 @@ def _parse_files(files: list) -> dict:
 
         derived = f.get("derived_from", [])
         derived_str = ";".join(
-            d if isinstance(d, str) else d.get("@id", "")
-            for d in (derived or [])
+            d if isinstance(d, str) else d.get("@id", "") for d in (derived or [])
         )
 
         if "model" in output_type or "prediction" in output_type:
@@ -152,7 +151,8 @@ def _parse_files(files: list) -> dict:
 
 
 def build_manifest(
-    annotations: list[dict], fetch_files: bool = True,
+    annotations: list[dict],
+    fetch_files: bool = True,
 ) -> list[dict]:
     rows = []
     total = len(annotations)
@@ -195,8 +195,10 @@ def build_manifest(
                 file_info = _parse_files(files)
                 row.update(file_info)
             except Exception as e:
-                print(f"  Warning: failed to fetch files for {accession}: {e}",
-                      file=sys.stderr)
+                print(
+                    f"  Warning: failed to fetch files for {accession}: {e}",
+                    file=sys.stderr,
+                )
                 row.update(_parse_files([]))
             if (i + 1) % 50 == 0:
                 time.sleep(0.5)
@@ -254,18 +256,21 @@ def print_summary(rows: list[dict]) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Scrape ENCODE gkm-SVM model metadata"
+    parser = argparse.ArgumentParser(description="Scrape ENCODE gkm-SVM model metadata")
+    parser.add_argument(
+        "--outdir",
+        type=Path,
+        default=Path("data/encode_gkmsvm"),
     )
     parser.add_argument(
-        "--outdir", type=Path, default=Path("data/encode_gkmsvm"),
-    )
-    parser.add_argument(
-        "--organism", type=str, default=None,
+        "--organism",
+        type=str,
+        default=None,
         help="Filter by organism (e.g., 'human', 'mouse')",
     )
     parser.add_argument(
-        "--skip-files", action="store_true",
+        "--skip-files",
+        action="store_true",
         help="Skip per-annotation file fetching (fast, metadata only)",
     )
     args = parser.parse_args()
@@ -281,8 +286,10 @@ def main():
 
     if args.organism:
         annotations = [
-            a for a in annotations
-            if args.organism.lower() in (
+            a
+            for a in annotations
+            if args.organism.lower()
+            in (
                 a.get("organism", {}).get("scientific_name", "")
                 + a.get("organism", {}).get("name", "")
             ).lower()

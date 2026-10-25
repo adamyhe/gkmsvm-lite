@@ -55,9 +55,7 @@ class TestNpzRoundTrip:
         assert loaded.kernel_type == model.kernel_type
         assert loaded.bias == pytest.approx(model.bias)
         assert loaded._kernel_params == model._kernel_params
-        np.testing.assert_array_equal(
-            loaded.support_sequences, model.support_sequences
-        )
+        np.testing.assert_array_equal(loaded.support_sequences, model.support_sequences)
         np.testing.assert_array_equal(loaded.coefficients, model.coefficients)
 
     def test_scores_match(self, tmp_path):
@@ -97,12 +95,19 @@ class TestLsgkmRoundTrip:
     def test_norc_only_when_rc_off(self, tmp_path, include_rc):
         """kundajelab lsgkm rejects a norc line, so RC-on models (the default) omit it."""
         m = _make_model()
-        model = GkmSVM(m.support_sequences, m.coefficients, m.bias, m.kernel_type,
-                       {**m.kernel_params, "include_rc": include_rc})
+        model = GkmSVM(
+            m.support_sequences,
+            m.coefficients,
+            m.bias,
+            m.kernel_type,
+            {**m.kernel_params, "include_rc": include_rc},
+        )
         path = tmp_path / "model.txt"
         model.save(str(path), fmt="lsgkm")
         header = path.read_text().split("\nSV\n")[0].splitlines()
-        assert [h for h in header if h.startswith("norc")] == ([] if include_rc else ["norc 1"])
+        assert [h for h in header if h.startswith("norc")] == (
+            [] if include_rc else ["norc 1"]
+        )
         assert load_lsgkm_model(str(path)).kernel.include_rc == include_rc
 
     def test_save_load_gz(self, tmp_path):

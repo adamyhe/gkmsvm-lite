@@ -2,7 +2,7 @@
 
 ## Basic scoring
 
-All models (loaded or trained) use the same interface. Input is a `[batch, 4, length]` one-hot encoded DNA array; output is `[batch, 1]` margin scores.
+All models (loaded or trained) use the same interface. Input is a `[batch, 4, length]` one-hot encoded DNA array (any dtype), a list of DNA strings, or `[batch, length]` uint8 base codes (A=0, C=1, G=2, T=3); output is `[batch, 1]` margin scores.
 
 ```python
 from gkmsvm import load_model, one_hot_encode
@@ -99,13 +99,13 @@ deltas = dsvm.score_variants(ref_seqs, alt_seqs)
 ## GPU acceleration
 
 ```python
-model.cuda()     # NVIDIA (CuPy)
-model.mlx()      # Apple Silicon (MLX)
+model.cuda()  # NVIDIA (CuPy)
+model.mlx()  # Apple Silicon (MLX)
 scores = model(x)  # inputs are moved to the model's device; outputs stay there
-model.cpu()      # back to CPU
+model.cpu()  # back to CPU
 ```
 
-Moving a model drops its device caches (packed SVs, l-mer index), which are rebuilt on the first call. MLX runs custom Metal kernels and returns float32 scores (Metal has no float64); GkmExplain attribution on MLX falls back to CPU. Apple Silicon's memory is shared between CPU and GPU, so other processes compete for it. Timings are in [performance](performance.md).
+Moving a model drops its device caches (packed SVs, l-mer index), which are rebuilt on the first call. MLX runs custom Metal kernels and returns float32 scores (Metal has no float64); GkmExplain attribution on an MLX model runs on CPU and returns a NumPy float64 array. Apple Silicon's memory is shared between CPU and GPU, so other processes compete for it. Timings are in [performance](performance.md).
 
 ## Memory management
 
@@ -113,7 +113,7 @@ Peak memory is bounded internally: kernel scoring computes [rows, S] kernel valu
 
 ## One-hot encoding
 
-DNA sequences are represented as `[4, length]` one-hot arrays with channel order A=0, C=1, G=2, T=3.
+DNA sequences are represented as `[4, length]` one-hot arrays with channel order A=0, C=1, G=2, T=3. Internally, and in `model.support_sequences`, they are `[length]` uint8 base codes with the same numbering: inputs are converted on entry (N, an all-zero column, reads as A, as in LS-GKM).
 
 ```python
 from gkmsvm import one_hot_encode, one_hot_decode, reverse_complement
@@ -130,6 +130,7 @@ one_hot_decode(rc)  # "ACGT" (palindrome in this case)
 
 # Batch encode with padding
 from gkmsvm import encode_batch
+
 x = encode_batch(["ACGT", "ACGTACGT"])  # [2, 4, 8], shorter seqs zero-padded
 ```
 

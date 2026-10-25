@@ -40,8 +40,9 @@ def test_index_matches_brute(name, rc):
     assert lmer_index.applies(kernel)
     index = lmer_index.LmerIndex(kernel, by, by_rc)
     bx = kernel.pack(X)
-    np.testing.assert_allclose(index.pairwise(bx), kernel.raw_packed(bx, by, by_rc),
-                               rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(
+        index.pairwise(bx), kernel.raw_packed(bx, by, by_rc), rtol=1e-12, atol=1e-12
+    )
 
 
 def test_index_skips_padding():
@@ -52,14 +53,18 @@ def test_index_skips_padding():
     bx = kernel.pack(_onehot(3, 20, rng))
     padded = np.concatenate([bx, np.full((3, 5), PAD_WINDOW, dtype=np.uint32)], axis=1)
     # Padding shifts the per-thread window chunks, so only the summation order differs
-    np.testing.assert_allclose(index.pairwise(padded), index.pairwise(bx), rtol=1e-12, atol=0)
+    np.testing.assert_allclose(
+        index.pairwise(padded), index.pairwise(bx), rtol=1e-12, atol=0
+    )
 
 
 def test_applies():
     assert lmer_index.applies(EstTruncGkmKernel(11, 7, d=3))
     assert not lmer_index.applies(DirectGkmKernel(11, 7))  # 31,714 neighbors per window
     assert not lmer_index.applies(EstTruncGkmKernel(13, 7, d=2))  # l > MAX_L
-    assert lmer_index.applies(CenterWeightedGkmKernel(8, 5, M=3, H=2.0))  # 1,000 neighbors (d=3)
+    assert lmer_index.applies(
+        CenterWeightedGkmKernel(8, 5, M=3, H=2.0)
+    )  # 1,000 neighbors (d=3)
 
 
 MODELS = [
@@ -80,7 +85,10 @@ def test_model_scores_match_pairwise(kernel_type, params):
     rng = np.random.default_rng(3)
     model = _model(kernel_type, params, rng)
     x = _onehot(20, 40, rng)
-    expected = model.kernel.pairwise(x, model.support_sequences) @ model.coefficients + model.bias
+    expected = (
+        model.kernel.pairwise(x, model.support_sequences) @ model.coefficients
+        + model.bias
+    )
     np.testing.assert_allclose(model(x).ravel(), expected, rtol=1e-10, atol=1e-12)
     model.use_lmer_index = False  # takes effect without clearing caches
     np.testing.assert_allclose(model(x).ravel(), expected, rtol=1e-10, atol=1e-12)
@@ -95,8 +103,9 @@ def test_mutation_impact_index_vs_join(kernel_type, params):
     alt[:, :, 20] = np.eye(4)[(ref[:, :, 20].argmax(1) + 1) % 4]
     got = model.score_variants(ref, alt, method="gkmexplain")
     model.use_lmer_index = False  # takes effect without clearing caches
-    np.testing.assert_allclose(got, model.score_variants(ref, alt, method="gkmexplain"),
-                               rtol=1e-10, atol=1e-12)
+    np.testing.assert_allclose(
+        got, model.score_variants(ref, alt, method="gkmexplain"), rtol=1e-10, atol=1e-12
+    )
 
 
 KERNEL_OBJS = {
@@ -114,14 +123,55 @@ def test_gram_and_columns_match_pairwise(name):
     rng = np.random.default_rng(5)
     X = _onehot(40, 30, rng)
     expected = kernel.pairwise(X, X)
-    np.testing.assert_allclose(compute_gram(kernel, X, chunk_size=16), expected,
-                               rtol=1e-10, atol=1e-12)
+    np.testing.assert_allclose(
+        compute_gram(kernel, X, chunk_size=16), expected, rtol=1e-10, atol=1e-12
+    )
     cache = KernelColumnCache(kernel, X)
-    assert cache._use_fast
-    for idx in ([3], list(range(5, 30))):
-        cols = cache.compute_columns(idx)
-        for i in idx:
-            np.testing.assert_allclose(cols[i], expected[i], rtol=1e-10, atol=1e-12)
+    assert cache._index is not None
+    for use_index in (True, False):  # one query row each; the masked join
+        if not use_index:
+            cache._index = None
+        for idx in ([3], list(range(5, 30))):
+            cols = cache.compute_columns(idx)
+            for i in idx:
+                np.testing.assert_allclose(cols[i], expected[i], rtol=1e-10, atol=1e-12)
+
+
+@pytest.mark.parametrize("name", ["t2", "t4"])
+def test_pairwise_diag_offset(name):
+    """Row b of a self-Gram block from r gets only columns >= r + b."""
+    kernel = KERNEL_OBJS[name]().base
+    rng = np.random.default_rng(6)
+    X = _onehot(30, 40, rng)
+    bx, bx_rc = kernel.pack_both(X)
+    index = lmer_index.LmerIndex(kernel, bx, bx_rc)
+    full = index.pairwise(bx)
+    r = 11
+    got = index.pairwise(bx[r:20], diag_offset=r)
+    upper = np.arange(30)[None, :] >= r + np.arange(9)[:, None]
+    np.testing.assert_allclose(got, np.where(upper, full[r:20], 0), rtol=1e-12)
+
+
+@pytest.mark.parametrize("name", KERNEL_OBJS)
+@pytest.mark.parametrize("ragged", [False, True])
+@pytest.mark.parametrize("cross", [False, True])
+def test_gram_index_vs_masked(name, ragged, cross, monkeypatch):
+    """compute_gram through the index (upper-triangle row blocks for a
+    self-Gram) matches the masked join."""
+    kernel = KERNEL_OBJS[name]()
+    rng = np.random.default_rng(7)
+    X, Y = _onehot(40, 30, rng), _onehot(17, 30, rng)
+    lengths = rng.integers(12, 31, 40) if ragged else None
+    y_lengths = rng.integers(12, 31, 17) if ragged else None
+    args = (kernel, X, Y) if cross else (kernel, X)
+    kw = {"lengths": lengths, "y_lengths": y_lengths} if cross else {"lengths": lengths}
+    monkeypatch.setattr(GkmSVM, "_MAX_SCORE_BYTES", 8 * 40 * 7)  # 7-row blocks
+    got = compute_gram(*args, **kw)
+    monkeypatch.setattr(lmer_index, "applies", lambda *a, **k: False)
+    expected = compute_gram(*args, **kw)
+    np.testing.assert_allclose(got, expected, rtol=1e-10, atol=1e-12)
+    if not cross:
+        np.testing.assert_array_equal(got, got.T)
 
 
 def test_applies_dense_neighborhoods():

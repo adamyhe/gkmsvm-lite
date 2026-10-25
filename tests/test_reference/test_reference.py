@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from gkmsvm.codec import one_hot_encode, reverse_complement
+from gkmsvm.codec import codes_to_one_hot, one_hot_encode, reverse_complement
 from gkmsvm.importers.lsgkm import load_lsgkm_model
 from gkmsvm.kernels.direct import DirectGkmKernel
 from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
@@ -20,7 +20,9 @@ from tests.test_reference.reference_kernels import (
     score,
 )
 
-FIXTURE = Path(__file__).parent.parent / "fixtures" / "encode_ENCFF579AOX_10sv.model.txt.gz"
+FIXTURE = (
+    Path(__file__).parent.parent / "fixtures" / "encode_ENCFF579AOX_10sv.model.txt.gz"
+)
 
 
 def _random_seq(length, rng):
@@ -43,7 +45,9 @@ class TestWeightTables:
             np.testing.assert_allclose(np_table, main_table)
 
     def test_estfull_matches(self):
-        kernel = EstTruncGkmKernel(11, 7, d=3, normalize=False, include_rc=False, truncate=False)
+        kernel = EstTruncGkmKernel(
+            11, 7, d=3, normalize=False, include_rc=False, truncate=False
+        )
         main_table = kernel._mismatch_table
         np_table = build_esttrunc_table(11, 7, d=3, truncate=False)
         np.testing.assert_allclose(np_table, main_table)
@@ -154,7 +158,9 @@ class TestSVMScoring:
 
         sv_arr = SV_np.astype(np.float32)
         coefs_arr = coefs.astype(np.float32)
-        model = GkmSVM(sv_arr, coefs_arr, bias, "gkm_cnt", {"L": l, "k": k, "include_rc": True})
+        model = GkmSVM(
+            sv_arr, coefs_arr, bias, "gkm_cnt", {"L": l, "k": k, "include_rc": True}
+        )
         X_arr = X_np.astype(np.float32)
         scores_main = model(X_arr).squeeze(1)
 
@@ -178,7 +184,10 @@ class TestSVMScoring:
         sv_arr = SV_np.astype(np.float32)
         coefs_arr = coefs.astype(np.float32)
         model = GkmSVM(
-            sv_arr, coefs_arr, bias, "gkm_esttrunc",
+            sv_arr,
+            coefs_arr,
+            bias,
+            "gkm_esttrunc",
             {"L": l, "k": k, "d": d, "include_rc": True},
         )
         X_arr = X_np.astype(np.float32)
@@ -200,7 +209,7 @@ class TestEncodeOracle:
     @pytest.fixture
     def model_data(self):
         model = load_lsgkm_model(FIXTURE)
-        sv_np = model.support_sequences.astype(np.float64)
+        sv_np = codes_to_one_hot(model.support_sequences, np.float64)
         coefs_np = model.coefficients.astype(np.float64)
         bias = model.bias
         return sv_np, coefs_np, bias
