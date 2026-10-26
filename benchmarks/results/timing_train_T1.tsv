@@ -1,0 +1,35 @@
+# gkmsvm-lite vs LS-GKM C timing comparison
+# commit: 71506db
+# date: 2026-10-23 06:25 UTC
+# host: sh04-06n16.int
+# command: timing_train.py --conda-env lsgkm --lsgkm-bin /home/groups/akundaje/ayhe/src/lsgkm/bin --mlsgkm-bin /home/groups/akundaje/ayhe/src/mLS-GKM/bin --device cpu --sizes 500,1000,2000,5000,10000,20000 --threads 1 --output results/timing_train_T1.tsv
+# cpu: AMD EPYC 9384X 32-Core Processor, 64 logical cores, 64 usable
+# versions: gkmsvm-lite 0.1.0, python 3.11.17, numpy 2.2.6, numba 0.67.0 (1 threads, workqueue layer), cupy 14.2.0
+# slurm: job 49048183, partition akundaje, node sh04-06n16, constraint CPU_SKU:9384X, exclusive 1
+# device: cpu
+# kernel: -t 2 -l 11 -k 7 -d 3
+# lsgkm: gkmtrain: ls-gkm 0.1.1 (bioconda) (/home/groups/akundaje/ayhe/envs/lsgkm/bin/gkmtrain); gkmpredict: ls-gkm 0.1.1 (bioconda) (/home/groups/akundaje/ayhe/envs/lsgkm/bin/gkmpredict)
+# lsgkm_threads: 1
+# mlsgkm: mLS-GKM 2bb06be
+# lsgkm_cache_mb: 100 (default)
+# lite_cpu_threads: 1
+# test_sequences: 1000
+# inference_repeats: 3
+
+## Training
+N	seq_len	gram_gb	t_lsgkm_train	t_lite_cpu_train	t_lite_cpu_smo_train	t_lite_gpu_train	t_lite_gpu_smo_train	mem_lsgkm_mb	mem_lite_cpu_mb	mem_lite_cpu_smo_mb	mem_lite_gpu_mb	mem_lite_gpu_smo_mb	n_sv_lsgkm	n_sv_lite	t_lite_cpu_gram	t_lite_gpu_gram	lsgkm_cache_mb
+500	300	0.002	14.96	2.44	NA	NA	NA	82	NA	NA	NA	NA	500	500	2.43	NA	NA
+1000	300	0.007	38.80	5.70	NA	NA	NA	94	NA	NA	NA	NA	997	997	5.68	NA	NA
+2000	300	0.030	98.26	14.64	NA	NA	NA	122	NA	NA	NA	NA	1968	1968	14.59	NA	NA
+5000	300	0.186	314.18	62.65	NA	NA	NA	236	NA	NA	NA	NA	4597	4597	62.36	NA	NA
+10000	300	0.745	2059.34	212.64	NA	NA	NA	307	NA	NA	NA	NA	8511	8512	211.26	NA	NA
+20000	300	2.980	4917.80	778.42	NA	NA	NA	420	NA	NA	NA	NA	15087	15087	772.65	NA	NA
+
+## Inference
+N_train	n_sv	n_test	t_lsgkm_infer	t_lite_cpu_infer	t_lite_gpu_infer	t_mlsgkm_infer
+500	500	1000	42.444	1.212	NA	42.418
+1000	997	1000	42.412	1.204	NA	42.532
+2000	1968	1000	42.616	1.307	NA	42.666
+5000	4597	1000	43.054	1.478	NA	43.059
+10000	8512	1000	43.733	1.808	NA	43.738
+20000	15087	1000	44.812	2.395	NA	44.804

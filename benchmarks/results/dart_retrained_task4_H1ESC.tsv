@@ -1,0 +1,14 @@
+# DART-Eval, task activity
+# commit: 71506db
+# date: 2026-10-23 08:56 UTC
+# host: sh04-06n12.int
+# command: dart_eval.py -m data/models/retrained/H1ESC.npz --task activity --cell-lines H1ESC --device cuda --work-dir data/dart-eval --output results/dart_retrained_task4_H1ESC.tsv -v
+# cpu: Intel(R) Xeon(R) Gold 6426Y, 32 logical cores, 16 usable
+# versions: gkmsvm-lite 0.1.0, python 3.11.17, numpy 2.2.6, numba 0.67.0 (16 threads, workqueue layer), cupy 14.2.0
+# slurm: job 49051435, partition akundaje, node sh04-06n12, constraint GPU_SKU:L40S&CPU_SKU:6426Y, exclusive 0
+# device: cuda
+# gpu: NVIDIA L40S (45 GB, CC 8.9, CUDA driver 12.4)
+# model: H1ESC.npz
+# vep_method: kernel
+cell_line	n_idr_peaks	n_nonpeaks	auroc	auprc	auprc_baseline	elapsed	pearson_peaks	spearman_peaks	pearson_all	spearman_all	n_peaks
+H1ESC	9439	21146	0.9027489197813673	0.8123460710816186	0.3086153343142063	3.9441881477832794	0.6353387653007467	0.5648602598779432	0.6350319334764253	0.6370135189309588	41802

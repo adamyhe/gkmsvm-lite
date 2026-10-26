@@ -1,0 +1,21 @@
+# dsQTL AUPRC, scores summed over models
+# commit: 71506db
+# date: 2026-10-23 08:51 UTC
+# host: sh04-06n12.int
+# command: dsqtl_auprc.py --device cuda --params l10k6,l10k6_rbf --force-train --output results/dsqtl_retrained_summed.tsv --per-model-output results/dsqtl_retrained_per_model.tsv
+# cpu: Intel(R) Xeon(R) Gold 6426Y, 32 logical cores, 16 usable
+# versions: gkmsvm-lite 0.1.0, python 3.11.17, numpy 2.2.6, numba 0.67.0 (16 threads, workqueue layer), cupy 14.2.0
+# slurm: job 49048270, partition akundaje, node sh04-06n12, constraint GPU_SKU:L40S&CPU_SKU:6426Y, exclusive 0
+# device: cuda
+# gpu: NVIDIA L40S (45 GB, CC 8.9, CUDA driver 12.4)
+# params: l10k6,l10k6_rbf
+# negsets: 5
+method	auroc	auprc	pearson	spearman	n_sig	params	paper_auprc
+deltaSVM-sum (l10k6)	0.7521273702268043	0.19314756221728174	0.7261878802067846	0.7114240830423441	574	l10k6	
+deltaSVM.pl-sum (l10k6)	0.7520131106433525	0.1899699032069342	0.7262938995362843	0.7114538421526571	574	l10k6	0.18997
+ISM-sum (l10k6)	0.7537039514720265	0.19744396579961462	0.7267773919871371	0.712808833455811	574	l10k6	
+GkmExplain-sum (l10k6)	0.7532388728816592	0.19822527383994423	0.7258269968694947	0.7119064154027797	574	l10k6	
+deltaSVM-sum (l10k6_rbf)	0.7507875368485587	0.18206380499943178	0.7291126273681544	0.7171531559434244	574	l10k6_rbf	
+deltaSVM.pl-sum (l10k6_rbf)	0.7508598991575948	0.19021019698153932	0.7290357484191459	0.7172043619178862	574	l10k6_rbf	0.19021
+ISM-sum (l10k6_rbf)	0.7524735409603961	0.19550334911273928	0.7289796047936836	0.7170343733112154	574	l10k6_rbf	0.1955
+GkmExplain-sum (l10k6_rbf)	0.7520348444618651	0.19647161582514788	0.7295160804795564	0.7170175267359743	574	l10k6_rbf	0.19647
