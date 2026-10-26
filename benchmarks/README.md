@@ -36,6 +36,7 @@ Timed runs each execute in their own process, so the reported peak memory is tha
 | S3B | Large-N scaling on LS-GKM's own design (Lee 2016, Fig. 1): H1-hESC CTCF ChIP-seq vs GC/repeat-matched hg19 windows, 5k–90k, LS-GKM with 100 MB and 8 GB caches. Not part of `paper`: up to a day | `s3b` | `ctcf_data.py`, `training_memory.py --data ctcf` | `training_memory_ctcf.tsv` |
 | S4 | GkmExplain completeness | `s4` | `completeness.py` | `completeness.tsv` |
 | S5 | DART-Eval Task 4 (five cell lines) with ENCODE models and models retrained on DART-Eval's training chromosomes, and Task 5 (caQTL, dsQTL) with ENCODE models, against published DART-Eval and Evo 2 results (`dart_reference.tsv`) | `s5` | `dart_eval.py`, `dart_train.py` | `dart_task4_<cell>_<model>.tsv`, `dart_retrained_task4_<cell>.tsv`, `dart_task5_<model>.tsv` |
+| GPUs | gkmsvm-lite's GPU times in 1B, 1C, S2, S3 and S3B on each host's results (`figures/check_gpus.*`; drawn when `results/<SET>/` exists; not in the paper) | the panels', with `SET=<label>` | as for those panels | `results/<SET>/` |
 | check | Retrained models against S5's ENCODE models, Task 4 and Task 5 (GM12878), with training times (`figures/check_dart_retrained.*`; not in the paper) | `s5-retrained` | `dart_train.py`, `dart_eval.py` | `dart_retrained_train_<cell>.tsv`, `dart_retrained_task5_GM12878.tsv` |
 
 The dsQTL reproduction behind 1A, 1D and S1 is written up in [`docs/validation.md`](../docs/validation.md).
@@ -51,6 +52,15 @@ Besides figures, the notebook writes `figures/text_numbers.tsv` (speedups and AU
 ## Hardware
 
 Targets run on any machine with the conda envs below; each result file's header records the host, CPU and GPU it ran on. Keep each panel's runs on one host, since LS-GKM and gkmsvm-lite times are compared within a panel.
+
+To add a second GPU, run the timing panels on its host with a label for the result set, which writes `results/<label>/` instead of `results/`:
+
+```bash
+make -C benchmarks fig1b fig1c s2 s3 s3b SET=a100   # or: bash benchmarks/run.sh --set a100 ...
+make -C benchmarks figures SET=a100                 # figures/a100/, other panels from results/
+```
+
+Each set reruns the whole panel, LS-GKM included, since the host's CPU changes too. `make figures` (no `SET`) also draws `check_gpus`, gkmsvm-lite's GPU times from `results/` and every `results/<label>/`, labeled by the GPU each result file records.
 
 ## Running on a server
 
