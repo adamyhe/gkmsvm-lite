@@ -33,9 +33,10 @@ Timed runs each execute in their own process, so the reported peak memory is tha
 | S1 | Models trained with gkmsvm-lite vs the paper's LS-GKM models | `s1` | `dsqtl_auprc.py` | `dsqtl_retrained_*.tsv` |
 | S2 | Prediction throughput vs number of SVs (`-t 2` l-mer table, `-t 3` l-mer index, LS-GKM) | `s2` | `throughput_sweep.py` | `throughput.tsv` |
 | S3 | Training time, peak memory and held-out accuracy by solver (precomputed Gram, SMO, Nyström, LS-GKM), gkmsvm-lite on GPU and on CPU | `s3` | `training_memory.py` | `training_memory.tsv`, `training_memory_cpu.tsv` |
-| S3B | Large-N scaling on LS-GKM's own design (Lee 2016, Fig. 1): H1-hESC CTCF ChIP-seq vs GC/repeat-matched hg19 windows, 5k–90k, LS-GKM with 100 MB and 8 GB caches. Not part of `paper`: up to a day | `s3b` | `ctcf_data.py`, `training_memory.py --data ctcf` | `training_memory_ctcf.tsv` |
+| S3B | Large-N scaling on LS-GKM's own design (Lee 2016, Fig. 1): H1-hESC CTCF ChIP-seq vs GC/repeat-matched hg19 windows, LS-GKM's eight sizes (5k–30k, 60k, 90k) plus 45k and 75k, LS-GKM with 100 MB and 8 GB caches. Not part of `paper`: up to a day | `s3b` | `ctcf_data.py`, `training_memory.py --data ctcf` | `training_memory_ctcf.tsv` |
 | S4 | GkmExplain completeness | `s4` | `completeness.py` | `completeness.tsv` |
 | S5 | DART-Eval Task 4 (five cell lines) with ENCODE models and models retrained on DART-Eval's training chromosomes, and Task 5 (caQTL, dsQTL) with ENCODE models, against published DART-Eval and Evo 2 results (`dart_reference.tsv`) | `s5` | `dart_eval.py`, `dart_train.py` | `dart_task4_<cell>_<model>.tsv`, `dart_retrained_task4_<cell>.tsv`, `dart_task5_<model>.tsv` |
+| GPUs | gkmsvm-lite's GPU times in 1B, 1C, S2, S3 and S3B on each host's results (`figures/check_gpus.*`; drawn when `results/<SET>/` exists; not in the paper) | the panels', with `SET=<label>` | as for those panels | `results/<SET>/` |
 | check | Retrained models against S5's ENCODE models, Task 4 and Task 5 (GM12878), with training times (`figures/check_dart_retrained.*`; not in the paper) | `s5-retrained` | `dart_train.py`, `dart_eval.py` | `dart_retrained_train_<cell>.tsv`, `dart_retrained_task5_GM12878.tsv` |
 
 The dsQTL reproduction behind 1A, 1D and S1 is written up in [`docs/validation.md`](../docs/validation.md).
@@ -50,7 +51,50 @@ Besides figures, the notebook writes `figures/text_numbers.tsv` (speedups and AU
 
 ## Hardware
 
-Targets run on any machine with the conda envs below; each result file's header records the host, CPU and GPU it ran on. Keep each panel's runs on one host, since LS-GKM and gkmsvm-lite times are compared within a panel.
+Targets run on any machine with the conda envs below; each result file's header records the host, CPU and GPU it ran on. Keep each panel's runs on one host, since LS-GKM and gkmsvm-lite times are compared within a panel. On Sherlock, each panel's CPU runs share one hardware type and its GPU runs another (see [Running on Sherlock](#running-on-sherlock)).
+
+To add a second GPU, run the timing panels on its host with a label for the result set, which writes `results/<label>/` instead of `results/`:
+
+```bash
+make -C benchmarks fig1b fig1c s2 s3 s3b SET=a100   # or: bash benchmarks/run.sh --set a100 ...
+make -C benchmarks figures SET=a100                 # figures/a100/, other panels from results/
+```
+
+Each set reruns the whole panel, LS-GKM included, since the host's CPU changes too. `make figures` (no `SET`) also draws `check_gpus`, gkmsvm-lite's GPU times from `results/` and every `results/<label>/`, labeled by the GPU each result file records.
+
+## Running on Sherlock
+
+`sherlock/submit.sh` submits the panels as Slurm jobs from this checkout and exits; nothing stays running on the login node. Results go to `results/` in this checkout, and logs to `results/logs/`.
+
+```bash
+bash benchmarks/sherlock/submit.sh --quick              # small settings first: results/quick/
+bash benchmarks/sherlock/submit.sh                      # fig1b fig1c s2 s3
+bash benchmarks/sherlock/submit.sh --no-setup s3b other # S3B, and the panels that time nothing
+bash benchmarks/sherlock/submit.sh --gpu a100 --dry-run s2
+```
+
+Each timing panel (1B, 1C, S2, S3, S3B) splits into a CPU part (LS-GKM, mLS-GKM and gkmsvm-lite on CPU) and a GPU part (gkmsvm-lite on CUDA). The two parts run on different fixed hardware and are merged afterwards (`make SPLIT=1`):
+
+- **CPU parts** run on a whole AMD EPYC 9384X node in `akundaje` (`CPU_SKU:9384X`, `--exclusive`), one job per part, so no other job shares the cores, caches or memory bandwidth. LS-GKM and gkmsvm-lite get the same 16 threads (`THREADS`).
+- **GPU parts** run on one L40S (`--gpu l40s`, the default), with the node's CPU fixed as well (`GPU_SKU:L40S&CPU_SKU:6426Y`) because it runs the GPU part's host-side work. They also get 16 CPUs, and they are chained so that two GPU parts never run at once.
+- A **merge** job per panel writes `results/<file>.tsv` once all of the panel's parts have succeeded. The merged file is in the format a single run on both devices would have written, so `figures.ipynb` is unchanged. Its header keeps the CPU part's provenance and adds the GPU part's differing values as `gpu_<key>` (`gpu_host`, ...). `max_abs_diff` (1C) and `r_vs_exact` (S3), which compare rows across the two parts, are filled from score arrays both parts save under `results/parts/` (git-ignored).
+- A **setup** job runs first. It creates the `lsgkm` and `gkmsvm-bench` envs in `$GROUP_HOME/$USER/envs` if they are missing, installs this checkout into `gkmsvm-bench` with uv, runs the tests, and downloads every input (`make data`), so concurrent jobs never fetch the same file.
+- **`other`** runs 1A, 1D, S1, S4 and S5 in one GPU job. These panels time nothing.
+
+Parts are made only in a job of their kind (the Makefile checks the `BENCH_HW` that `sherlock/job.sh` sets). A merge job that finds a stale or missing part therefore stops instead of running that part on the wrong machine. Every job keeps its temporary files and its Numba and CuPy caches on node-local scratch, so timed runs don't touch the shared filesystems, and each job compiles its kernels in its own untimed warm-up. Result headers record the Slurm job, partition, node, constraint and exclusivity.
+
+Hardware can be overridden from the environment: `PARTITION`, `CPU_CONSTRAINT`, `GPU_CONSTRAINT`, `GPU_CPUS` and `THREADS`. Keep a figure's runs on one hardware type; the result headers show which type each run used.
+
+### Warm-up
+
+No timed region includes compilation or first-use costs:
+
+- gkmsvm-lite scripts first warm up untimed: `warm_jit_cache` compiles into the disk caches, then each worker repeats the timed call on a few inputs or a small model of the same kernel.
+- `timing_train.py` warms both prediction paths (l-mer table and index).
+- `training_memory.py` workers train once on 100 sequences before the timed fit.
+- Each LS-GKM and mLS-GKM binary runs once, untimed, before its first timed run (`warm_binaries`). This reads the executable and its libraries into the page cache.
+- 1C copies the model file into the node-local work directory, so both implementations read it from the same disk.
+- 1C plots whole-process wall time, which includes start-up and model loading for both implementations but must not include compiling. Before each method's timed gkmsvm-lite runs, an untimed rehearsal process per device makes the timed process's warm-up call, filling the disk caches with exactly the kernels it uses. For the deltaSVM table, the rehearsal runs the whole build: CuPy compiles reductions per launch configuration, which depends on block size, so a smaller warm-up misses some (3 kernels, ~8 s on an L40S). Around every timed process, `jit_cache_files` snapshots the Numba and CuPy caches, which are written only when something compiles. The count of new files is recorded as `jit_compiles` (expected 0, with a warning otherwise).
 
 ## Running on a server
 
@@ -102,13 +146,13 @@ The benchmarks only execute LS-GKM binaries as separate processes and never link
 
 ## Large-N scaling (S3B)
 
-LS-GKM's scaling figure (Lee 2016, *Bioinformatics* 32:2196, Fig. 1; Supplementary Methods 2–3) trained on eight subsamples of H1-hESC CTCF ChIP-seq from 5k to 90k sequences, with gkmtrain's default 100 MB and an 8 GB kernel cache. `ctcf_data.py` rebuilds that set:
+LS-GKM's scaling figure (Lee 2016, *Bioinformatics* 32:2196, Fig. 1; Supplementary Methods 2–3) trained on eight subsamples of H1-hESC CTCF ChIP-seq from 5k to 90k sequences, with gkmtrain's default 100 MB and an 8 GB kernel cache. S3B uses those sizes (5k, 10k, 15k, 20k, 25k, 30k, 60k, 90k) plus 45k and 75k, so the range where the 8 GB cache fills (~60k) is sampled too. `ctcf_data.py` rebuilds that set:
 
 - **Positives:** ENCODE's January 2011 SPP optimal peaks for `wgEncodeBroadHistoneH1hescCtcf` (55,782 peaks on hg19; the other H1-hESC CTCF set, from HAIB, has too few for 90k), as 300 bp windows centered on each summit. LS-GKM trained on the variable-length peaks; gkmsvm-lite trains on fixed-length windows.
 - **Negatives:** random hg19 windows without N that overlap no peak, matched to the positives' joint GC and repeat-fraction distribution (soft-masked repeats), as in the paper.
 - **Split:** chr1 and chr2 held out for testing.
 
-`make -C benchmarks s3b` builds the data (downloading hg19 if `dsqtl_auprc.py` hasn't) and runs `training_memory.py --data ctcf`. The precomputed Gram and Nyström are skipped once N × N float64 exceeds 75% of RAM; SMO runs at every size. LS-GKM at 90k can take most of a day, so `s3b` is not part of `paper`; the per-run timeout is 48 h.
+`make -C benchmarks s3b` builds the data (downloading hg19 if `dsqtl_auprc.py` hasn't) and runs `training_memory.py --data ctcf`. The precomputed Gram and Nyström are skipped once N × N float64 exceeds 75% of RAM; SMO runs at every size. In Lee 2016 (Fig. 1B, a 4-core 2016 i7), `gkmtrain` on 4 threads took ~100 min at 90k with the 8 GB cache and ~360 min with 100 MB; single-threaded with 100 MB it took ~200 min at 30k and wasn't run larger. `s3b` is not part of `paper`; the per-run timeout is 48 h.
 
 ## mLS-GKM baseline
 
@@ -133,4 +177,4 @@ mLS-GKM's `gkmexplain` (commit 2bb06be, 2026-08-30) is wrong for non-RBF models 
 
 ## `dev/`
 
-Experiments that don't feed a figure: the CUDA masked-join ablation, the self-Gram through the l-mer index vs the masked join (`gram_index_vs_masked.py`), the Nanog replication, and SVR and caQTL training. Finished experiments are deleted once their result is recorded (the earlier solver comparisons, the Nyström landmark sweep and the mask-join prototypes are in git history). Run them from the repo root, e.g. `python benchmarks/dev/replicate_nanog.py`.
+Experiments that don't feed a figure: the CUDA masked-join ablation, the self-Gram through the l-mer index vs the masked join (`gram_index_vs_masked.py`), the Nanog replication, SVR and caQTL training, and an ncu profile of how much each CUDA operation is limited by float64 throughput (`profile_fp64.py`; on an L40S only the short kernels are: ISM, scoring and mutation impact are bound by atomics and memory; on Sherlock, `sbatch -C GPU_SKU:<gpu> benchmarks/sherlock/profile_fp64.sbatch`). Finished experiments are deleted once their result is recorded (the earlier solver comparisons, the Nyström landmark sweep and the mask-join prototypes are in git history). Run them from the repo root, e.g. `python benchmarks/dev/replicate_nanog.py`.

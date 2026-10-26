@@ -210,3 +210,6 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 benchmarks/local.mk
+
+# Sherlock CPU/GPU parts of split result files (merged into results/)
+benchmarks/results/**/parts/

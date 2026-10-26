@@ -49,10 +49,13 @@ from _common import (
     lsgkm_binary,
     lsgkm_default_threads,
     lsgkm_has_option,
-    lsgkm_version,
+    lsgkm_sources,
+    merge_parts,
     read_seqs,
+    rewrite_table,
     run_measured,
     set_cpu_threads,
+    warm_binaries,
     warm_jit_cache,
     worker_result,
     write_seqs,
@@ -74,11 +77,7 @@ def _worker(spec: dict) -> None:
     pos = read_seqs(work / f"pos_{spec['N']}.fa")
     neg = read_seqs(work / f"neg_{spec['N']}.fa")
     test = read_seqs(work / "test.fa")
-
-    t0 = time.perf_counter()
-    model = train_gkmsvm(
-        pos,
-        neg,
+    params = dict(
         kernel_type="estimated",
         l=spec["l"],
         k=spec["k"],
@@ -89,6 +88,13 @@ def _worker(spec: dict) -> None:
         device=spec["device"],
         verbose=False,
     )
+    # Untimed: load this solver's kernels from the JIT caches (warm_jit_cache
+    # compiled them) and start CUDA, so train_s holds training alone
+    train_gkmsvm(pos[:50], neg[:50], **params)
+    gpu_sync()
+
+    t0 = time.perf_counter()
+    model = train_gkmsvm(pos, neg, **params)
     gpu_sync()
     train_s = time.perf_counter() - t0
     pool = gpu_pool_mb()
@@ -99,6 +105,35 @@ def _worker(spec: dict) -> None:
     scores = to_cpu(model(X, batch_size=256)).ravel()
     np.save(work / f"scores_{spec['solver']}_{spec['N']}.npy", scores)
     emit_result(train_s=train_s, n_sv=int(model.num_support_vectors), gpu_pool_mb=pool)
+
+
+def _merge(args) -> None:
+    """Concatenate two parts and fill r_vs_exact for rows whose part had no
+    exact model (libsvm, else smo) at their N, from the scores in --arrays."""
+    import pandas as pd
+
+    out = merge_parts(dict(zip(("cpu", "gpu"), args.merge_parts)), args.output)
+    if not args.arrays:
+        return
+    arrays = Path(args.arrays)
+    df = pd.read_csv(out, sep="\t", comment="#")
+    for i, r in df.iterrows():
+        if r["status"] != "ok" or pd.notna(r.get("r_vs_exact")):
+            continue
+        ours = arrays / f"scores_{r['run']}_{r['N']}.npy"
+        exact = next(
+            (
+                p
+                for p in (arrays / f"scores_{s}_{r['N']}.npy" for s in ("libsvm", "smo"))
+                if p.exists()
+            ),
+            None,
+        )
+        if ours.exists() and exact is not None:
+            df.loc[i, "r_vs_exact"] = float(
+                np.corrcoef(np.load(ours), np.load(exact))[0, 1]
+            )
+    rewrite_table(out, df.astype({c: "Int64" for c in ("n_sv", "threads") if c in df}))
 
 
 # ── Main ───────────────────────────────────────────────────────────
@@ -176,12 +211,28 @@ def main():
         default=6 * 3600,
         help="Per-run timeout in seconds (default: 6 h)",
     )
+    parser.add_argument(
+        "--arrays",
+        default=None,
+        help="Directory to save held-out scores in, so --merge-parts can "
+        "compare one part's runs with the other's exact model",
+    )
+    parser.add_argument(
+        "--merge-parts",
+        nargs=2,
+        metavar=("PART_TSV", "PART_TSV"),
+        help="Write --output from two parts (e.g. LS-GKM on CPU, gkmsvm-lite "
+        "on GPU), filling r_vs_exact from --arrays",
+    )
     parser.add_argument("--output", default=str(RESULTS / "training_memory.tsv"))
     parser.add_argument("--worker", default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     if args.worker:
         _worker(json.loads(args.worker))
+        return
+    if args.merge_parts:
+        _merge(args)
         return
     # Workers inherit this through the environment
     lite_threads = set_cpu_threads(args.threads)
@@ -208,6 +259,8 @@ def main():
         predict_threads = (
             args.threads if lsgkm_has_option(bins["gkmpredict"], "-T") else None
         )
+        # Untimed: page in the binaries before their first timed run
+        warm_binaries(*bins.values())
 
     from gkmsvm.train import _gram_fits_on_cpu
     from sklearn.metrics import roc_auc_score
@@ -349,6 +402,10 @@ def main():
             )
             rows.append(row)
 
+        if args.arrays:
+            Path(args.arrays).mkdir(parents=True, exist_ok=True)
+            for name, s in scores.items():
+                np.save(Path(args.arrays) / f"scores_{name}_{N}.npy", s)
         exact = scores.get("libsvm", scores.get("smo"))
         for row in rows:
             if row["N"] != N or row.get("run") not in scores:
@@ -385,11 +442,7 @@ def main():
         lite_cpu_threads=lite_threads,
         lsgkm=None
         if "lsgkm" not in solvers
-        else (
-            lsgkm_version(args.conda_env)
-            if not args.lsgkm_bin
-            else f"built from source ({args.lsgkm_bin})"
-        ),
+        else lsgkm_sources(bins, args.conda_env),
     )
     shutil.rmtree(work, ignore_errors=True)
 

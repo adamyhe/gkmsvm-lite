@@ -46,10 +46,12 @@ from _common import (
     lsgkm_binary,
     lsgkm_default_threads,
     lsgkm_has_option,
-    lsgkm_version,
+    lsgkm_sources,
     mlsgkm_binary,
     mlsgkm_version,
+    merge_parts,
     set_cpu_threads,
+    warm_binaries,
     write_header,
     write_seqs,
 )
@@ -313,7 +315,9 @@ def predict_lite(
         model.mlx()
 
     X = model._match_device(X_test)
-    _ = model(X[:1])  # warmup (JIT / GPU transfer)
+    # Warm up JIT / GPU transfer on enough rows (>= 16) to take the timed
+    # call's path: below 16 rows the kernel path is brute force, not the join
+    _ = to_cpu(model(X[:32]))
     # Time building the l-mer table / index too, as gkmpredict's time includes
     # loading its model
     model.clear_caches()
@@ -545,16 +549,39 @@ def main():
         "(LS-GKM's algorithm; slower than the Gram while it fits)",
     )
     parser.add_argument("--plot", action="store_true", help="Save timing plot")
+    parser.add_argument(
+        "--gpu-only",
+        action="store_true",
+        help="Time only gkmsvm-lite on --device (no LS-GKM, mLS-GKM or "
+        "gkmsvm-lite CPU), for a GPU part merged with a CPU part's file",
+    )
+    parser.add_argument(
+        "--merge-parts",
+        nargs=2,
+        metavar=("CPU_TSV", "GPU_TSV"),
+        help="Write --output from a --device cpu file and a --gpu-only file",
+    )
     args = parser.parse_args()
+    if args.merge_parts:
+        merge_parts(
+            dict(zip(("cpu", "gpu"), args.merge_parts)),
+            args.output,
+            on={"Training": ["N"], "Inference": ["N_train"]},
+        )
+        return
+    if args.gpu_only and args.device == "cpu":
+        parser.error("--gpu-only needs --device cuda or mlx")
     lite_threads = set_cpu_threads(args.threads)
 
     if args.setup:
         setup_conda_env(args.conda_env)
 
-    gkmtrain_bin = lsgkm_binary("gkmtrain", args.conda_env, args.lsgkm_bin)
-    gkmpredict_bin = lsgkm_binary("gkmpredict", args.conda_env, args.lsgkm_bin)
+    gkmtrain_bin = gkmpredict_bin = None
+    if not args.gpu_only:
+        gkmtrain_bin = lsgkm_binary("gkmtrain", args.conda_env, args.lsgkm_bin)
+        gkmpredict_bin = lsgkm_binary("gkmpredict", args.conda_env, args.lsgkm_bin)
 
-    if not gkmtrain_bin or not gkmpredict_bin:
+    if not args.gpu_only and (not gkmtrain_bin or not gkmpredict_bin):
         where = args.lsgkm_bin or f"conda env '{args.conda_env}'"
         print(f"Error: gkmtrain/gkmpredict not found in {where}.")
         print(
@@ -567,10 +594,16 @@ def main():
     print(f"LS-GKM C:          {gkmtrain_bin}")
     print(f"gkmsvm-lite device: {args.device}")
     print(f"Kernel:             -t 2 -l {args.l} -k {args.k} -d {args.d}")
-    predict_threads = args.threads if lsgkm_has_option(gkmpredict_bin, "-T") else None
+    predict_threads = (
+        args.threads
+        if gkmpredict_bin and lsgkm_has_option(gkmpredict_bin, "-T")
+        else None
+    )
     print(f"LS-GKM threads:     {args.threads} (gkmpredict: {predict_threads or 1})")
-    mlsgkm_predict = mlsgkm_binary("gkmpredict", args.mlsgkm_bin)
-    if args.mlsgkm_bin and mlsgkm_predict is None:
+    mlsgkm_predict = (
+        None if args.gpu_only else mlsgkm_binary("gkmpredict", args.mlsgkm_bin)
+    )
+    if args.mlsgkm_bin and not args.gpu_only and mlsgkm_predict is None:
         sys.exit(f"gkmpredict not found in {args.mlsgkm_bin}")
     if mlsgkm_predict:
         print(f"mLS-GKM gkmpredict: {mlsgkm_predict} (-t {args.threads})")
@@ -607,13 +640,23 @@ def main():
         test_fa = tmpdir / "test.fa"
         write_seqs(test_fa, test_seqs, "test")
 
-        # Compile Numba/CUDA kernels before the first timed fit
-        warm = (all_pos[:10], all_neg[:10])
-        devices = ["cpu"] + ([args.device] if args.device != "cpu" else [])
+        # Untimed warm-up: compile the Numba/CUDA kernels (training and
+        # prediction) and page in the C binaries before the first timed run
+        warm_binaries(gkmtrain_bin, gkmpredict_bin, mlsgkm_predict)
+        warm = (all_pos[:100], all_neg[:100])
+        devices = ([] if args.gpu_only else ["cpu"]) + (
+            [args.device] if args.device != "cpu" else []
+        )
         solvers = ["auto"] + (["smo"] if args.smo else [])
         for dev in devices:
             for solver in solvers:
-                train_lite(*warm, args.l, args.k, args.d, dev, solver=solver)
+                m, _, _ = train_lite(*warm, args.l, args.k, args.d, dev, solver=solver)
+            # Models from 500 SVs up score through the l-mer table, smaller
+            # ones through the l-mer index: warm both
+            for table in (True, False):
+                m.use_lmer_table = table
+                predict_lite(m, X_test, dev)
+            del m
 
         for N in sizes:
             n_half = N // 2
@@ -637,8 +680,6 @@ def main():
 
             # ── Training ──────────────────────────────────────────
 
-            print(f"  Training LS-GKM C ({args.threads} threads)...")
-            prefix_c = tmpdir / f"lsgkm_{N}"
             cache_mb = (
                 None
                 if args.lsgkm_cache is None
@@ -646,44 +687,50 @@ def main():
                 if args.lsgkm_cache == "gram"
                 else float(args.lsgkm_cache)
             )
-            t_train_c, mem_c = run_gkmtrain(
-                gkmtrain_bin,
-                pos_fa,
-                neg_fa,
-                prefix_c,
-                args.l,
-                args.k,
-                args.d,
-                args.threads,
-                cache_mb,
-            )
+            prefix_c = tmpdir / f"lsgkm_{N}"
             model_c_path = Path(f"{prefix_c}.model.txt")
+            t_train_c = mem_c = None
+            if not args.gpu_only:
+                print(f"  Training LS-GKM C ({args.threads} threads)...")
+                t_train_c, mem_c = run_gkmtrain(
+                    gkmtrain_bin,
+                    pos_fa,
+                    neg_fa,
+                    prefix_c,
+                    args.l,
+                    args.k,
+                    args.d,
+                    args.threads,
+                    cache_mb,
+                )
             n_sv_c = count_svs_in_model(model_c_path) if t_train_c else 0
             if t_train_c is not None:
                 mem_str = f", {mem_c:.0f} MB" if mem_c else ""
                 print(f"    {t_train_c:.1f}s  ({n_sv_c} SVs{mem_str})")
 
-            print("  Training gkmsvm-lite (CPU)...")
-            model_lite_cpu, t_train_cpu, mem_cpu = train_lite(
-                pos_sub,
-                neg_sub,
-                args.l,
-                args.k,
-                args.d,
-                "cpu",
-            )
-            n_sv_lite = model_lite_cpu.num_support_vectors
-            mem_str = f", {mem_cpu:.0f} MB" if mem_cpu else ""
-            print(
-                f"    {t_train_cpu:.1f}s  ({n_sv_lite} SVs{mem_str}; "
-                f"Gram {model_lite_cpu.gram_seconds:.1f}s, "
-                f"solver {t_train_cpu - model_lite_cpu.gram_seconds:.1f}s)"
-            )
+            model_lite_cpu = t_train_cpu = mem_cpu = n_sv_lite = None
+            if not args.gpu_only:
+                print("  Training gkmsvm-lite (CPU)...")
+                model_lite_cpu, t_train_cpu, mem_cpu = train_lite(
+                    pos_sub,
+                    neg_sub,
+                    args.l,
+                    args.k,
+                    args.d,
+                    "cpu",
+                )
+                n_sv_lite = model_lite_cpu.num_support_vectors
+                mem_str = f", {mem_cpu:.0f} MB" if mem_cpu else ""
+                print(
+                    f"    {t_train_cpu:.1f}s  ({n_sv_lite} SVs{mem_str}; "
+                    f"Gram {model_lite_cpu.gram_seconds:.1f}s, "
+                    f"solver {t_train_cpu - model_lite_cpu.gram_seconds:.1f}s)"
+                )
 
             # Same algorithm as LS-GKM: SMO computing kernel columns on demand
             t_train_cpu_smo = None
             mem_cpu_smo = None
-            if args.smo:
+            if args.smo and not args.gpu_only:
                 print("  Training gkmsvm-lite (CPU, SMO)...")
                 model_smo, t_train_cpu_smo, mem_cpu_smo = train_lite(
                     pos_sub,
@@ -719,6 +766,8 @@ def main():
                     f"Gram {model_lite_gpu.gram_seconds:.1f}s, "
                     f"solver {t_train_gpu - model_lite_gpu.gram_seconds:.1f}s)"
                 )
+                if n_sv_lite is None:  # --gpu-only
+                    n_sv_lite = model_lite_gpu.num_support_vectors
 
             t_train_gpu_smo = None
             mem_gpu_smo = None
@@ -750,7 +799,9 @@ def main():
                     "t_lite_cpu_smo": t_train_cpu_smo,
                     "t_lite_gpu": t_train_gpu,
                     "t_lite_gpu_smo": t_train_gpu_smo,
-                    "t_lite_cpu_gram": model_lite_cpu.gram_seconds,
+                    "t_lite_cpu_gram": model_lite_cpu.gram_seconds
+                    if model_lite_cpu
+                    else None,
                     "t_lite_gpu_gram": model_lite_gpu.gram_seconds
                     if model_lite_gpu
                     else None,
@@ -822,15 +873,17 @@ def main():
                     )
 
             # gkmsvm-lite CPU
-            times_cpu = []
-            for rep in range(args.repeats):
-                sc_cpu, t = predict_lite(model_lite_cpu, X_test, "cpu")
-                times_cpu.append(t)
-            t_infer_cpu = float(np.median(times_cpu))
-            print(
-                f"    lite CPU:        {t_infer_cpu:.2f}s  "
-                f"({len(test_seqs) / t_infer_cpu:.0f} seq/s)"
-            )
+            t_infer_cpu = sc_cpu = None
+            if model_lite_cpu is not None:
+                times_cpu = []
+                for rep in range(args.repeats):
+                    sc_cpu, t = predict_lite(model_lite_cpu, X_test, "cpu")
+                    times_cpu.append(t)
+                t_infer_cpu = float(np.median(times_cpu))
+                print(
+                    f"    lite CPU:        {t_infer_cpu:.2f}s  "
+                    f"({len(test_seqs) / t_infer_cpu:.0f} seq/s)"
+                )
 
             # gkmsvm-lite GPU
             t_infer_gpu = None
@@ -848,7 +901,11 @@ def main():
                 )
 
             # Score sanity check (independently trained models)
-            if scores_c is not None and len(scores_c) == len(sc_cpu):
+            if (
+                scores_c is not None
+                and sc_cpu is not None
+                and len(scores_c) == len(sc_cpu)
+            ):
                 r = np.corrcoef(scores_c, sc_cpu)[0, 1]
                 print(f"    Score correlation (C vs lite): r = {r:.4f}")
 
@@ -883,7 +940,9 @@ def main():
     for r in train_results:
         line = f"{r['N']:>7d}  {r['gram_gb']:>5.2f}G"
         line += f"  {r['t_lsgkm']:>9.1f}s" if r["t_lsgkm"] else f"  {'N/A':>10}"
-        line += f"  {r['t_lite_cpu']:>9.1f}s"
+        line += (
+            f"  {r['t_lite_cpu']:>9.1f}s" if r["t_lite_cpu"] else f"  {'N/A':>10}"
+        )
         line += (
             f"  {r['t_lite_cpu_smo']:>9.1f}s"
             if r["t_lite_cpu_smo"] is not None
@@ -931,7 +990,9 @@ def main():
         line += f"  {r['t_lsgkm']:>9.2f}s" if r["t_lsgkm"] else f"  {'N/A':>10}"
         if mls:
             line += f"  {r['t_mlsgkm']:>9.2f}s" if r["t_mlsgkm"] else f"  {'N/A':>10}"
-        line += f"  {r['t_lite_cpu']:>9.2f}s"
+        line += (
+            f"  {r['t_lite_cpu']:>9.2f}s" if r["t_lite_cpu"] else f"  {'N/A':>10}"
+        )
         if gpu:
             if r["t_lite_gpu"] is not None:
                 line += f"  {r['t_lite_gpu']:>9.2f}s"
@@ -954,14 +1015,17 @@ def main():
             "gkmsvm-lite vs LS-GKM C timing comparison",
             args.device,
             kernel=f"-t 2 -l {args.l} -k {args.k} -d {args.d}",
-            lsgkm=(
-                lsgkm_version(args.conda_env)
-                if not args.lsgkm_bin
-                else f"built from source ({args.lsgkm_bin})"
+            lsgkm=None
+            if args.gpu_only
+            else lsgkm_sources(
+                {"gkmtrain": gkmtrain_bin, "gkmpredict": gkmpredict_bin},
+                args.conda_env,
             ),
-            lsgkm_threads=args.threads,
-            mlsgkm=mlsgkm_version(args.mlsgkm_bin),
-            lsgkm_cache_mb=args.lsgkm_cache or "100 (default)",
+            lsgkm_threads=None if args.gpu_only else args.threads,
+            mlsgkm=None if args.gpu_only else mlsgkm_version(args.mlsgkm_bin),
+            lsgkm_cache_mb=None
+            if args.gpu_only
+            else args.lsgkm_cache or "100 (default)",
             lite_cpu_threads=lite_threads,
             test_sequences=args.n_test,
             inference_repeats=args.repeats,
@@ -984,7 +1048,7 @@ def main():
                 str(r["seq_len"]),
                 f"{r['gram_gb']:.3f}",
                 f"{r['t_lsgkm']:.2f}" if r["t_lsgkm"] else "NA",
-                f"{r['t_lite_cpu']:.2f}",
+                f"{r['t_lite_cpu']:.2f}" if r["t_lite_cpu"] else "NA",
                 f"{r['t_lite_cpu_smo']:.2f}" if r["t_lite_cpu_smo"] else "NA",
                 f"{r['t_lite_gpu']:.2f}" if r["t_lite_gpu"] else "NA",
                 f"{r['t_lite_gpu_smo']:.2f}" if r["t_lite_gpu_smo"] else "NA",
@@ -993,9 +1057,11 @@ def main():
                 f"{r['mem_lite_cpu_smo']:.0f}" if r["mem_lite_cpu_smo"] else "NA",
                 f"{r['mem_lite_gpu']:.0f}" if r["mem_lite_gpu"] else "NA",
                 f"{r['mem_lite_gpu_smo']:.0f}" if r["mem_lite_gpu_smo"] else "NA",
-                str(r["n_sv_lsgkm"]),
+                str(r["n_sv_lsgkm"]) if r["t_lsgkm"] else "NA",
                 str(r["n_sv_lite"]),
-                f"{r['t_lite_cpu_gram']:.2f}",
+                f"{r['t_lite_cpu_gram']:.2f}"
+                if r["t_lite_cpu_gram"] is not None
+                else "NA",
                 f"{r['t_lite_gpu_gram']:.2f}"
                 if r["t_lite_gpu_gram"] is not None
                 else "NA",
@@ -1016,7 +1082,7 @@ def main():
                 str(r["n_sv"]),
                 str(r["n_test"]),
                 f"{r['t_lsgkm']:.3f}" if r["t_lsgkm"] else "NA",
-                f"{r['t_lite_cpu']:.3f}",
+                f"{r['t_lite_cpu']:.3f}" if r["t_lite_cpu"] else "NA",
                 f"{r['t_lite_gpu']:.3f}" if r["t_lite_gpu"] else "NA",
                 f"{r['t_mlsgkm']:.3f}" if r["t_mlsgkm"] else "NA",
             ]
@@ -1024,7 +1090,7 @@ def main():
 
     print(f"\nResults saved: {out_path}")
 
-    if args.plot:
+    if args.plot and not args.gpu_only:
         plot_results(train_results, infer_results, args, out_path)
 
 

@@ -1,0 +1,47 @@
+# dsQTL variant scoring time
+# commit: 71506db
+# date: 2026-10-23 08:15 UTC
+# host: sh04-05n16.int
+# command: timing_variants.py --device cpu --conda-env lsgkm --lsgkm-bin /home/groups/akundaje/ayhe/src/lsgkm/bin --mlsgkm-bin /home/groups/akundaje/ayhe/src/mLS-GKM/bin --threads 16 --arrays results/parts/timing_variants.arrays --output results/parts/timing_variants.cpu.tsv
+# cpu: AMD EPYC 9384X 32-Core Processor, 64 logical cores, 64 usable
+# versions: gkmsvm-lite 0.1.0, python 3.11.17, numpy 2.2.6, numba 0.67.0 (16 threads, workqueue layer), cupy 14.2.0
+# slurm: job 49048187, partition akundaje, node sh04-05n16, constraint CPU_SKU:9384X, exclusive 1
+# device: cuda
+# model: gkmsvm_t3_l10_k6_d3_c10_g2_t16_negset1.model.txt
+# n_variants: 28309
+# batch_size: 64
+# lite_cpu_threads: 16,1
+# lsgkm: gkmpredict: ls-gkm 0.1.1 (bioconda) (/home/groups/akundaje/ayhe/envs/lsgkm/bin/gkmpredict); gkmexplain: source build (/home/groups/akundaje/ayhe/src/lsgkm/bin/gkmexplain)
+# mlsgkm: mLS-GKM 2bb06be
+# binaries: {"LS-GKM": {"gkmpredict": "/home/groups/akundaje/ayhe/envs/lsgkm/bin/gkmpredict", "gkmexplain": "/home/groups/akundaje/ayhe/src/lsgkm/bin/gkmexplain"}, "mLS-GKM": {"gkmpredict": "/home/groups/akundaje/ayhe/src/mLS-GKM/bin/gkmpredict", "gkmexplain": "/home/groups/akundaje/ayhe/src/mLS-GKM/bin/gkmexplain"}}
+# gpu_date: 2026-10-23 04:31 UTC
+# gpu_host: sh04-06n12.int
+# gpu_command: timing_variants.py --device cuda --gpu-only --threads 16 --arrays results/parts/timing_variants.arrays --output results/parts/timing_variants.gpu.tsv
+# gpu_cpu: Intel(R) Xeon(R) Gold 6426Y, 32 logical cores, 16 usable
+# gpu_slurm: job 49048192, partition akundaje, node sh04-06n12, constraint GPU_SKU:L40S&CPU_SKU:6426Y, exclusive 0
+# gpu: NVIDIA L40S (45 GB, CC 8.9, CUDA driver 12.4)
+# parts: cpu timing_variants.cpu.tsv, gpu timing_variants.gpu.tsv
+method	implementation	device	threads	n_items	status	wall_s	compute_s	peak_rss_mb	gpu_pool_mb	max_abs_diff	jit_compiles
+ISM	LS-GKM	cpu	16	28309	ok	441.5774708134122	441.5774708134122	263.953125			
+ISM	LS-GKM	cpu	1	28309	ok	1228.12189220218	1228.12189220218	255.37109375		0.0	
+ISM	mLS-GKM	cpu	16	28309	ok	115.9961922657676	115.9961922657676	268.16796875		0.0	
+ISM	mLS-GKM	cpu	1	28309	ok	1251.6892438200302	1251.6892438200302	255.828125		0.0	
+ISM	gkmsvm-lite	cpu	16	28309	ok	55.63296604715288	53.7102516121231	1139.0390625		9.954205694384656e-06	0.0
+ISM	gkmsvm-lite	cpu	1	28309	ok	581.453203259036	577.3371332651004	1139.1875		9.954205694384656e-06	0.0
+GkmExplain	LS-GKM	cpu	1	28309	ok	1540.6579770799726	1540.6579770799726	258.36328125			
+GkmExplain	mLS-GKM	cpu	16	28309	ok	175.15707557322455	175.15707557322455	316.46875		0.0	
+GkmExplain	mLS-GKM	cpu	1	28309	ok	2196.5738228019327	2196.5738228019327	258.8671875		0.0	
+GkmExplain	gkmsvm-lite	cpu	16	28309	ok	38.003619665745646	36.031783684622496	1139.2265625		4.96014826989466e-06	0.0
+GkmExplain	gkmsvm-lite	cpu	1	28309	ok	409.5741032022052	405.583070802968	1139.046875		4.96014826989466e-06	0.0
+deltaSVM	LS-GKM	cpu	16	524800	ok	1979.4259252231568	1979.4259252231568	263.859375			
+deltaSVM	LS-GKM	cpu	1	524800	ok	477.2800853983499	477.2800853983499	255.34375		0.0	
+deltaSVM	mLS-GKM	cpu	16	524800	ok	45.51071049273014	45.51071049273014	273.77734375		0.0	
+deltaSVM	mLS-GKM	cpu	1	524800	ok	460.9567859671079	460.9567859671079	263.31640625		0.0	
+deltaSVM	gkmsvm-lite	cpu	16	1048576	ok	23.19414173392579	21.18694022623822	1156.88671875		4.999881415335139e-06	0.0
+deltaSVM	gkmsvm-lite	cpu	1	1048576	ok	287.4024320631288	283.5173925822601	1139.0546875		4.999881415335139e-06	0.0
+deltaSVM scoring	gkmsvm-lite	cpu	16	28309	ok	1.040881458669901	0.010008349083364	560.7734375			0.0
+deltaSVM scoring	gkmsvm-lite	cpu	1	28309	ok	1.0912080178968608	0.0501435669139027	560.734375			0.0
+ISM	gkmsvm-lite	cuda		28309	ok	7.936276069842279	5.557616711128503	1501.59375	762.26171875	9.954205797413351e-06	0.0
+GkmExplain	gkmsvm-lite	cuda		28309	ok	7.695330649148673	5.11457899492234	1433.81640625	629.98193359375	4.960148284327559e-06	0.0
+deltaSVM	gkmsvm-lite	cuda		1048576	ok	8.63126751407981	5.8682270548306406	1540.640625	2677.66552734375	4.999881286105179e-06	0.0
+deltaSVM scoring	gkmsvm-lite	cuda		28309	ok	1.4392046006396413	0.0143150729127228	562.2578125	113.0166015625		0.0

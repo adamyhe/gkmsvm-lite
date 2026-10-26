@@ -50,7 +50,7 @@ src/gkmsvm/
 
 ## Benchmarks
 
-`benchmarks/` holds the application-note pipeline: one script → one `results/*.tsv` (provenance header from `_common.write_tsv`) → one `make` target per figure panel; `figures.ipynb` only plots. Experiments that feed no figure go in `benchmarks/dev/`. Map of panels and files: `benchmarks/README.md`.
+`benchmarks/` holds the application-note pipeline: one script → one `results/*.tsv` (provenance header from `_common.write_tsv`) → one `make` target per figure panel; `figures.ipynb` only plots. Experiments that feed no figure go in `benchmarks/dev/`. Map of panels and files: `benchmarks/README.md`. On Sherlock, `benchmarks/sherlock/submit.sh` runs each timing panel's CPU and GPU halves as separate jobs on fixed hardware (`make SPLIT=1`: `--gpu-only` / `--merge-parts` in the timing scripts).
 
 ## Conventions
 
