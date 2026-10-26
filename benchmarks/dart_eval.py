@@ -129,7 +129,7 @@ def _h5_to_channels_first(seqs_h5: np.ndarray) -> np.ndarray:
 
 def _get_sv_len(model) -> int:
     """Get the SV sequence length from the model."""
-    return model.support_sequences.shape[2]
+    return model.support_sequences.shape[-1]
 
 
 # ---------------------------------------------------------------------------
