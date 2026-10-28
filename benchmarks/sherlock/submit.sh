@@ -53,7 +53,8 @@ case $GPU in
     l40s) GP=$PARTITION GC="GPU_SKU:L40S&CPU_SKU:6426Y" ;;
     a100) GP=$PARTITION GC="GPU_SKU:A100_SXM4&GPU_MEM:80GB" ;;
     h100) GP=gpu GC="GPU_SKU:H100_SXM5&CPU_SKU:8462Y+" ;; # public gpu: 48 h at most
-    *) echo "Unknown --gpu $GPU (l40s, a100, h100)"; exit 1 ;;
+    p100) GP=$PARTITION GC="GPU_SKU:P100_PCIE&CPU_SKU:E5-2640v4" ;; # CC 6.0, the oldest supported
+    *) echo "Unknown --gpu $GPU (l40s, a100, h100, p100)"; exit 1 ;;
 esac
 GPU_PARTITION=${GPU_PARTITION:-$GP}
 GPU_CONSTRAINT=${GPU_CONSTRAINT:-$GC}
