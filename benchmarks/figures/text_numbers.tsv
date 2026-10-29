@@ -1,25 +1,25 @@
 quantity	value
-training speedup, GPU vs LS-GKM 16 threads, N=20000	43.8171109733416
-training speedup, CPU vs LS-GKM, both 16 thread(s), N=20000	8.078294662247114
-training speedup, CPU vs LS-GKM, both 1 thread(s), N=20000	6.317669124637086
-prediction speedup, GPU vs LS-GKM, 15087 SVs	5.443686006825938
-ISM speedup, gkmsvm-lite CPU vs LS-GKM, both 16 thread(s)	7.9373346810080925
-ISM speedup, gkmsvm-lite CPU vs LS-GKM, both 1 thread(s)	2.1121594744316075
-ISM speedup, gkmsvm-lite GPU vs fastest LS-GKM (16 thread(s))	55.64038686751328
-ISM speedup, gkmsvm-lite CPU vs mLS-GKM, both 16 thread(s)	2.085026208515516
-ISM speedup, gkmsvm-lite CPU vs mLS-GKM, both 1 thread(s)	2.152691285909738
-ISM speedup, gkmsvm-lite GPU vs fastest mLS-GKM (16 thread(s))	14.61594723330647
-GkmExplain speedup, gkmsvm-lite CPU vs LS-GKM, both 1 thread(s)	3.7616098406479463
-GkmExplain speedup, gkmsvm-lite GPU vs fastest LS-GKM (1 thread(s))	200.206858850232
-GkmExplain speedup, gkmsvm-lite CPU vs mLS-GKM, both 16 thread(s)	4.608957702287012
-GkmExplain speedup, gkmsvm-lite CPU vs mLS-GKM, both 1 thread(s)	5.363068137434198
-GkmExplain speedup, gkmsvm-lite GPU vs fastest mLS-GKM (16 thread(s))	22.761474920197486
-deltaSVM table build speedup, gkmsvm-lite CPU vs LS-GKM, both 16 thread(s)	85.3416327247787
-deltaSVM table build speedup, gkmsvm-lite CPU vs LS-GKM, both 1 thread(s)	1.6606682204189347
-deltaSVM table build speedup, gkmsvm-lite GPU vs fastest LS-GKM (1 thread(s))	55.296639180721
-deltaSVM table build speedup, gkmsvm-lite CPU vs mLS-GKM, both 16 thread(s)	1.9621640246408505
-deltaSVM table build speedup, gkmsvm-lite CPU vs mLS-GKM, both 1 thread(s)	1.6038722520826039
-deltaSVM table build speedup, gkmsvm-lite GPU vs fastest mLS-GKM (16 thread(s))	5.272772558432526
+training speedup, GPU vs LS-GKM 16 threads, N=20000	55.03058823529412
+training speedup, CPU vs LS-GKM, both 16 thread(s), N=20000	10.67782681479227
+training speedup, CPU vs LS-GKM, both 1 thread(s), N=20000	7.447298948543499
+prediction speedup, GPU vs LS-GKM, 15087 SVs	6.058628318584071
+ISM speedup, gkmsvm-lite CPU vs LS-GKM, both 16 thread(s)	10.46163004843049
+ISM speedup, gkmsvm-lite CPU vs LS-GKM, both 1 thread(s)	2.5657476755406425
+ISM speedup, gkmsvm-lite GPU vs fastest LS-GKM (16 thread(s))	53.98391247159592
+ISM speedup, gkmsvm-lite CPU vs mLS-GKM, both 16 thread(s)	2.701176663140652
+ISM speedup, gkmsvm-lite CPU vs mLS-GKM, both 1 thread(s)	2.6016002112431105
+ISM speedup, gkmsvm-lite GPU vs fastest mLS-GKM (16 thread(s))	13.938562525940135
+GkmExplain speedup, gkmsvm-lite CPU vs LS-GKM, both 1 thread(s)	4.5801730493664685
+GkmExplain speedup, gkmsvm-lite GPU vs fastest LS-GKM (1 thread(s))	199.61418703347834
+GkmExplain speedup, gkmsvm-lite CPU vs mLS-GKM, both 16 thread(s)	5.95876828042228
+GkmExplain speedup, gkmsvm-lite CPU vs mLS-GKM, both 1 thread(s)	6.446979728953681
+GkmExplain speedup, gkmsvm-lite GPU vs fastest mLS-GKM (16 thread(s))	22.778628469349865
+deltaSVM table build speedup, gkmsvm-lite CPU vs LS-GKM, both 16 thread(s)	89.61161964165954
+deltaSVM table build speedup, gkmsvm-lite CPU vs LS-GKM, both 1 thread(s)	1.6606443834856037
+deltaSVM table build speedup, gkmsvm-lite GPU vs fastest LS-GKM (1 thread(s))	56.994738697891925
+deltaSVM table build speedup, gkmsvm-lite CPU vs mLS-GKM, both 16 thread(s)	2.076701989306617
+deltaSVM table build speedup, gkmsvm-lite CPU vs mLS-GKM, both 1 thread(s)	1.6768236679879083
+deltaSVM table build speedup, gkmsvm-lite GPU vs fastest mLS-GKM (16 thread(s))	5.608624417273377
 dsQTL AUPRC base rate (fraction of dsQTLs)	0.02027623723904059
 dsQTL AUPRC deltaSVM-sum (paper_t2)	0.1931455411100908
 dsQTL AUPRC deltaSVM.pl-sum (paper_t2)	0.189968650454231
