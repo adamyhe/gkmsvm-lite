@@ -37,6 +37,7 @@ Timed runs each execute in their own process, so the reported peak memory is tha
 | S4 | GkmExplain completeness | `s4` | `completeness.py` | `completeness.tsv` |
 | S5 | DART-Eval Task 4 (five cell lines) with ENCODE models and models retrained on DART-Eval's training chromosomes, and Task 5 (caQTL, dsQTL) with ENCODE models, against published DART-Eval and Evo 2 results (`dart_reference.tsv`) | `s5` | `dart_eval.py`, `dart_train.py` | `dart_task4_<cell>_<model>.tsv`, `dart_retrained_task4_<cell>.tsv`, `dart_task5_<model>.tsv` |
 | GPUs | gkmsvm-lite's GPU times in 1B, 1C, S2, S3 and S3B on each host's results (`figures/check_gpus.*`; drawn when `results/<SET>/` exists; not in the paper) | the panels', with `SET=<label>` | as for those panels | `results/<SET>/` |
+| S6 | gkmsvm-lite on the L40S, A100 and P100: each operation's GPU time relative to the L40S, with gkmsvm-lite on 16 CPU threads as a reference, and the GPUs' specs and host CPUs (`figures/figS6_gpus.*`; drawn when `results/<SET>/` holds another GPU's results) | the panels', with `SET=<label>` | as for those panels | `results/`, `results/<SET>/` |
 | check | Retrained models against S5's ENCODE models, Task 4 and Task 5 (GM12878), with training times (`figures/check_dart_retrained.*`; not in the paper) | `s5-retrained` | `dart_train.py`, `dart_eval.py` | `dart_retrained_train_<cell>.tsv`, `dart_retrained_task5_GM12878.tsv` |
 
 The dsQTL reproduction behind 1A, 1D and S1 is written up in [`docs/validation.md`](../docs/validation.md).
