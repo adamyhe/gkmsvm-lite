@@ -1,16 +1,21 @@
 # Validation
 
-gkmsvm-lite is checked against LS-GKM in two ways: oracle tests against `gkmpredict` and `gkmexplain` output on small fixtures, and a full reproduction of the GkmExplain paper's dsQTL benchmark using the paper's own models.
+gkmsvm-lite is checked against LS-GKM in two ways: oracle tests against `gkmpredict`, `gkmexplain` and `gkmtrain` output on small fixtures, and a full reproduction of the GkmExplain paper's dsQTL benchmark using the paper's own models.
 
 ## Oracle tests
 
 | What | Reference | Test |
 |---|---|---|
-| Forward pass, `-t 2` | `gkmpredict` on the Nanog reference model | `tests/test_replication.py` |
-| Forward pass, `-t 2` / `-t 3` | `gkmpredict` on 200-SV fixture models | `tests/test_explain.py::TestMutationImpactOracle` |
-| Mutation impact score | lsgkm `gkmexplain -m 5` (rtol 1e-4) | `tests/test_explain.py::TestMutationImpactOracle` |
+| Forward pass, `-t 2` | `gkmpredict` on the Nanog reference model and an ENCODE model | `tests/test_replication.py`, `tests/test_importers/test_encode_integration.py`, `tests/test_reference/test_reference.py` |
+| Forward pass, `-t 0` to `-t 6` | `gkmpredict` on fixture models (`-t 6`: the kundajelab fork's), with N and odd/even window counts | `tests/test_explain.py::test_fixture_models_match_gkmpredict`, `tests/test_kernels/test_weighted.py::test_matches_gkmpredict`, `tests/test_explain.py::TestMutationImpactOracle` |
+| GkmExplain importance, hypothetical, perturbation | kundajelab fork's `gkmexplain -m 0/1/4` (rtol 2e-5) on every kernel type, every CPU explain path | `tests/test_explain.py::test_matches_lsgkm_gkmexplain` |
+| Mutation impact score | lsgkm `gkmexplain -m 5` on every kernel type, through the l-mer table, index, masked join and brute force | `tests/test_explain.py::TestMutationImpactOracle`, `test_matches_lsgkm_mode5_fixture_models` |
+| Training, C-SVC | `gkmtrain` for `-t 0` to `-t 6` and `-w`: same SVs, coefficients to the solvers' 1e-3 tolerance, `gkmpredict`'s scores to 5e-4 (LIBSVM and SMO); gkmtrain's solutions meet our KKT conditions | `tests/test_train_oracle.py` |
+| Training, epsilon-SVR | kundajelab/lsgkm-svr for `-t 2/3/4` (LIBSVM and SMO) | `tests/test_train_oracle.py::test_svr_matches_lsgkm_svr` |
+| Sequences of different lengths | `gkmpredict`, `gkmtrain` and `gkmexplain` (modes 0/1/4/5) on mixed-length models and queries (`lsgkm_ragged_*`) | `tests/test_variable_length.py`, `tests/test_explain.py` |
+| Classic and R gkmSVM models | each tool's `gkmsvm_kernel` (rtol 1e-5) | `tests/test_importers/test_gkmsvm_tools.py` |
 
-Fixtures were generated with lsgkm built from source, with all parameters passed explicitly (`tests/fixtures/lsgkm_mode5_*`).
+Fixtures were generated with lsgkm built from source, with all parameters passed explicitly (`tests/fixtures/lsgkm_*`; `benchmarks/dev/lsgkm_wgkm_fixtures.py`, `benchmarks/dev/gkmsvm_fixtures.py`).
 
 ## dsQTL variant effect prediction
 
@@ -54,7 +59,7 @@ The paper reports deltaSVM only for the `-t 2` models; ISM and GkmExplain are ou
 | 4 | 0.17943 | 0.17943 | 0.18247 | 0.1867 | 0.1873 |
 | 5 | 0.18483 | 0.18483 | 0.18890 | 0.1918 | 0.1925 |
 
-\* The paper's deltaSVM scores come from a scoring-script quirk (below). `deltaSVM.pl` reproduces it; its scores match the paper's per variant to within 5e-5 (6-decimal output, float32 weight table).
+\* The paper's deltaSVM scores come from a scoring-script quirk (below). `deltaSVM.pl` reproduces it; its scores match the paper's per variant to within 5.4e-5 (6-decimal output, float32 weight table).
 
 ### Scores summed over the five models
 
@@ -88,7 +93,9 @@ make -C benchmarks fig1d     # or: python benchmarks/dsqtl_auprc.py --device cud
 make -C benchmarks fig1a     # or: python benchmarks/agreement_lsgkm.py --device cuda
 ```
 
-`dsqtl_auprc.py` also trains and evaluates models with gkmsvm-lite (`--params l10k6`, `l11k7`, `l10k6_rbf`, `l11k7_rbf`; `make -C benchmarks s1`). On an NVIDIA Titan Xp, each 51bp `-t 3` model takes about 20 minutes for ISM and 13 minutes for GkmExplain over all 28,309 variants. Building each deltaSVM weight table takes 2–7 minutes.
+`dsqtl_auprc.py` also trains and evaluates models with gkmsvm-lite (`--params l10k6`, `l11k7`, `l10k6_rbf`, `l11k7_rbf`; `make -C benchmarks s1`). On an NVIDIA L40S, each 51bp `-t 3` model takes about 6 s for ISM and 5 s for GkmExplain over all 28,309 variants, and 6 s to build its deltaSVM weight table (40 s, 28 s and 20 s on 16 CPU threads; `benchmarks/results/timing_variants.tsv`, see [performance](performance.md#measurements)).
+
+The tables above were last regenerated on 2026-10-29 on an L40S, with all five negsets and both kernels (`make -C benchmarks fig1a fig1d`, `results/agreement_checks.tsv`): per variant, ISM matches the paper's outputs to 1.0e-5 and GkmExplain to 5.0e-6 on every `-t 3` model, and `deltaSVM.pl` to 5.4e-5 on all ten. These runs check the CUDA paths against lsgkm's outputs directly.
 
 ## References
 

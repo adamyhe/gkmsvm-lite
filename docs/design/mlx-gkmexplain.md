@@ -1,6 +1,6 @@
 # GkmExplain on MLX (Metal)
 
-Status: done for the l-mer and index paths (`explain._explain_lmer_metal`), as planned in steps 1 and 3 below plus a compensated sum for the RBF neighbor weights (step 2 was not needed). The explain table and the per-SV kernel still run on a CPU copy of the model; the result is NumPy float64 on every path.
+Status: done for the l-mer and index paths (`explain._explain_lmer_metal`), as planned in steps 1 and 3 below plus a compensated sum for the RBF neighbor weights (step 2 was not needed). The per-SV kernel has since moved to Metal too (`_explain_sv_metal`, with the same per-window partials folded in float64 on CPU); only the explain table runs on a CPU copy of the model. The result is NumPy float64 on every path.
 
 Measured (100 random 300 bp sequences, M4; error relative to the CPU's largest attribution):
 
