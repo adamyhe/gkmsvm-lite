@@ -3,7 +3,7 @@
 All notable changes to gkmsvm-lite are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.2.0] - unreleased
+## [0.2.0] - 2026-10-30
 
 ### Breaking changes
 
@@ -84,3 +84,6 @@ Removed or renamed API:
 ## [0.1.0] - 2026-10-03
 
 First release.
+
+[0.2.0]: https://github.com/adamyhe/gkmsvm-lite/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/adamyhe/gkmsvm-lite/releases/tag/v0.1.0
