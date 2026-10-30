@@ -294,10 +294,10 @@ def test_n_reads_as_a(include_rc):
 def test_array_path_matches_cpu(device, include_rc):
     """The CUDA/MLX path (strided windows of base codes) against the numba one,
     over sequences with N, mixed lengths and the chunked branch."""
-    from gkmsvm.backend import HAS_CUPY, to_cpu
+    from gkmsvm.backend import cuda_available, to_cpu
 
-    if device == "cuda" and not HAS_CUPY:
-        pytest.skip("CuPy not installed")
+    if device == "cuda" and not cuda_available():
+        pytest.skip("No CUDA GPU (or CuPy not installed)")
     if device == "mlx":
         pytest.importorskip("mlx.core")
     model, weights = _random_model(8, 5, include_rc, 1)

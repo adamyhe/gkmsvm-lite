@@ -12,6 +12,7 @@
 #   bash benchmarks/run.sh --quick            # small settings, results/quick/
 #   bash benchmarks/run.sh -B fig1b           # rerun even if results are up to date
 #   bash benchmarks/run.sh --cpu-only fig1b
+#   bash benchmarks/run.sh --set a100 fig1b fig1c s2 s3   # second host: results/a100/
 #   bash benchmarks/run.sh --lsgkm-bin <lsgkm>/bin fig1c   # source build with gkmexplain
 #   bash benchmarks/run.sh --mlsgkm-bin <mLS-GKM>/bin       # add the mLS-GKM baseline
 #
@@ -29,6 +30,7 @@ TARGETS=()
 while [[ $# -gt 0 ]]; do
     case $1 in
         --quick)     MAKE_VARS+=(QUICK=1); shift ;;
+        --set)       MAKE_VARS+=("SET=$2"); shift 2 ;;
         -B|--force)  MAKE_FLAGS+=(-B); shift ;;
         --cpu-only)  DEVICE="cpu"; shift ;;
         --lsgkm-bin) MAKE_VARS+=("LSGKM_BIN=$2"); shift 2 ;;
@@ -44,8 +46,10 @@ done
 CONDA=conda
 command -v mamba &>/dev/null && CONDA=mamba
 
-COMMIT="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)"
-if [[ -n "$(git -C "$REPO" status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
+COMMIT="$(cd "$REPO" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+# Outputs (results/, figures/) don't count, as in _common._git_commit
+if [[ -n "$(cd "$REPO" && git status --porcelain --untracked-files=no 2>/dev/null \
+        | grep -vE '^.. "?benchmarks/(results|figures)/')" ]]; then
     echo "WARNING: $REPO has uncommitted changes; results will be tagged ${COMMIT}-dirty"
 fi
 echo ">>> Repo: $REPO @ $COMMIT"

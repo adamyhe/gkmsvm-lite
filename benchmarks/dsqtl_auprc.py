@@ -356,7 +356,7 @@ def _load_paper_model(tag: str, neg_idx: int):
         MODEL_DIR.mkdir(parents=True, exist_ok=True)
         print(f"  Downloading {path.name}...")
         urlretrieve(PAPER_MODEL_URL.format(tag=tag, i=neg_idx), path)
-    return load_lsgkm_model(str(path), dtype=np.float64)
+    return load_lsgkm_model(str(path))
 
 
 def train_models(

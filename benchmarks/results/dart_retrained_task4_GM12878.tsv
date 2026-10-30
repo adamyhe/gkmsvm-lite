@@ -1,0 +1,14 @@
+# DART-Eval, task activity
+# commit: 9f71761-dirty
+# date: 2026-10-29 10:43 UTC
+# host: sh04-03n09.int
+# command: dart_eval.py -m data/models/retrained/GM12878.npz --task activity --cell-lines GM12878 --device cuda --work-dir data/dart-eval --output results/dart_retrained_task4_GM12878.tsv -v
+# cpu: Intel(R) Xeon(R) Gold 6426Y, 32 logical cores, 16 usable
+# versions: gkmsvm-lite 0.1.0, python 3.11.17, numpy 2.2.6, numba 0.67.0 (16 threads, workqueue layer), cupy 14.2.0
+# slurm: job 50099855, partition akundaje, node sh04-03n09, constraint GPU_SKU:L40S&CPU_SKU:6426Y, exclusive 0
+# device: cuda
+# gpu: NVIDIA L40S (45 GB, CC 8.9, CUDA driver 12.4)
+# model: GM12878.npz
+# vep_method: kernel
+cell_line	n_idr_peaks	n_nonpeaks	auroc	auprc	auprc_baseline	elapsed	pearson_peaks	spearman_peaks	pearson_all	spearman_all	n_peaks
+GM12878	14303	28208	0.8668225301610802	0.777147301379076	0.33645409423443345	4.967081063427031	0.4323351754259338	0.37955547718081784	0.592690780477825	0.6048088047983491	30016

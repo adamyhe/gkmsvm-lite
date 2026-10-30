@@ -1,0 +1,24 @@
+method	implementation	device	threads	peak_rss_mb	gpu_pool_mb
+ISM	LS-GKM	cpu	16.0	263.953125	
+ISM	LS-GKM	cpu	1.0	255.34765625	
+ISM	mLS-GKM	cpu	16.0	268.171875	
+ISM	mLS-GKM	cpu	1.0	255.7265625	
+ISM	gkmsvm-lite	cpu	16.0	746.90234375	
+ISM	gkmsvm-lite	cpu	1.0	747.08984375	
+GkmExplain	LS-GKM	cpu	1.0	258.375	
+GkmExplain	mLS-GKM	cpu	16.0	316.4140625	
+GkmExplain	mLS-GKM	cpu	1.0	258.87109375	
+GkmExplain	gkmsvm-lite	cpu	16.0	746.9296875	
+GkmExplain	gkmsvm-lite	cpu	1.0	747.0703125	
+deltaSVM	LS-GKM	cpu	16.0	263.85546875	
+deltaSVM	LS-GKM	cpu	1.0	255.34375	
+deltaSVM	mLS-GKM	cpu	16.0	273.7734375	
+deltaSVM	mLS-GKM	cpu	1.0	263.3125	
+deltaSVM	gkmsvm-lite	cpu	16.0	746.87109375	
+deltaSVM	gkmsvm-lite	cpu	1.0	747.0390625	
+deltaSVM scoring	gkmsvm-lite	cpu	16.0	315.6796875	
+deltaSVM scoring	gkmsvm-lite	cpu	1.0	315.765625	
+ISM	gkmsvm-lite	cuda		868.8359375	337.58447265625
+GkmExplain	gkmsvm-lite	cuda		868.76171875	337.58056640625
+deltaSVM	gkmsvm-lite	cuda		961.734375	2385.26416015625
+deltaSVM scoring	gkmsvm-lite	cuda		461.5390625	97.1064453125

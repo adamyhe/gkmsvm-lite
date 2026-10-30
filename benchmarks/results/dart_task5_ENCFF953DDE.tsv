@@ -1,0 +1,15 @@
+# DART-Eval, task vep
+# commit: 9f71761-dirty
+# date: 2026-10-29 11:03 UTC
+# host: sh04-03n09.int
+# command: dart_eval.py -m data/models/ENCFF953DDE.model.txt.gz --task vep --vep-tasks all --vep-method gkmexplain --device cuda --work-dir data/dart-eval --output results/dart_task5_ENCFF953DDE.tsv -v
+# cpu: Intel(R) Xeon(R) Gold 6426Y, 32 logical cores, 16 usable
+# versions: gkmsvm-lite 0.1.0, python 3.11.17, numpy 2.2.6, numba 0.67.0 (16 threads, workqueue layer), cupy 14.2.0
+# slurm: job 50099855, partition akundaje, node sh04-03n09, constraint GPU_SKU:L40S&CPU_SKU:6426Y, exclusive 0
+# device: cuda
+# gpu: NVIDIA L40S (45 GB, CC 8.9, CUDA driver 12.4)
+# model: ENCFF953DDE.model.txt.gz
+# vep_method: gkmexplain
+n_sig	n_ctrl	auroc	auprc	auprc_baseline	method	pearson_effect	spearman_effect	task	elapsed
+560	26813	0.680126844121455	0.10776071587464692	0.020458115661418187	gkmexplain	0.6199701046027333	0.657214805454529	dsQTL	7.509088267572224
+6821	77999	0.6637326418796219	0.2344045820281142	0.08041735439754776	gkmexplain	0.6040396166733256	0.6210447485484434	caQTL	6.981202130205929

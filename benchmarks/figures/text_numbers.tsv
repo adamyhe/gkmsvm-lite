@@ -1,0 +1,31 @@
+quantity	value
+training speedup, GPU vs LS-GKM 16 threads, N=20000	55.03058823529412
+training speedup, CPU vs LS-GKM, both 16 thread(s), N=20000	10.67782681479227
+training speedup, CPU vs LS-GKM, both 1 thread(s), N=20000	7.447298948543499
+prediction speedup, GPU vs LS-GKM, 15087 SVs	6.058628318584071
+ISM speedup, gkmsvm-lite CPU vs LS-GKM, both 16 thread(s)	10.46163004843049
+ISM speedup, gkmsvm-lite CPU vs LS-GKM, both 1 thread(s)	2.5657476755406425
+ISM speedup, gkmsvm-lite GPU vs fastest LS-GKM (16 thread(s))	53.98391247159592
+ISM speedup, gkmsvm-lite CPU vs mLS-GKM, both 16 thread(s)	2.701176663140652
+ISM speedup, gkmsvm-lite CPU vs mLS-GKM, both 1 thread(s)	2.6016002112431105
+ISM speedup, gkmsvm-lite GPU vs fastest mLS-GKM (16 thread(s))	13.938562525940135
+GkmExplain speedup, gkmsvm-lite CPU vs LS-GKM, both 1 thread(s)	4.5801730493664685
+GkmExplain speedup, gkmsvm-lite GPU vs fastest LS-GKM (1 thread(s))	199.61418703347834
+GkmExplain speedup, gkmsvm-lite CPU vs mLS-GKM, both 16 thread(s)	5.95876828042228
+GkmExplain speedup, gkmsvm-lite CPU vs mLS-GKM, both 1 thread(s)	6.446979728953681
+GkmExplain speedup, gkmsvm-lite GPU vs fastest mLS-GKM (16 thread(s))	22.778628469349865
+deltaSVM table build speedup, gkmsvm-lite CPU vs LS-GKM, both 16 thread(s)	89.61161964165954
+deltaSVM table build speedup, gkmsvm-lite CPU vs LS-GKM, both 1 thread(s)	1.6606443834856037
+deltaSVM table build speedup, gkmsvm-lite GPU vs fastest LS-GKM (1 thread(s))	56.994738697891925
+deltaSVM table build speedup, gkmsvm-lite CPU vs mLS-GKM, both 16 thread(s)	2.076701989306617
+deltaSVM table build speedup, gkmsvm-lite CPU vs mLS-GKM, both 1 thread(s)	1.6768236679879083
+deltaSVM table build speedup, gkmsvm-lite GPU vs fastest mLS-GKM (16 thread(s))	5.608624417273377
+dsQTL AUPRC base rate (fraction of dsQTLs)	0.02027623723904059
+dsQTL AUPRC deltaSVM-sum (paper_t2)	0.1931455411100908
+dsQTL AUPRC deltaSVM.pl-sum (paper_t2)	0.189968650454231
+dsQTL AUPRC ISM-sum (paper_t2)	0.1974377678174587
+dsQTL AUPRC GkmExplain-sum (paper_t2)	0.1982138296570157
+dsQTL AUPRC deltaSVM-sum (paper_t3)	0.1820683993083621
+dsQTL AUPRC deltaSVM.pl-sum (paper_t3)	0.1902082544527974
+dsQTL AUPRC ISM-sum (paper_t3)	0.195501504498712
+dsQTL AUPRC GkmExplain-sum (paper_t3)	0.1964711857504636

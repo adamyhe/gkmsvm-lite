@@ -1,0 +1,14 @@
+# DART-Eval, task activity
+# commit: 9f71761-dirty
+# date: 2026-10-29 10:42 UTC
+# host: sh04-03n09.int
+# command: dart_eval.py -m data/models/ENCFF795HQE.model.txt.gz --task activity --cell-lines K562 --device cuda --work-dir data/dart-eval --output results/dart_task4_K562_ENCFF795HQE.tsv -v
+# cpu: Intel(R) Xeon(R) Gold 6426Y, 32 logical cores, 16 usable
+# versions: gkmsvm-lite 0.1.0, python 3.11.17, numpy 2.2.6, numba 0.67.0 (16 threads, workqueue layer), cupy 14.2.0
+# slurm: job 50099855, partition akundaje, node sh04-03n09, constraint GPU_SKU:L40S&CPU_SKU:6426Y, exclusive 0
+# device: cuda
+# gpu: NVIDIA L40S (45 GB, CC 8.9, CUDA driver 12.4)
+# model: ENCFF795HQE.model.txt.gz
+# vep_method: kernel
+cell_line	n_idr_peaks	n_nonpeaks	auroc	auprc	auprc_baseline	elapsed	pearson_peaks	spearman_peaks	pearson_all	spearman_all	n_peaks
+K562	23992	36747	0.8555828784575129	0.8013120047495733	0.39500156406921416	8.585325955413282	0.1721764826747473	0.15590681490011454	0.5199739794101425	0.559625372374135	36747

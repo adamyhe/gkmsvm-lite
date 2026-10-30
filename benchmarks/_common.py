@@ -48,9 +48,21 @@ def _run(cmd: list[str], cwd: Path | None = None) -> str | None:
     return out.stdout.strip() if out.returncode == 0 else None
 
 
+# Outputs, not code: rerunning a panel rewrites its committed result file (write_tsv
+# empties it before the header's git status runs), so changes here don't make a
+# run "dirty"
+OUTPUT_DIRS = ("benchmarks/results/", "benchmarks/figures/")
+
+
 def _git_commit() -> str:
+    """HEAD's short hash, with -dirty if a tracked file outside OUTPUT_DIRS differs."""
     commit = _run(["git", "rev-parse", "--short", "HEAD"], cwd=REPO) or "unknown"
-    dirty = _run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=REPO)
+    status = _run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=REPO) or ""
+    # Lines are "XY path" or "XY old -> new" (_run strips the first one's leading
+    # space). git before 1.9 (Sherlock's 1.8.3) has no exclude pathspecs, so filter here
+    paths = [p.strip('"') for line in status.splitlines()
+             for p in line[2:].lstrip().split(" -> ")]
+    dirty = any(not p.startswith(OUTPUT_DIRS) for p in paths)
     return commit + ("-dirty" if dirty else "")
 
 
@@ -105,9 +117,31 @@ def _gpu() -> str | None:
         name = props["name"]
         name = name.decode() if isinstance(name, bytes) else name
         cc = f"{props['major']}.{props['minor']}"
-        return f"{name} ({props['totalGlobalMem'] / 1024**3:.0f} GB, CC {cc})"
+        driver = cp.cuda.runtime.driverGetVersion()
+        return (
+            f"{name} ({props['totalGlobalMem'] / 1024**3:.0f} GB, CC {cc}, "
+            f"CUDA driver {driver // 1000}.{driver % 1000 // 10})"
+        )
     except (ImportError, RuntimeError):
         return None
+
+
+def _slurm() -> str | None:
+    """The Slurm job this process runs in: id, partition, node, constraint."""
+    job = os.environ.get("SLURM_JOB_ID")
+    if not job:
+        return None
+    parts = [f"job {job}"]
+    for label, var in (
+        ("partition", "SLURM_JOB_PARTITION"),
+        ("node", "SLURMD_NODENAME"),
+        # Set by benchmarks/sherlock/job.sh: Slurm exports no constraint variable
+        ("constraint", "BENCH_CONSTRAINT"),
+        ("exclusive", "BENCH_EXCLUSIVE"),
+    ):
+        if os.environ.get(var):
+            parts.append(f"{label} {os.environ[var]}")
+    return ", ".join(parts)
 
 
 def _versions() -> str:
@@ -199,6 +233,22 @@ def lsgkm_binary(
     return None
 
 
+def warm_binaries(*binaries: str | None) -> None:
+    """Run each C binary once, untimed, before timed runs.
+
+    Without arguments LS-GKM's binaries print their usage and exit, which
+    reads the executable and its shared libraries (from a conda env or a
+    source build, on a network filesystem on clusters) into the page cache,
+    so the first timed run doesn't pay for that and later ones don't skip it.
+    """
+    for b in dict.fromkeys(b for b in binaries if b):
+        for _ in range(2):
+            try:
+                subprocess.run([b], capture_output=True, timeout=60, check=False)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+
+
 def lsgkm_has_option(binary: str, option: str) -> bool:
     """Whether an LS-GKM binary's usage text lists ``option`` (e.g. ``-T``)."""
     try:
@@ -263,6 +313,24 @@ def lsgkm_version(conda_env: str = "lsgkm") -> str | None:
     return f"ls-gkm {pkgs[0]['version']} (bioconda)" if pkgs else None
 
 
+def lsgkm_sources(binaries: dict[str, str | None], conda_env: str = "lsgkm") -> str:
+    """Where each LS-GKM binary came from, for result headers.
+
+    ``lsgkm_binary`` takes a binary from the conda env when it has it (bioconda's
+    ls-gkm, the official Dongwon-Lee/lsgkm) and from ``bin_dir`` otherwise (a
+    source build, e.g. the kundajelab fork for gkmexplain), so one run can mix both.
+    """
+    parts = []
+    for name, path in binaries.items():
+        if not path:
+            continue
+        prefix = Path(path).resolve().parent.parent
+        conda = (prefix / "conda-meta").is_dir()
+        origin = (lsgkm_version(conda_env) or "conda") if conda else "source build"
+        parts.append(f"{name}: {origin} ({path})")
+    return "; ".join(parts)
+
+
 def provenance(device: str | None = None, **extra) -> dict[str, str]:
     """Key/value header describing how a result was produced."""
     info = {
@@ -275,6 +343,8 @@ def provenance(device: str | None = None, **extra) -> dict[str, str]:
         "cpu": f"{_cpu_model()}, {os.cpu_count()} logical cores, {usable_cores()} usable",
         "versions": _versions(),
     }
+    if _slurm():
+        info["slurm"] = _slurm()
     if device is not None:
         info["device"] = device
     if device in ("cuda", "both"):
@@ -312,6 +382,109 @@ def read_provenance(path) -> dict[str, str]:
             if sep:
                 info[key] = value
     return info
+
+
+# ── CPU and GPU parts of one result file ───────────────────────────
+
+
+def _read_part(path: Path):
+    """(title, provenance, {section or None: DataFrame of strings})."""
+    import io
+
+    import pandas as pd
+
+    lines = path.read_text().splitlines()
+    title = lines[0][2:] if lines and lines[0].startswith("# ") else ""
+    sections, current = {None: []}, None
+    for line in lines:
+        if line.startswith("## "):
+            current = line[3:].strip()
+            sections[current] = []
+        elif line and not line.startswith("#"):
+            sections[current].append(line)
+    frames = {
+        k: pd.read_csv(
+            io.StringIO("\n".join(v)), sep="\t", dtype=str, keep_default_na=False
+        ).replace({"NA": None, "": None})
+        for k, v in sections.items()
+        if v
+    }
+    return title, read_provenance(path), frames
+
+
+def merge_parts(parts: dict[str, Path], out: Path, on: dict | None = None) -> Path:
+    """Combine result files that ran the CPU and GPU halves of one benchmark.
+
+    ``parts`` maps a label ("cpu", "gpu") to a part file written by
+    ``write_tsv``/``write_header``, the first part taking precedence. Tables
+    are concatenated, or with ``on`` ({section: key columns}) joined on those
+    columns, each cell taken from the first part that has a value (for
+    timing_train.py's wide, sectioned file). Header keys that agree across
+    parts are written once; otherwise the first part's value keeps the key and
+    the others are written as ``<label>_<key>`` (``gpu_host`` etc.). Values
+    are copied as text, so numbers keep the parts' formatting.
+    """
+    import pandas as pd
+
+    read = {label: _read_part(Path(p)) for label, p in parts.items()}
+    labels = list(read)
+    title = read[labels[0]][0]
+    provs = {label: r[1] for label, r in read.items()}
+    commits = {p.get("commit") for p in provs.values()}
+    if len(commits) > 1:
+        warnings.warn(f"{out}: parts ran different commits {commits}", stacklevel=2)
+    header = {}
+    for label in labels:
+        for key, value in provs[label].items():
+            if key not in header:
+                header[key] = value
+            elif header[key] != value:
+                header[f"{label}_{key}"] = value
+    devices = {p.get("device") for p in provs.values()}
+    if "cuda" in devices:
+        header["device"] = "cuda"  # what a single run on CPU and GPU recorded
+        for label in labels:
+            header.pop(f"{label}_device", None)
+    header["parts"] = ", ".join(f"{label} {Path(parts[label]).name}" for label in labels)
+
+    sections = list(dict.fromkeys(k for r in read.values() for k in r[2]))
+    merged = {}
+    for sec in sections:
+        frames = [r[2][sec] for r in read.values() if sec in r[2]]
+        keys = (on or {}).get(sec)
+        if keys:
+            df = frames[0].set_index(keys)
+            for f in frames[1:]:
+                df = df.combine_first(f.set_index(keys))
+            # combine_first sorts the index and the columns; keep the first part's order
+            cols = list(dict.fromkeys(c for f in frames for c in f.columns if c not in keys))
+            df = df.reset_index()[keys + cols]
+            df = df.iloc[pd.to_numeric(df[keys[0]], errors="coerce").argsort(kind="stable")]
+        else:
+            df = pd.concat(frames, ignore_index=True)
+        merged[sec] = df
+
+    out = Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "w") as f:
+        f.write(f"# {title}\n")
+        for key, value in header.items():
+            f.write(f"# {key}: {value}\n")
+        for sec, df in merged.items():
+            if sec is not None:
+                f.write(f"\n## {sec}\n")
+            df.to_csv(f, sep="\t", index=False, na_rep="NA" if on else "")
+    print(f"Merged {', '.join(str(p) for p in parts.values())} -> {out}")
+    return out
+
+
+def rewrite_table(path, df) -> None:
+    """Replace the table of a single-table result file, keeping its header."""
+    path = Path(path)
+    header = [line for line in path.read_text().splitlines() if line.startswith("#")]
+    with open(path, "w") as f:
+        f.write("\n".join(header) + "\n")
+        df.to_csv(f, sep="\t", index=False)
 
 
 # ── Measured child processes ───────────────────────────────────────
@@ -423,20 +596,24 @@ def emit_result(**values) -> None:
 
 
 def gpu_sync() -> None:
-    try:
+    """Wait for queued GPU work; a no-op without a GPU (CuPy also imports on a
+    cluster's CPU nodes, where synchronizing raises)."""
+    from gkmsvm.backend import cuda_available
+
+    if cuda_available():
         import cupy as cp
 
         cp.cuda.Stream.null.synchronize()
-    except ImportError:
-        pass
 
 
 def gpu_pool_mb() -> float | None:
     """MB held by CuPy's default memory pool (blocks are cached, so this tracks the peak)."""
-    try:
-        import cupy as cp
-    except ImportError:
+    from gkmsvm.backend import cuda_available
+
+    if not cuda_available():
         return None
+    import cupy as cp
+
     return cp.get_default_memory_pool().total_bytes() / 1024**2
 
 
@@ -479,6 +656,33 @@ def _jit_workload(device: str) -> None:
             dsvm.cuda()
         to_cpu(dsvm.score_variants(X, alt))
     gpu_sync()
+
+
+def jit_cache_files() -> set[str]:
+    """Files in the on-disk Numba and CuPy kernel caches.
+
+    Both write a cache file only when they compile (loading writes nothing),
+    so files that appear while a timed process runs mean it compiled
+    something: compare snapshots taken before and after it.
+    """
+    from importlib.util import find_spec
+
+    files = set()
+    numba_dir = os.environ.get("NUMBA_CACHE_DIR")
+    if numba_dir:
+        roots = [Path(numba_dir)]
+    else:  # next to the sources, in __pycache__
+        spec = find_spec("gkmsvm")
+        roots = [Path(spec.origin).parent] if spec and spec.origin else []
+    for root in roots:
+        if root.is_dir():
+            files |= {str(p) for ext in ("*.nbi", "*.nbc") for p in root.rglob(ext)}
+    cupy_dir = Path(
+        os.environ.get("CUPY_CACHE_DIR") or Path.home() / ".cupy" / "kernel_cache"
+    )
+    if cupy_dir.is_dir():
+        files |= {str(p) for p in cupy_dir.rglob("*") if p.is_file()}
+    return files
 
 
 def warm_jit_cache(device: str) -> None:

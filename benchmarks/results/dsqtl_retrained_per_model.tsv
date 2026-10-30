@@ -1,0 +1,53 @@
+# dsQTL AUPRC per model
+# commit: 9f71761-dirty
+# date: 2026-10-29 10:41 UTC
+# host: sh04-03n09.int
+# command: dsqtl_auprc.py --device cuda --params l10k6,l10k6_rbf --force-train --output results/dsqtl_retrained_summed.tsv --per-model-output results/dsqtl_retrained_per_model.tsv
+# cpu: Intel(R) Xeon(R) Gold 6426Y, 32 logical cores, 16 usable
+# versions: gkmsvm-lite 0.1.0, python 3.11.17, numpy 2.2.6, numba 0.67.0 (16 threads, workqueue layer), cupy 14.2.0
+# slurm: job 50099855, partition akundaje, node sh04-03n09, constraint GPU_SKU:L40S&CPU_SKU:6426Y, exclusive 0
+# device: cuda
+# gpu: NVIDIA L40S (45 GB, CC 8.9, CUDA driver 12.4)
+# params: l10k6,l10k6_rbf
+# negsets: 5
+params	negset	method	auprc	paper_auprc
+l10k6	1	deltaSVM	0.18215728133093104	
+l10k6	1	deltaSVM.pl	0.1791792925928777	0.17918
+l10k6	1	ISM	0.18578664921461566	
+l10k6	1	GkmExplain	0.18595210881523327	
+l10k6	2	deltaSVM	0.1879752617327614	
+l10k6	2	deltaSVM.pl	0.18568103009971207	0.18565
+l10k6	2	ISM	0.19103654523270167	
+l10k6	2	GkmExplain	0.19261914721441117	
+l10k6	3	deltaSVM	0.1795063024263307	
+l10k6	3	deltaSVM.pl	0.17696189668756115	0.17697
+l10k6	3	ISM	0.18246158144862787	
+l10k6	3	GkmExplain	0.18334389996890918	
+l10k6	4	deltaSVM	0.18246651403920955	
+l10k6	4	deltaSVM.pl	0.1794204725848022	0.17943
+l10k6	4	ISM	0.18668685825901993	
+l10k6	4	GkmExplain	0.18731841846391545	
+l10k6	5	deltaSVM	0.18889830207333344	
+l10k6	5	deltaSVM.pl	0.18482613855142557	0.18483
+l10k6	5	ISM	0.19183129620191733	
+l10k6	5	GkmExplain	0.19249339686929376	
+l10k6_rbf	1	deltaSVM	0.16422748311737284	
+l10k6_rbf	1	deltaSVM.pl	0.18286431089381988	0.18287
+l10k6_rbf	1	ISM	0.1880849039634806	0.18808
+l10k6_rbf	1	GkmExplain	0.18904864782391706	0.18905
+l10k6_rbf	2	deltaSVM	0.18200020863527733	
+l10k6_rbf	2	deltaSVM.pl	0.18647005166110603	0.18649
+l10k6_rbf	2	ISM	0.18967423563214517	0.18968
+l10k6_rbf	2	GkmExplain	0.19101591452746516	0.19101
+l10k6_rbf	3	deltaSVM	0.17565120898264122	
+l10k6_rbf	3	deltaSVM.pl	0.17999145254295934	0.18001
+l10k6_rbf	3	ISM	0.18433630287906455	0.18433
+l10k6_rbf	3	GkmExplain	0.18523022305954134	0.18523
+l10k6_rbf	4	deltaSVM	0.17824544784188967	
+l10k6_rbf	4	deltaSVM.pl	0.18026855533528183	0.18028
+l10k6_rbf	4	ISM	0.18571073385116904	0.18569
+l10k6_rbf	4	GkmExplain	0.1869845858738004	0.18698
+l10k6_rbf	5	deltaSVM	0.17515065103477515	
+l10k6_rbf	5	deltaSVM.pl	0.18733721576569726	0.18733
+l10k6_rbf	5	ISM	0.1943283654506079	0.19432
+l10k6_rbf	5	GkmExplain	0.1947786368164004	0.19477

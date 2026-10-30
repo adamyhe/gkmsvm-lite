@@ -1,0 +1,53 @@
+# dsQTL AUPRC per model
+# commit: 9f71761-dirty
+# date: 2026-10-29 10:29 UTC
+# host: sh04-03n09.int
+# command: dsqtl_auprc.py --device cuda --params paper_t2,paper_t3 --output results/dsqtl_summed.tsv --per-model-output results/dsqtl_per_model.tsv
+# cpu: Intel(R) Xeon(R) Gold 6426Y, 32 logical cores, 16 usable
+# versions: gkmsvm-lite 0.1.0, python 3.11.17, numpy 2.2.6, numba 0.67.0 (16 threads, workqueue layer), cupy 14.2.0
+# slurm: job 50099855, partition akundaje, node sh04-03n09, constraint GPU_SKU:L40S&CPU_SKU:6426Y, exclusive 0
+# device: cuda
+# gpu: NVIDIA L40S (45 GB, CC 8.9, CUDA driver 12.4)
+# params: paper_t2,paper_t3
+# negsets: 5
+params	negset	method	auprc	paper_auprc
+paper_t2	1	deltaSVM	0.18215521797959594	
+paper_t2	1	deltaSVM.pl	0.17917802976654756	0.17918
+paper_t2	1	ISM	0.18578495963270872	
+paper_t2	1	GkmExplain	0.18595426780457894	
+paper_t2	2	deltaSVM	0.1879489406099733	
+paper_t2	2	deltaSVM.pl	0.1856554010642188	0.18565
+paper_t2	2	ISM	0.1910313977204029	
+paper_t2	2	GkmExplain	0.19260123142091715	
+paper_t2	3	deltaSVM	0.1795165338688915	
+paper_t2	3	deltaSVM.pl	0.17697378801929806	0.17697
+paper_t2	3	ISM	0.18246556215201432	
+paper_t2	3	GkmExplain	0.1833449113760595	
+paper_t2	4	deltaSVM	0.18247412683092923	
+paper_t2	4	deltaSVM.pl	0.17942769399912756	0.17943
+paper_t2	4	ISM	0.1867234506491219	
+paper_t2	4	GkmExplain	0.1873395588739704	
+paper_t2	5	deltaSVM	0.18889916699170406	
+paper_t2	5	deltaSVM.pl	0.18482682176399579	0.18483
+paper_t2	5	ISM	0.19184000173006654	
+paper_t2	5	GkmExplain	0.1924654122490842	
+paper_t3	1	deltaSVM	0.1642305518653473	
+paper_t3	1	deltaSVM.pl	0.18286849011936152	0.18287
+paper_t3	1	ISM	0.18808115651147456	0.18808
+paper_t3	1	GkmExplain	0.1890503602384843	0.18905
+paper_t3	2	deltaSVM	0.18201761793048443	
+paper_t3	2	deltaSVM.pl	0.18648550627717148	0.18649
+paper_t3	2	ISM	0.1896764950258068	0.18968
+paper_t3	2	GkmExplain	0.19101241098289204	0.19101
+paper_t3	3	deltaSVM	0.1756652799056787	
+paper_t3	3	deltaSVM.pl	0.1800056982887327	0.18001
+paper_t3	3	ISM	0.18432732024348217	0.18433
+paper_t3	3	GkmExplain	0.18522804159161682	0.18523
+paper_t3	4	deltaSVM	0.1782531636448234	
+paper_t3	4	deltaSVM.pl	0.18027610731994642	0.18028
+paper_t3	4	ISM	0.18569352602211425	0.18569
+paper_t3	4	GkmExplain	0.18697786460082233	0.18698
+paper_t3	5	deltaSVM	0.17514724376209717	
+paper_t3	5	deltaSVM.pl	0.18733061078669389	0.18733
+paper_t3	5	ISM	0.1943241720289692	0.19432
+paper_t3	5	GkmExplain	0.1947697288800497	0.19477
