@@ -1,14 +1,14 @@
 # DART-Eval, task activity
-# commit: 71506db
-# date: 2026-10-23 08:54 UTC
-# host: sh04-06n12.int
+# commit: 9f71761-dirty
+# date: 2026-10-29 10:42 UTC
+# host: sh04-03n09.int
 # command: dart_eval.py -m data/models/ENCFF984SKX.model.txt.gz --task activity --cell-lines HEPG2 --device cuda --work-dir data/dart-eval --output results/dart_task4_HEPG2_ENCFF984SKX.tsv -v
 # cpu: Intel(R) Xeon(R) Gold 6426Y, 32 logical cores, 16 usable
 # versions: gkmsvm-lite 0.1.0, python 3.11.17, numpy 2.2.6, numba 0.67.0 (16 threads, workqueue layer), cupy 14.2.0
-# slurm: job 49051435, partition akundaje, node sh04-06n12, constraint GPU_SKU:L40S&CPU_SKU:6426Y, exclusive 0
+# slurm: job 50099855, partition akundaje, node sh04-03n09, constraint GPU_SKU:L40S&CPU_SKU:6426Y, exclusive 0
 # device: cuda
 # gpu: NVIDIA L40S (45 GB, CC 8.9, CUDA driver 12.4)
 # model: ENCFF984SKX.model.txt.gz
 # vep_method: kernel
 cell_line	n_idr_peaks	n_nonpeaks	auroc	auprc	auprc_baseline	elapsed	pearson_peaks	spearman_peaks	pearson_all	spearman_all	n_peaks
-HEPG2	24866	40206	0.8293967699901367	0.7694128516842801	0.38213056306860094	9.023399332072586	0.18117671442059663	0.15533907961023286	0.47228643094368344	0.5232233844208872	40206
+HEPG2	24866	40206	0.8293967699901367	0.7694128516842801	0.38213056306860094	8.493839566595852	0.18117671442059663	0.15533907961023286	0.47228643094368344	0.5232233844208872	40206
