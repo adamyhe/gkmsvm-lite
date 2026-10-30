@@ -1,11 +1,11 @@
 # gkmsvm-lite vs LS-GKM C timing comparison
-# commit: 71506db
-# date: 2026-10-23 03:32 UTC
+# commit: 094533b-dirty
+# date: 2026-10-26 21:16 UTC
 # host: sh04-06n16.int
 # command: timing_train.py --conda-env lsgkm --lsgkm-bin /home/groups/akundaje/ayhe/src/lsgkm/bin --mlsgkm-bin /home/groups/akundaje/ayhe/src/mLS-GKM/bin --device cpu --threads 16 --sizes 500,1000,2000,5000,10000,20000 --output results/parts/timing_train.cpu.tsv
 # cpu: AMD EPYC 9384X 32-Core Processor, 64 logical cores, 64 usable
 # versions: gkmsvm-lite 0.1.0, python 3.11.17, numpy 2.2.6, numba 0.67.0 (16 threads, workqueue layer), cupy 14.2.0
-# slurm: job 49048181, partition akundaje, node sh04-06n16, constraint CPU_SKU:9384X, exclusive 1
+# slurm: job 49660576, partition akundaje, node sh04-06n16, constraint CPU_SKU:9384X, exclusive 1
 # device: cuda
 # kernel: -t 2 -l 11 -k 7 -d 3
 # lsgkm: gkmtrain: ls-gkm 0.1.1 (bioconda) (/home/groups/akundaje/ayhe/envs/lsgkm/bin/gkmtrain); gkmpredict: ls-gkm 0.1.1 (bioconda) (/home/groups/akundaje/ayhe/envs/lsgkm/bin/gkmpredict)
@@ -15,28 +15,28 @@
 # lite_cpu_threads: 16
 # test_sequences: 1000
 # inference_repeats: 3
-# gpu_date: 2026-10-23 04:27 UTC
-# gpu_host: sh04-03n09.int
+# gpu_date: 2026-10-26 23:58 UTC
+# gpu_host: sh04-06n12.int
 # gpu_command: timing_train.py --device cuda --gpu-only --threads 16 --sizes 500,1000,2000,5000,10000,20000 --output results/parts/timing_train.gpu.tsv
 # gpu_cpu: Intel(R) Xeon(R) Gold 6426Y, 32 logical cores, 16 usable
-# gpu_slurm: job 49048185, partition akundaje, node sh04-03n09, constraint GPU_SKU:L40S&CPU_SKU:6426Y, exclusive 0
+# gpu_slurm: job 49660578, partition akundaje, node sh04-06n12, constraint GPU_SKU:L40S&CPU_SKU:6426Y, exclusive 0
 # gpu: NVIDIA L40S (45 GB, CC 8.9, CUDA driver 12.4)
 # parts: cpu timing_train.cpu.tsv, gpu timing_train.gpu.tsv
 
 ## Training
 N	seq_len	gram_gb	t_lsgkm_train	t_lite_cpu_train	t_lite_cpu_smo_train	t_lite_gpu_train	t_lite_gpu_smo_train	mem_lsgkm_mb	mem_lite_cpu_mb	mem_lite_cpu_smo_mb	mem_lite_gpu_mb	mem_lite_gpu_smo_mb	n_sv_lsgkm	n_sv_lite	t_lite_cpu_gram	t_lite_gpu_gram	lsgkm_cache_mb
-500	300	0.002	2.09	0.45	NA	0.05	NA	82	NA	NA	NA	NA	500	500	0.44	0.04	NA
-1000	300	0.007	5.30	0.96	NA	0.09	NA	95	NA	NA	NA	NA	997	997	0.94	0.06	NA
-2000	300	0.030	13.15	2.34	NA	0.21	NA	123	NA	NA	NA	NA	1968	1968	2.29	0.15	NA
-5000	300	0.186	43.02	8.63	NA	0.96	NA	237	NA	NA	NA	NA	4597	4597	8.34	0.63	NA
-10000	300	0.745	289.10	26.11	NA	3.95	NA	310	NA	NA	NA	NA	8511	8512	24.65	2.22	NA
-20000	300	2.980	706.77	87.49	NA	16.13	NA	425	NA	NA	NA	NA	15087	15087	79.96	8.29	NA
+500	300	0.002	2.09	0.29	NA	0.11	NA	82	NA	NA	NA	NA	500	500	0.29	0.11	NA
+1000	300	0.007	5.26	0.68	NA	0.16	NA	95	NA	NA	NA	NA	997	997	0.67	0.14	NA
+2000	300	0.030	13.36	1.90	NA	0.30	NA	123	NA	NA	NA	NA	1968	1968	1.85	0.24	NA
+5000	300	0.186	44.38	7.78	NA	1.22	NA	238	NA	NA	NA	NA	4597	4597	7.50	0.90	NA
+10000	300	0.745	291.54	22.16	NA	4.14	NA	310	NA	NA	NA	NA	8511	8512	20.73	2.50	NA
+20000	300	2.980	701.64	65.71	NA	12.75	NA	425	NA	NA	NA	NA	15087	15087	60.03	5.78	NA
 
 ## Inference
 N_train	n_sv	n_test	t_lsgkm_infer	t_lite_cpu_infer	t_lite_gpu_infer	t_mlsgkm_infer
-500	500	1000	5.019	1.119	1.413	2.776
-1000	997	1000	5.228	1.124	1.440	2.866
-2000	1968	1000	5.632	1.146	1.477	3.032
-5000	4597	1000	6.734	1.246	1.532	3.462
-10000	8512	1000	8.339	1.387	1.686	4.108
-20000	15087	1000	11.165	1.621	2.051	5.189
+500	500	1000	5.005	1.093	1.501	2.789
+1000	997	1000	5.212	1.100	1.523	2.868
+2000	1968	1000	5.617	1.123	1.522	3.016
+5000	4597	1000	6.747	1.167	1.545	3.459
+10000	8512	1000	8.256	1.248	1.582	4.110
+20000	15087	1000	10.954	1.373	1.808	5.187

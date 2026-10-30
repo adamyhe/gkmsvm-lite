@@ -1,14 +1,14 @@
 # DART-Eval, task activity
-# commit: 71506db
-# date: 2026-10-23 08:53 UTC
-# host: sh04-06n12.int
+# commit: 9f71761-dirty
+# date: 2026-10-29 10:41 UTC
+# host: sh04-03n09.int
 # command: dart_eval.py -m data/models/ENCFF701NCI.model.txt.gz --task activity --cell-lines GM12878 --device cuda --work-dir data/dart-eval --output results/dart_task4_GM12878_ENCFF701NCI.tsv -v
 # cpu: Intel(R) Xeon(R) Gold 6426Y, 32 logical cores, 16 usable
 # versions: gkmsvm-lite 0.1.0, python 3.11.17, numpy 2.2.6, numba 0.67.0 (16 threads, workqueue layer), cupy 14.2.0
-# slurm: job 49051435, partition akundaje, node sh04-06n12, constraint GPU_SKU:L40S&CPU_SKU:6426Y, exclusive 0
+# slurm: job 50099855, partition akundaje, node sh04-03n09, constraint GPU_SKU:L40S&CPU_SKU:6426Y, exclusive 0
 # device: cuda
 # gpu: NVIDIA L40S (45 GB, CC 8.9, CUDA driver 12.4)
 # model: ENCFF701NCI.model.txt.gz
 # vep_method: kernel
 cell_line	n_idr_peaks	n_nonpeaks	auroc	auprc	auprc_baseline	elapsed	pearson_peaks	spearman_peaks	pearson_all	spearman_all	n_peaks
-GM12878	14303	28208	0.8463921481156411	0.7719460334422131	0.33645409423443345	19.590255455113947	0.06561626128083567	0.05191670227333399	0.5175768087527208	0.5569558012749756	30016
+GM12878	14303	28208	0.8463921481156411	0.7719460334422131	0.33645409423443345	6.872115785256028	0.06561626128083567	0.05191670227333399	0.5175768087527208	0.5569558012749756	30016

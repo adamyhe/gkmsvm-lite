@@ -1,14 +1,14 @@
 # DART-Eval, task activity
-# commit: 71506db
-# date: 2026-10-23 08:54 UTC
-# host: sh04-06n12.int
+# commit: 9f71761-dirty
+# date: 2026-10-29 10:42 UTC
+# host: sh04-03n09.int
 # command: dart_eval.py -m data/models/ENCFF077GEF.model.txt.gz --task activity --cell-lines IMR90 --device cuda --work-dir data/dart-eval --output results/dart_task4_IMR90_ENCFF077GEF.tsv -v
 # cpu: Intel(R) Xeon(R) Gold 6426Y, 32 logical cores, 16 usable
 # versions: gkmsvm-lite 0.1.0, python 3.11.17, numpy 2.2.6, numba 0.67.0 (16 threads, workqueue layer), cupy 14.2.0
-# slurm: job 49051435, partition akundaje, node sh04-06n12, constraint GPU_SKU:L40S&CPU_SKU:6426Y, exclusive 0
+# slurm: job 50099855, partition akundaje, node sh04-03n09, constraint GPU_SKU:L40S&CPU_SKU:6426Y, exclusive 0
 # device: cuda
 # gpu: NVIDIA L40S (45 GB, CC 8.9, CUDA driver 12.4)
 # model: ENCFF077GEF.model.txt.gz
 # vep_method: kernel
 cell_line	n_idr_peaks	n_nonpeaks	auroc	auprc	auprc_baseline	elapsed	pearson_peaks	spearman_peaks	pearson_all	spearman_all	n_peaks
-IMR90	8884	39151	0.8849371758436386	0.7292587966987465	0.18494847507026127	8.115200052969158	0.17892891051046453	0.15755296125269555	0.570160141861825	0.6234591519931152	40026
+IMR90	8884	39151	0.8849371758436386	0.7292587966987465	0.18494847507026127	7.338271904736757	0.17892891051046453	0.15755296125269555	0.570160141861825	0.6234591519931152	40026

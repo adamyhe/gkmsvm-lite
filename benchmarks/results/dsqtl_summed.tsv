@@ -1,11 +1,11 @@
 # dsQTL AUPRC, scores summed over models
-# commit: 71506db
-# date: 2026-10-23 08:36 UTC
-# host: sh04-06n12.int
+# commit: 9f71761-dirty
+# date: 2026-10-29 10:29 UTC
+# host: sh04-03n09.int
 # command: dsqtl_auprc.py --device cuda --params paper_t2,paper_t3 --output results/dsqtl_summed.tsv --per-model-output results/dsqtl_per_model.tsv
 # cpu: Intel(R) Xeon(R) Gold 6426Y, 32 logical cores, 16 usable
 # versions: gkmsvm-lite 0.1.0, python 3.11.17, numpy 2.2.6, numba 0.67.0 (16 threads, workqueue layer), cupy 14.2.0
-# slurm: job 49048270, partition akundaje, node sh04-06n12, constraint GPU_SKU:L40S&CPU_SKU:6426Y, exclusive 0
+# slurm: job 50099855, partition akundaje, node sh04-03n09, constraint GPU_SKU:L40S&CPU_SKU:6426Y, exclusive 0
 # device: cuda
 # gpu: NVIDIA L40S (45 GB, CC 8.9, CUDA driver 12.4)
 # params: paper_t2,paper_t3
@@ -16,6 +16,6 @@ deltaSVM.pl-sum (paper_t2)	0.7520134247158743	0.18996865045423109	0.726292755633
 ISM-sum (paper_t2)	0.7537056474636445	0.1974377678174587	0.7267763723587682	0.7128145441592826	574	paper_t2	
 GkmExplain-sum (paper_t2)	0.7532376794060763	0.19821382965701578	0.7258260146535604	0.7119037504078263	574	paper_t2	
 deltaSVM-sum (paper_t3)	0.7507889815821591	0.18206839930836213	0.7291123424461683	0.7171265694461512	574	paper_t3	
-deltaSVM.pl-sum (paper_t3)	0.7508612182621864	0.19020825445279746	0.7290354883367199	0.7171777754206131	574	paper_t3	0.19021
-ISM-sum (paper_t3)	0.752473855032918	0.19550150449871206	0.7289792847524562	0.7170617846878791	574	paper_t3	0.1955
+deltaSVM.pl-sum (paper_t3)	0.7508612182621864	0.19020825445279746	0.7290354883367196	0.7171777754206131	574	paper_t3	0.19021
+ISM-sum (paper_t3)	0.752473855032918	0.19550150449871206	0.7289792847524564	0.7170617846878791	574	paper_t3	0.1955
 GkmExplain-sum (paper_t3)	0.75203434194583	0.19647118575046366	0.7295158430134754	0.7170502681025447	574	paper_t3	0.19647

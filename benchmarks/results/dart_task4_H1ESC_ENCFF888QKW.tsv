@@ -1,14 +1,14 @@
 # DART-Eval, task activity
-# commit: 71506db
-# date: 2026-10-23 08:53 UTC
-# host: sh04-06n12.int
+# commit: 9f71761-dirty
+# date: 2026-10-29 10:41 UTC
+# host: sh04-03n09.int
 # command: dart_eval.py -m data/models/ENCFF888QKW.model.txt.gz --task activity --cell-lines H1ESC --device cuda --work-dir data/dart-eval --output results/dart_task4_H1ESC_ENCFF888QKW.tsv -v
 # cpu: Intel(R) Xeon(R) Gold 6426Y, 32 logical cores, 16 usable
 # versions: gkmsvm-lite 0.1.0, python 3.11.17, numpy 2.2.6, numba 0.67.0 (16 threads, workqueue layer), cupy 14.2.0
-# slurm: job 49051435, partition akundaje, node sh04-06n12, constraint GPU_SKU:L40S&CPU_SKU:6426Y, exclusive 0
+# slurm: job 50099855, partition akundaje, node sh04-03n09, constraint GPU_SKU:L40S&CPU_SKU:6426Y, exclusive 0
 # device: cuda
 # gpu: NVIDIA L40S (45 GB, CC 8.9, CUDA driver 12.4)
 # model: ENCFF888QKW.model.txt.gz
 # vep_method: kernel
 cell_line	n_idr_peaks	n_nonpeaks	auroc	auprc	auprc_baseline	elapsed	pearson_peaks	spearman_peaks	pearson_all	spearman_all	n_peaks
-H1ESC	9439	21146	0.909946314148241	0.8346108496245206	0.3086153343142063	6.322455732151866	0.3634650859550192	0.37088121220674286	0.5421300350990099	0.5643868556496285	41802
+H1ESC	9439	21146	0.909946314148241	0.8346108496245206	0.3086153343142063	5.679690160788596	0.3634650859550192	0.37088121220674286	0.5421300350990099	0.5643868556496285	41802
