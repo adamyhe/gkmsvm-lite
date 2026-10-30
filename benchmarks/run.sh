@@ -47,7 +47,9 @@ CONDA=conda
 command -v mamba &>/dev/null && CONDA=mamba
 
 COMMIT="$(cd "$REPO" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-if [[ -n "$(cd "$REPO" && git status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
+# Outputs (results/, figures/) don't count, as in _common._git_commit
+if [[ -n "$(cd "$REPO" && git status --porcelain --untracked-files=no 2>/dev/null \
+        | grep -vE '^.. "?benchmarks/(results|figures)/')" ]]; then
     echo "WARNING: $REPO has uncommitted changes; results will be tagged ${COMMIT}-dirty"
 fi
 echo ">>> Repo: $REPO @ $COMMIT"

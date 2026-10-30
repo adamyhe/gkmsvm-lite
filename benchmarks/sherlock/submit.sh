@@ -127,7 +127,9 @@ gpu_opts() { # unit
 }
 
 echo "Repo $BENCH_REPO @ $(cd "$BENCH_REPO" && git rev-parse --short HEAD)"
-if [[ -n "$(cd "$BENCH_REPO" && git status --porcelain --untracked-files=no)" ]]; then
+# Outputs (results/, figures/) don't count, as in _common._git_commit
+if [[ -n "$(cd "$BENCH_REPO" && git status --porcelain --untracked-files=no \
+        | grep -vE '^.. "?benchmarks/(results|figures)/')" ]]; then
     echo "WARNING: uncommitted changes; results will be tagged <commit>-dirty"
 fi
 echo "CPU: $CPU_PARTITION [$CPU_CONSTRAINT], whole node; GPU ($GPU): $GPU_PARTITION" \

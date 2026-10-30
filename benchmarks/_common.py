@@ -48,9 +48,21 @@ def _run(cmd: list[str], cwd: Path | None = None) -> str | None:
     return out.stdout.strip() if out.returncode == 0 else None
 
 
+# Outputs, not code: rerunning a panel rewrites its committed result file (write_tsv
+# empties it before the header's git status runs), so changes here don't make a
+# run "dirty"
+OUTPUT_DIRS = ("benchmarks/results/", "benchmarks/figures/")
+
+
 def _git_commit() -> str:
+    """HEAD's short hash, with -dirty if a tracked file outside OUTPUT_DIRS differs."""
     commit = _run(["git", "rev-parse", "--short", "HEAD"], cwd=REPO) or "unknown"
-    dirty = _run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=REPO)
+    status = _run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=REPO) or ""
+    # Lines are "XY path" or "XY old -> new" (_run strips the first one's leading
+    # space). git before 1.9 (Sherlock's 1.8.3) has no exclude pathspecs, so filter here
+    paths = [p.strip('"') for line in status.splitlines()
+             for p in line[2:].lstrip().split(" -> ")]
+    dirty = any(not p.startswith(OUTPUT_DIRS) for p in paths)
     return commit + ("-dirty" if dirty else "")
 
 
