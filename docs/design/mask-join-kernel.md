@@ -137,7 +137,7 @@ SMO columns use the same index built over the training set: a column K(i, :) is 
 | Prediction `-t 0/1/2/4` | Exact l-mer table | `svm.py`, `lmer_table.py` |
 | Prediction `-t 3`, other kernels; ISM; mutation impact | Cached l-mer index over the SVs, else masked join | `svm.py`, `ism.py`, `explain.py` |
 | `to_deltasvm` | l-mer table, else scoring all 4^l l-mers | `svm.py` |
-| GkmExplain attribution | Brute-force packed kernel (per-position decomposition) | `explain.py` |
+| GkmExplain attribution | Explain table (`-t 0/1/2/4`), else the SVs' l-mer weights or the index (RBF), else per-SV packed kernels (per-position decomposition) | `explain.py` |
 
 The brute-force packed kernels remain for calls with fewer than 16 sequences on a side and as the test oracle (`kernel.use_masked = False`).
 

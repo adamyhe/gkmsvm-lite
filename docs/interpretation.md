@@ -8,7 +8,7 @@ gkm-SVMs compute kernel values through discrete k-mer counting and mismatch tabl
 
 ## GkmExplain
 
-GkmExplain analytically decomposes the SVM decision function into per-base importance scores. It provides theoretically grounded attributions with connections to Integrated Gradients. Attribution modes need a count-table base kernel (`-t 0/1/2/4`, or `-t 3`/`-t 5` on top of one). For `-t 3`, as in lsgkm, each SV's contributions are scaled by (exp(γ(K−1)) − exp(−γ))/K of its kernel value K with the sequence, so importance scores sum to score − bias − exp(−γ)·Σcoef. For weighted models (`-t 4/5`) each window pair's contributions carry the product of the two windows' weights, as in the kernel, so the same sums hold. This is what lsgkm's gkmexplain (kundajelab fork) does; the tests compare every mode with its output for `-t 2` to `-t 5`.
+GkmExplain analytically decomposes the SVM decision function into per-base importance scores. It provides theoretically grounded attributions with connections to Integrated Gradients. It works for every kernel type: a count-table base kernel (`-t 0/1/2/4`), or the RBF on top of one (`-t 3`/`-t 5`/`-t 6`). For RBF models, as in lsgkm, each SV's contributions are scaled by (exp(γ(K−1)) − exp(−γ))/K of its kernel value K with the sequence, so importance scores sum to score − bias − exp(−γ)·Σcoef. For weighted models (`-t 4/5`) each window pair's contributions carry the product of the two windows' weights, as in the kernel, so the same sums hold. This is what lsgkm's gkmexplain (kundajelab fork) does; the tests compare every mode with its output for `-t 0` to `-t 6`, including sequences of different lengths.
 
 ```python
 from gkmsvm import gkmexplain
@@ -23,6 +23,8 @@ hyp = gkmexplain(model, x, mode="hypothetical")  # [B, 4, L]
 pert = gkmexplain(model, x, mode="perturbation")  # [B, 4, L]
 ```
 
+`x` can also be a list of DNA strings (or one-hot arrays) of different lengths, or a padded array with `lengths=`; the result is then `[B, 4, L_max]`, zero past each sequence's length, NaN for sequences shorter than l. `ism()` takes the same inputs.
+
 ### Modes
 
 **Importance** (`mode="importance"`, legacy `mode=0`) attributes the kernel value to the positions that actually match between the query and each support vector. Only the reference base at each position gets a non-zero score (an N's goes to A, which N is read as, as in lsgkm). Satisfies the completeness axiom: attributions sum to `score - bias`. Use for understanding what drives the current prediction.
@@ -35,7 +37,7 @@ Importance is exactly `hypothetical * one_hot_input`, with N counted as A. Inter
 
 **Perturbation** (`mode="perturbation"`, legacy `mode=2`) computes the discrete kernel-value change from each possible single-base mutation. At each position, the reference base channel is zero; alternate base channels contain the predicted score change from that mutation. Corresponds to lsgkm C mode 4 (`perturbation_eff=1` over every window pair with up to d+1 mismatches, which are all the pairs a substitution changes; mode 3 leaves out the d+1 pairs). Uses `gamma[m] = mismatch_table[m+1] - mismatch_table[m]` for match-to-mismatch and `kappa[m] = mismatch_table[m-1] - mismatch_table[m]` for mismatch-to-match. Each SV's kernel change is divided by the reference sequence's norm (not the mutant's), and for `-t 3`/`-t 5` the RBF is applied by lsgkm's proportional redistribution, as in the other modes, so this approximates the score change of each mutation rather than equaling it (use `ism()` for exact score changes). Use for per-position mutation maps.
 
-**Mutation impact score** (`mutation_impact(model, ref, alt)`, or `model.score_variants(ref, alt, method="gkmexplain")`) is the variant effect score used in the GkmExplain paper's dsQTL evaluation (lsgkm `gkmexplain -m 5`). Per support vector, the base-kernel change is normalized by the *reference* sequence's norm; for RBF kernels the kernel value above its floor, `exp(γ(K-1)) - exp(-γ)`, is distributed in proportion to `ΔK / K`. It is a linearization, so it differs slightly from the kernel delta `score(alt) - score(ref)`. It works for every kernel type. Verified against lsgkm `gkmexplain -m 5` output. With the paper's models it reproduces the paper's dsQTL AUPRCs exactly ([validation](validation.md#dsqtl-variant-effect-prediction)).
+**Mutation impact score** (`mutation_impact(model, ref, alt)`, or `model.score_variants(ref, alt, method="gkmexplain")`) is the variant effect score used in the GkmExplain paper's dsQTL evaluation (lsgkm `gkmexplain -m 5`). Per support vector, the base-kernel change is normalized by the *reference* sequence's norm; for RBF kernels the kernel value above its floor, `exp(γ(K-1)) - exp(-γ)`, is distributed in proportion to `ΔK / K`. It is a linearization, so it differs slightly from the kernel delta `score(alt) - score(ref)`. It works for every kernel type; without RBF it is linear in the SVs and reads the exact l-mer table when the model uses one (`-t 0/1/2/4`), and RBF models go through the cached l-mer index, visiting only the windows where the alleles differ. Verified against lsgkm `gkmexplain -m 5` output. With the paper's models it reproduces the paper's dsQTL AUPRCs exactly ([validation](validation.md#dsqtl-variant-effect-prediction)).
 
 ### Practical usage
 
@@ -63,13 +65,19 @@ pert = gkmexplain(model, x, mode="perturbation")  # [1, 4, 20]
 
 ### Batching and memory
 
-GkmExplain processes input sequences in batches (default 50) and support vectors in internal chunks (default 2000 SVs, tunable via `model.sv_chunk_size`). For large inputs, `batch_size` controls memory and enables progress bars:
+GkmExplain processes input sequences in batches (default 50); the per-SV kernel below also works through support vectors in chunks (default 2000 SVs, tunable via `model.sv_chunk_size`). For large inputs, `batch_size` controls memory and enables progress bars:
 
 ```python
 attr = gkmexplain(model, x, mode="importance", batch_size=20, verbose=True)
 ```
 
-GkmExplain compares packed uint32 windows (XOR + popcount), skipping window pairs beyond the mismatch cutoff (~99.9% for l=11 k=7 d=3), and decomposes only the contributing pairs per position. The kernel multiplies by the normalized coefficient and reduces over SVs in its inner loop, accumulating into the `[B, 4, L]` result, so there is no per-SV intermediate. On CPU a Numba kernel parallelizes over the batch; on NVIDIA GPUs a CuPy kernel runs one thread per (sequence, SV) pair and accumulates with float64 `atomicAdd` (compute capability >= 6.0). On Apple Silicon it runs on CPU and returns a NumPy float64 array (Metal has no float64, which the completeness axiom needs).
+The attribution is linear in the SVs (for RBF models, given each SV's kernel value with the query), so most models never loop over SVs:
+
+- **Explain table** (non-RBF, l <= 12): every l-mer's attribution, precomputed once per mode with Walsh-Hadamard transforms (1.4 GiB at l = 11) and kept in host memory across device moves; a query window then reads one row. `model.use_explain_table` (`"auto"`: built when a call's sequences would take longer than building it and it fits in 2 GiB, or reused once built; True/False force it). Lookups run on CPU.
+- **l-mer path** (small mismatch neighborhoods, or many SV windows per neighbor): the SVs' coefficients are summed per l-mer once, and each query window visits only the l-mers within the mismatch cutoff, so a call costs nothing per SV; RBF models sum the query-dependent SV weights over the cached l-mer index instead. Runs on CPU, in CUDA, and in Metal.
+- **Per-SV kernel** (otherwise; `model.use_explain_table = False` and `model.use_lmer_index = False` force it): compares packed uint32 windows (XOR + popcount), skipping window pairs beyond the mismatch cutoff (~99.9% for l=11 k=7 d=3), and decomposes only the contributing pairs per position, multiplying by the normalized coefficient and reducing over SVs in its inner loop, so there is no per-SV intermediate. On CPU a Numba kernel parallelizes over the batch; on NVIDIA GPUs a CuPy kernel runs one thread per (sequence, SV) pair and accumulates with float64 `atomicAdd` (compute capability >= 6.0).
+
+Every path accumulates in float64. On Apple Silicon the l-mer path and the per-SV kernel run in Metal and write float32 partial sums per window, which are folded in float64 on CPU (Metal has no float64), and the result is a NumPy float64 array. Timings are in [performance](performance.md).
 
 ## In-silico mutagenesis (ISM)
 
@@ -95,7 +103,7 @@ ISM works for every kernel type and on all backends (CPU, NVIDIA GPU, and Apple 
 
 | | GkmExplain | ISM | KernelSHAP |
 |---|---|---|---|
-| Speed | All window pairs within the cutoff | Affected windows only, via the l-mer index where it applies | Orders of magnitude slower |
+| Speed | One table row or l-mer neighborhood per window (else window pairs within the cutoff) | Affected windows only, via the l-mer index where it applies | Orders of magnitude slower |
 | Output | Analytical decomposition | Exact score deltas | Shapley values |
 | Interpretation | What contributes to the kernel | What happens if you mutate | Feature importance with interactions |
 | Epistatic logic | Handles OR/redundant motifs correctly | Saturates (misses redundant motifs) | Handles interactions |
@@ -120,7 +128,7 @@ alt = one_hot_encode("ACGTACGAACGTACGT")  # T→A at position 8
 delta = model.score_variants(ref[None], alt[None]).item()  # score(alt) - score(ref)
 ```
 
-This gives the exact score change for a specific variant; pass [N, 4, L] arrays to score many at once.
+This gives the exact score change for a specific variant; pass [N, 4, L] arrays to score many at once. Indels work too: pass lists of ref and alt sequences of different lengths, or padded arrays with `ref_lengths=` / `alt_lengths=`.
 
 Note: `score(ALT) - score(REF)` from the full SVM is **not** identical to deltaSVM's k-mer weight approximation. DeltaSVM is a linear approximation that is faster but less accurate.
 

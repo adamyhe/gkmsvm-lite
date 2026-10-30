@@ -1,6 +1,6 @@
 # Sequence lengths: fixed windows, with variable length for compatibility
 
-Status: accepted (2026-10-19); in progress on the `variable-length` branch.
+Status: implemented (#34), on CPU, CUDA and Metal. The Problem section describes the code before it.
 
 ## Direction
 

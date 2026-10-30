@@ -19,6 +19,8 @@ Every command that reads sequences (`predict`, `train`, `trainsvr`, `ism`, `expl
 
 Sequences may contain N, which is scored as A on the forward strand, as LS-GKM does. Other letters (IUPAC codes, ...) stop the command with an error unless `--allow-other-bases` is given. That flag reads them as N, matching LS-GKM, which reads every non-ACGT letter as A (with a warning). Model files whose support vectors contain such letters load with a warning.
 
+The tables below leave out these input flags (`--genome`, `--length`, `--variable-length`, `--allow-other-bases`); every command listed above takes them (`score-variants` all but `--genome`).
+
 Python: `fasta.extract_loci(peaks, genome, in_window=300)` (summit-centered) and `codec.center_crop(seqs, 300)`. `model(x, lengths=...)` or `model([...sequences...])` scores sequences of different lengths.
 
 ## predict
@@ -52,7 +54,7 @@ gkmsvm train -p positive.fa -n negative.fa -o model.npz -t estimated -l 11 -k 7 
 | `-p`, `--positives` | Positive sequences FASTA |
 | `-n`, `--negatives` | Negative sequences FASTA |
 | `-o`, `--output` | Output model (`.npz` or `.model.txt`) |
-| `-t`, `--kernel-type` | Kernel type: 0-5 or name (default: estimated) |
+| `-t`, `--kernel-type` | Kernel type: 0-6 or name (default: estimated) |
 | `-l` | L-mer length (default: 11) |
 | `-k` | K informative positions (default: 7) |
 | `-d` | Max mismatches (default: 3) |
@@ -99,7 +101,7 @@ gkmsvm explain -m model.npz -i sequences.fa -o attr.npz -s seqs.npz --device cud
 |---|---|
 | `-m`, `--model` | Model file |
 | `-i`, `--input` | Input FASTA |
-| `-o`, `--output` | Attributions `.npz` (hypothetical, `[B,4,L]` as `arr_0`) |
+| `-o`, `--output` | Attributions `.npz` (hypothetical, `[B,4,L]` float32 as `arr_0`) |
 | `-s`, `--sequences-output` | Sequences `.npz` (one-hot, `[B,4,L]` as `arr_0`) |
 | `--device` | Compute device (default: auto) |
 
@@ -188,3 +190,9 @@ gkmsvm import -i model.txt.gz -f lsgkm -o model.npz
 | `-i`, `--input` | Input model file |
 | `-o`, `--output` | Output `.npz` file |
 | `-f`, `--format` | Source format: `lsgkm`, `classic`, or `r_gkmsvm` |
+| `--svseq` | `PREFIX_svseq.fa` (classic/R; default: next to the input `PREFIX_svalpha.out`) |
+| `-l`, `-k`, `-d` | Kernel of `gkmsvm_kernel` (classic/R; defaults 10, 6, 3) |
+| `-t`, `--filter-type` | `gkmsvm_kernel -t` (R `useTgkm`): 0 full, 1 truncated (default), 2 gkm counts |
+| `--no-rc` | Without reverse complements (`gkmsvm_kernel -R`) |
+
+Classic and R gkmSVM files hold no kernel and no bias, so the model scores `sum_i alpha_i K(x, sv_i)` with the kernel given here (bias 0); see [models](models.md#classic-gkmsvm-c-and-r-gkmsvm).

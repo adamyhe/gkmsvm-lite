@@ -23,6 +23,8 @@ Models trained with kundajelab/lsgkm (which adds GkmExplain) and kundajelab/lsgk
 
 Bias convention: `bias = -rho` (LIBSVM convention).
 
+Support vectors are stored as `[S, L]` uint8 base codes (`model.support_sequences`; A=0, C=1, G=2, T=3). LS-GKM reads every non-ACGT letter as A before taking the reverse complement, so an N in an SV is A on the forward strand and T on the reverse one, as the coefficients were fit; letters other than ACGTN load the same way, with a warning. Models whose SVs differ in length (LS-GKM trained on raw peaks) keep each one's length in `model.sv_lengths`.
+
 ### Classic gkmSVM (C++) and R gkmSVM
 
 `gkmsvm_train`, in the C++ tool (Ghandi et al. 2014) and in the R package (Ghandi et al. 2016, which shares its code and trains with kernlab), writes a model as two files: `PREFIX_svalpha.out` (`SV id <TAB> signed alpha`) and `PREFIX_svseq.fa`. They record no bias and no kernel: `gkmsvm_classify` scores `sum_i alpha_i K(x, sv_i)` with the kernel given on its command line. So pass the parameters given to `gkmsvm_kernel` (defaults are the tools': l=10, k=6, d=3, truncated filter, reverse complements):
@@ -47,8 +49,8 @@ DeltaSVM models are k-mer weight files, not full SVMs. They provide fast linear 
 from gkmsvm import load_deltasvm_model
 from gkmsvm import DeltaSVM
 
-# Load from k-mer weight file
-model = load_deltasvm_model("weights.txt")
+# Load from k-mer weight file (l: the window length the weights were built for)
+model = load_deltasvm_model("weights.txt", l=11)
 
 # Score sequences
 scores = model(x)  # [B, 1]
@@ -104,13 +106,14 @@ model = train_gkmsvm(
     k=7,
     d=3,  # kernel parameters
     C=1.0,  # regularization
+    pos_weight=1.0,  # positives' C is pos_weight * C (LS-GKM -w)
 )
 
 # Score new sequences
 scores = model(x)  # positive = predicted positive class
 ```
 
-Input sequences can be DNA strings or pre-encoded `[N, 4, L]` one-hot arrays.
+Input sequences can be DNA strings, pre-encoded `[N, 4, L]` one-hot arrays, or `[N, L]` uint8 base codes. Strings may contain N (scored as A on the forward strand, as LS-GKM does); other letters raise unless `allow_other_bases=True`, which reads them as N. Lists may mix lengths (LS-GKM trains on raw peaks that way) and the model keeps `sv_lengths`; a sequence shorter than `l` is an error. The ENCODE-style pipeline uses fixed windows instead (CLI `--genome`/`--length`, [CLI inputs](cli.md#inputs)).
 
 ### Regression (epsilon-SVR)
 
@@ -139,7 +142,7 @@ predictions = model(x)  # [B, 1]
 Training needs kernel values between pairs of training sequences.
 
 - **Precomputed Gram + sklearn** (`solver="libsvm"`): computes the full N x N kernel matrix in host RAM (tiles on the training device) and passes it to scikit-learn's LIBSVM-backed `SVC(kernel="precomputed")`. Fast, but O(N^2) memory: ~800 MB at N=10K.
-- **Column-cached SMO** (`solver="smo"`): WSS3 working set selection with shrinking and an LRU cache of kernel columns in a C extension; memory is O(cache_size x N). For `-t 1`-`-t 5` a column is one query of an l-mer index over the training set; other kernels compute columns in batches through the masked join. With a cache smaller than N, evicted columns are recomputed, so it is slower than libsvm when the Gram fits.
+- **Column-cached SMO** (`solver="smo"`): WSS3 working set selection with shrinking and an LRU cache of kernel columns in a C extension; memory is O(cache_size x N). When the l-mer index applies (a small mismatch neighborhood, e.g. d <= 3 with l <= 12, any kernel type) a column is one query of an l-mer index over the training set; otherwise columns are computed in batches through the masked join. With a cache smaller than N, evicted columns are recomputed, so it is slower than libsvm when the Gram fits.
 - **Nyström approximation** (`solver="nystrom"`): kernel values against `n_components` landmarks only (O(N m) instead of O(N^2)), then an approximate N x N Gram for sklearn. Saves time, not memory; the solution is approximate.
 - **Auto** (`solver="auto"`, default): libsvm when the Gram fits in 75% of available RAM (and under `max_gram_gb`), else SMO with a warning.
 
@@ -148,15 +151,15 @@ model = train_gkmsvm(pos, neg, solver="libsvm")  # needs N^2 memory
 model = train_gkmsvm(pos, neg, solver="smo", cache_size=2048)  # O(cache_size x N)
 model = train_gkmsvm(pos, neg, solver="nystrom", n_components=500)  # approximate
 
-# SVR takes the same solvers
+# SVR takes the same solvers (smo: LIBSVM's epsilon-SVR dual, as lsgkm-svr)
 model = train_gkmsvr(seqs, labels, solver="smo")
 ```
 
-Training works on all backends (CPU, NVIDIA GPU, Apple Silicon MLX). The returned model is on CPU; use `model.cuda()` or `model.mlx()` to move it for inference. Timings are in [performance](performance.md#measurements).
+Training works on all backends (CPU, NVIDIA GPU, Apple Silicon MLX). `device="auto"` (the default) uses CUDA only when CuPy finds a usable GPU, else MLX if installed, else CPU. The returned model is on CPU; use `model.cuda()` or `model.mlx()` to move it for inference. Timings are in [performance](performance.md#measurements).
 
 ### Kernel types
 
-All six kernel types are supported for both training and inference:
+All seven kernel types are supported for both training and inference:
 
 | Flag | Alias | Use case |
 |---|---|---|
@@ -167,6 +170,8 @@ All six kernel types are supported for both training and inference:
 | `-t 4` | `weighted` | `-t 2` with l-mers near the sequence center weighted up to `M` times more (`M`, `H`; LS-GKM defaults 50, 50). |
 | `-t 5` | `weighted_rbf` | Center-weighted + RBF (`M`, `H`, `gamma`). |
 | `-t 6` | `direct_rbf` | RBF on the gapped k-mer count kernel (`gamma`; `gkm_cnt_rbf`, in the kundajelab lsgkm fork only). |
+
+`d` caps the mismatches of the window pairs every kernel type counts, `-t 0` included, as LS-GKM's search does (gkmsvm-lite 0.1.0 counted every `-t 0` pair, so its `-t 0` scores differ). A `-t 0` model whose parameters hold no `d` still counts every pair.
 
 ```python
 # Weighted kernel example
@@ -203,7 +208,7 @@ model.save("my_model.npz")
 
 # Score new sequences
 test_records = read_fasta("test.fa")
-test_seqs = [one_hot_encode(seq) for _, seq in test_records]
+test_seqs = [one_hot_encode(seq, allow_n=True) for _, seq in test_records]
 import numpy as np
 
 x = np.stack(test_seqs)

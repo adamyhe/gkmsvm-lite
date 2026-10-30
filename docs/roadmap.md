@@ -86,12 +86,19 @@
 - [x] SMO SVR: `train_gkmsvr(solver="smo")` (and `"auto"` when the Gram doesn't fit), the C SMO over LIBSVM's 2N epsilon-SVR dual variables with N cached columns; lsgkm-svr's models to 2e-7, LIBSVM's on mixed lengths, KKT conditions to the tolerance, on CPU, CUDA and MLX
 - [x] Training oracle: `train_gkmsvm` (LIBSVM and SMO) gives gkmtrain's support vectors for `-t 0` to `-t 5` on fixed- and mixed-length sets with N, coefficients to the solvers' 1e-3 tolerance and gkmpredict's scores to 5e-4; gkmtrain's solutions meet our KKT conditions (`tests/test_train_oracle.py`)
 - [x] Fixed-length pipeline (`--genome` summit windows, `--length` center-crop, 300 bp for training) and sequences of different lengths for compatibility: padded SVs and queries on CPU, CUDA and Metal; imported mixed-length models, npz/LS-GKM round trips; training, ISM, GkmExplain, mutation impact, variant scores and DeltaSVM on mixed lengths (gkmpredict, gkmtrain and gkmexplain oracles)
+- [x] Masked join probes with the rows' RC when the columns are larger (scoring against SVs): the column index build halves. Scoring 1000 queries through the masked join on an M4: CPU 1.2x at 4k SVs, 2.3x at 72k; MLX 1.4-1.7x; scores bit-identical
+- [x] `compute_gram` through the l-mer index whenever it applies (self-Gram row blocks from the diagonal on, CPU and CUDA); the masked join stays on MLX and for kernels the index can't serve. `-t 2` l=11 k=7 d=3 against the masked join: 1.67x at 40k on CUDA, 1.62x on CPU (0.47x and 0.72x at 1k)
+- [x] `[B, L]` uint8 base codes internally (`support_sequences` `[S, L]`), one-hot only at the edges; deltaSVM's RC strand reads N as T, as the kernels do
+- [x] `device="auto"` uses CUDA only when CuPy finds a GPU (`backend.cuda_available()`)
+- [x] `solver="auto"` and the SMO cache respect a job's cgroup memory limit (`train._cgroup_available_memory`)
+- [x] Full dsQTL re-run on the CUDA host (L40S, 2026-10-29): `benchmarks/agreement_lsgkm.py` with all five negsets and both kernels. Mutation impact to 5.0e-6, ISM to 1.0e-5, deltaSVM (as `deltasvm.pl` scores it) to 5.4e-5 of the paper's outputs, so the CUDA paths are now checked against lsgkm directly
+- [x] Application-note benchmarks on Sherlock (`benchmarks/sherlock/`): CPU parts on a whole EPYC 9384X node, GPU parts on an L40S, plus A100 and P100 GPU sets
 
 ## Next
 
 Gaps found by checking against LS-GKM (2026-10-19), most important first:
 
-- [ ] **Full dsQTL re-run on the CUDA host** — `benchmarks/agreement_lsgkm.py` with all five negsets and both kernels (`make` without `AGREE_ARGS`) for the figure; the default check (`-t 3`, negset 1) was re-run on CPU on 2026-10-19 after the N, padding and importer changes and matches the earlier run: mutation impact to 5.0e-6, ISM to 1.0e-5, deltaSVM (as `deltasvm.pl` scores it) to 3.4e-5 of the paper's outputs. CUDA explain paths are checked against CPU only, not against lsgkm directly.
+- None open. The full dsQTL re-run on the CUDA host is done (above).
 
 Performance gaps:
 

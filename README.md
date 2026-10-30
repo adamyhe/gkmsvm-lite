@@ -4,7 +4,7 @@
 [![CI](https://github.com/adamyhe/gkmsvm-lite/actions/workflows/ci.yml/badge.svg)](https://github.com/adamyhe/gkmsvm-lite/actions/workflows/ci.yml)
 [![Downloads](https://static.pepy.tech/badge/gkmsvm-lite)](https://pepy.tech/projects/gkmsvm-lite)
 
-A Python implementation of gapped k-mer SVMs (gkm-SVMs) for DNA sequence analysis. Supports classification (C-SVC) and regression (epsilon-SVR), all six kernel types, GPU acceleration via CuPy (NVIDIA) and MLX (Apple Silicon), and compatibility with models from LS-GKM, classic gkmSVM, and the R gkmSVM package.
+A Python implementation of gapped k-mer SVMs (gkm-SVMs) for DNA sequence analysis. Supports classification (C-SVC) and regression (epsilon-SVR), every LS-GKM kernel type (`-t 0` to `-t 6`), GPU acceleration via CuPy (NVIDIA) and MLX (Apple Silicon), and compatibility with models from LS-GKM, classic gkmSVM, and the R gkmSVM package.
 
 ## Install
 
@@ -28,7 +28,8 @@ model = load_lsgkm_model("model.txt.gz")
 
 # Score a sequence
 x = one_hot_encode("ACGTACGTACGTACGT")[None, ...]  # [1, 4, 16]
-score = model(x)  # [1, 1]
+score = model(x)  # [1, 1], float64 (float32 on MLX)
+scores = model(["ACGTACGTACGTACGT", "ACGTNACGTACGTACGTAC"])  # DNA strings work too
 
 # Variant effect prediction
 ref = one_hot_encode("ACGTACGTACGTACGT")[None, ...]
@@ -37,7 +38,7 @@ delta = model.score_variants(ref, alt)  # score(alt) - score(ref)
 impact = model.score_variants(ref, alt, method="gkmexplain")  # lsgkm gkmexplain -m 5
 
 # Attribution
-hyp = gkmexplain(model, x, mode="hypothetical")  # [1, 4, 16], -t 0/1/2 models
+hyp = gkmexplain(model, x, mode="hypothetical")  # [1, 4, 16], any kernel
 attr = gkmexplain(model, x, mode="importance")  # hypothetical × input
 deltas = ism(model, x)  # [1, 4, 16] mutation deltas, any kernel
 
@@ -92,7 +93,7 @@ See [docs/models.md](docs/models.md) for format details, training options, and e
 
 ## Kernel types
 
-All six LS-GKM kernel types are supported:
+All LS-GKM kernel types are supported:
 
 | `-t` | Name         | Description                                |
 | ---- | ------------ | ------------------------------------------ |
@@ -102,6 +103,7 @@ All six LS-GKM kernel types are supported:
 | 3    | gkmrbf       | RBF-transformed estimated                  |
 | 4    | wgkm         | Center-weighted gapped k-mer               |
 | 5    | wgkmrbf      | Center-weighted RBF                        |
+| 6    | gkm_cnt_rbf  | RBF on gkm_cnt (kundajelab lsgkm fork)     |
 
 ## Documentation
 
