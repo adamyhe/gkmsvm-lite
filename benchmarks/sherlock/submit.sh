@@ -12,12 +12,12 @@
 # Panels that time nothing (fig1a fig1d s1 s4 s5) run as one GPU job, "other".
 # A setup job (envs, install, tests, downloads) runs first.
 #
-#   bash benchmarks/sherlock/submit.sh                    # fig1b fig1c s2 s3
+#   bash benchmarks/sherlock/submit.sh                    # fig1b fig1c s2 s3 s7
 #   bash benchmarks/sherlock/submit.sh --quick            # small settings, results/quick/
 #   bash benchmarks/sherlock/submit.sh --gpu a100 s2 other
 #   bash benchmarks/sherlock/submit.sh --no-setup --dry-run fig1c
 #
-# Panels: fig1b fig1c s2 s3 s3b (LS-GKM up to a day per fit; not by default),
+# Panels: fig1b fig1c s2 s3 s7 s3b (LS-GKM up to a day per fit; not by default),
 # other. Overrides (environment): PARTITION, CPU_PARTITION, CPU_CONSTRAINT,
 # GPU_PARTITION, GPU_CONSTRAINT, GPU_CPUS, THREADS, OTHER_TARGETS.
 set -euo pipefail
@@ -37,7 +37,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 PANELS=("$@")
-[[ ${#PANELS[@]} -eq 0 ]] && PANELS=(fig1b fig1c s2 s3)
+[[ ${#PANELS[@]} -eq 0 ]] && PANELS=(fig1b fig1c s2 s3 s7)
 export QUICK
 
 # ── Hardware ───────────────────────────────────────────────────────
@@ -74,16 +74,18 @@ declare -A TIME=(
     [s2-cpu]=1-00:00:00 [s2-gpu]=12:00:00
     [s3-cpu]=1-00:00:00 [s3-cpu-lite]=1-00:00:00 [s3-gpu]=1-00:00:00
     [s3b-cpu]=3-00:00:00 [s3b-gpu]=2-00:00:00
+    [s7-cpu]=2-00:00:00 [s7-gpu]=12:00:00
     [other]=2-00:00:00
 )
 declare -A MEM=([s3-gpu]=128G [s3b-gpu]=200G [other]=96G)
 # Each panel's jobs: CPU parts, GPU parts, and the targets the merge makes
 declare -A CPU_UNITS=(
     [fig1b]="fig1b-cpu fig1b-cpu-t1" [fig1c]=fig1c-cpu [s2]=s2-cpu
-    [s3]="s3-cpu s3-cpu-lite" [s3b]=s3b-cpu
+    [s3]="s3-cpu s3-cpu-lite" [s3b]=s3b-cpu [s7]=s7-cpu
 )
 declare -A GPU_UNITS=(
     [fig1b]=fig1b-gpu [fig1c]=fig1c-gpu [s2]=s2-gpu [s3]=s3-gpu [s3b]=s3b-gpu
+    [s7]=s7-gpu
 )
 OTHER_TARGETS=${OTHER_TARGETS:-fig1a fig1d s1 s4 s5}
 # S5 needs DART-Eval's data, downloaded from Synapse with your account

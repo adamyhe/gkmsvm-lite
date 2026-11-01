@@ -55,6 +55,7 @@ from _common import (
     rewrite_table,
     run_measured,
     set_cpu_threads,
+    to_device,
     warm_binaries,
     warm_jit_cache,
     worker_result,
@@ -100,8 +101,7 @@ def _worker(spec: dict) -> None:
     pool = gpu_pool_mb()
 
     X = np.stack([one_hot_encode(s) for s in test])
-    if spec["device"] == "cuda":
-        model.cuda()
+    to_device(model, spec["device"])
     scores = to_cpu(model(X, batch_size=256)).ravel()
     np.save(work / f"scores_{spec['solver']}_{spec['N']}.npy", scores)
     emit_result(train_s=train_s, n_sv=int(model.num_support_vectors), gpu_pool_mb=pool)
@@ -146,7 +146,7 @@ def main():
     parser.add_argument(
         "--device",
         default="cuda",
-        choices=["cpu", "cuda"],
+        choices=["cpu", "cuda", "mlx"],
         help="Device for gkmsvm-lite kernel computation",
     )
     parser.add_argument(

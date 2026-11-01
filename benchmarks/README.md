@@ -36,6 +36,7 @@ Timed runs each execute in their own process, so the reported peak memory is tha
 | S3B | Large-N scaling on LS-GKM's own design (Lee 2016, Fig. 1): H1-hESC CTCF ChIP-seq vs GC/repeat-matched hg19 windows, LS-GKM's eight sizes (5k–30k, 60k, 90k) plus 45k and 75k, LS-GKM with 100 MB and 8 GB caches. Not part of `paper`: up to a day | `s3b` | `ctcf_data.py`, `training_memory.py --data ctcf` | `training_memory_ctcf.tsv` |
 | S4 | GkmExplain completeness | `s4` | `completeness.py` | `completeness.tsv` |
 | S5 | DART-Eval Task 4 (five cell lines) with ENCODE models and models retrained on DART-Eval's training chromosomes, and Task 5 (caQTL, dsQTL) with ENCODE models, against published DART-Eval and Evo 2 results (`dart_reference.tsv`) | `s5` | `dart_eval.py`, `dart_train.py` | `dart_task4_<cell>_<model>.tsv`, `dart_retrained_task4_<cell>.tsv`, `dart_task5_<model>.tsv` |
+| S7 | GkmExplain (hypothetical, perturbation) and full ISM throughput on 300 bp GM12878 DHS sequences (100 to 10k) with the ENCODE ENCFF579AOX `-t 2` model and the dsQTL `-t 3` model, against LS-GKM's `gkmexplain -m 1/-m 4` and `gkmpredict` on each sequence's 3L substitutions; every run's output against a float64 CPU reference, and a summation-to-delta check (importance sums to f(x) − b − exp(−γ)Σcoef; ISM equals f(mutant) − f(x)) | `s7` | `explain_throughput.py` | `explain_throughput.tsv` |
 | GPUs | gkmsvm-lite's GPU times in 1B, 1C, S2, S3 and S3B on each host's results (`figures/check_gpus.*`; drawn when `results/<SET>/` exists; not in the paper) | the panels', with `SET=<label>` | as for those panels | `results/<SET>/` |
 | S6 | gkmsvm-lite on the L40S, A100 and P100: each operation's GPU time relative to the L40S, with gkmsvm-lite on 16 CPU threads as a reference, and the GPUs' specs and host CPUs (`figures/figS6_gpus.*`; drawn when `results/<SET>/` holds another GPU's results) | the panels', with `SET=<label>` | as for those panels | `results/`, `results/<SET>/` |
 | check | Retrained models against S5's ENCODE models, Task 4 and Task 5 (GM12878), with training times (`figures/check_dart_retrained.*`; not in the paper) | `s5-retrained` | `dart_train.py`, `dart_eval.py` | `dart_retrained_train_<cell>.tsv`, `dart_retrained_task5_GM12878.tsv` |
@@ -63,18 +64,32 @@ make -C benchmarks figures SET=a100                 # figures/a100/, other panel
 
 Each set reruns the whole panel, LS-GKM included, since the host's CPU changes too. `make figures` (no `SET`) also draws `check_gpus`, gkmsvm-lite's GPU times from `results/` and every `results/<label>/`, labeled by the GPU each result file records.
 
+### Apple Silicon
+
+`make apple` runs gkmsvm-lite on CPU and MLX, and LS-GKM, on one Mac, into `results/apple/` (`APPLE_SET=<label>` for another machine). It covers the panels that fit a laptop (`APPLE_PANELS`: 1B, 1C, S2, S3 up to N = 20k, S4 and S7; not S3B) and is not in the paper.
+
+```bash
+uv pip install -e ".[mlx,examples]"
+make -C benchmarks apple THREADS=4 LSGKM_BIN=<kundajelab lsgkm>/bin
+```
+
+- **Threads.** LS-GKM's `-T` takes 1, 4 or 16, so on a 10-core M4 LS-GKM and gkmsvm-lite's CPU rows run on 4 threads. The chip mixes performance and efficiency cores (the header's `cpu` line counts both), so S7 can add an all-core gkmsvm-lite row: `explain_throughput.py --cpu-threads 4,10`.
+- **Precision.** MLX computes in float32 (Metal has no float64). S4 then compares MLX attributions with the float64 CPU score, and records MLX's own score next to it. S7 records, for every run, the largest difference from a float64 CPU reference and a summation-to-delta check (both absolute and relative to the largest value), so its MLX rows are the float32 error in GkmExplain and ISM. 1C's `max_abs_diff` does the same against LS-GKM.
+- **Noise.** A laptop is not an exclusive node: close other applications, keep it on power, and expect more run-to-run variation than on Sherlock. MLX compiles its Metal kernels in each process (there is no disk cache to warm), so each worker's untimed warm-up call is what keeps compiling out of the timed calls.
+- **Memory.** MLX's `gpu_pool_mb` / `gpu_mem_mb` is its peak allocation after warm-up (`mx.get_peak_memory`), in the unified memory that `peak_rss_mb` partly counts as well.
+
 ## Running on Sherlock
 
 `sherlock/submit.sh` submits the panels as Slurm jobs from this checkout and exits; nothing stays running on the login node. Results go to `results/` in this checkout, and logs to `results/logs/`.
 
 ```bash
 bash benchmarks/sherlock/submit.sh --quick              # small settings first: results/quick/
-bash benchmarks/sherlock/submit.sh                      # fig1b fig1c s2 s3
+bash benchmarks/sherlock/submit.sh                      # fig1b fig1c s2 s3 s7
 bash benchmarks/sherlock/submit.sh --no-setup s3b other # S3B, and the panels that time nothing
 bash benchmarks/sherlock/submit.sh --gpu a100 --dry-run s2
 ```
 
-Each timing panel (1B, 1C, S2, S3, S3B) splits into a CPU part (LS-GKM, mLS-GKM and gkmsvm-lite on CPU) and a GPU part (gkmsvm-lite on CUDA). The two parts run on different fixed hardware and are merged afterwards (`make SPLIT=1`):
+Each timing panel (1B, 1C, S2, S3, S3B, S7) splits into a CPU part (LS-GKM, mLS-GKM and gkmsvm-lite on CPU) and a GPU part (gkmsvm-lite on CUDA). The two parts run on different fixed hardware and are merged afterwards (`make SPLIT=1`):
 
 - **CPU parts** run on a whole AMD EPYC 9384X node in `akundaje` (`CPU_SKU:9384X`, `--exclusive`), one job per part, so no other job shares the cores, caches or memory bandwidth. LS-GKM and gkmsvm-lite get the same 16 threads (`THREADS`).
 - **GPU parts** run on one L40S (`--gpu l40s`, the default), with the node's CPU fixed as well (`GPU_SKU:L40S&CPU_SKU:6426Y`) because it runs the GPU part's host-side work. They also get 16 CPUs, and they are chained so that two GPU parts never run at once.
@@ -95,6 +110,7 @@ No timed region includes compilation or first-use costs:
 - gkmsvm-lite scripts first warm up untimed: `warm_jit_cache` compiles into the disk caches, then each worker repeats the timed call on a few inputs or a small model of the same kernel.
 - `timing_train.py` warms both prediction paths (l-mer table and index).
 - `training_memory.py` workers train once on 100 sequences before the timed fit.
+- `explain_throughput.py` workers run the timed operation on 8 sequences with a separate copy of the model, so the timed model's first call still builds its caches (`first_s`), and force an explain-table build on an l = 6 copy, so the table's kernels are compiled before a large call builds the real one.
 - Each LS-GKM and mLS-GKM binary runs once, untimed, before its first timed run (`warm_binaries`). This reads the executable and its libraries into the page cache.
 - 1C copies the model file into the node-local work directory, so both implementations read it from the same disk.
 - 1C plots whole-process wall time, which includes start-up and model loading for both implementations but must not include compiling. Before each method's timed gkmsvm-lite runs, an untimed rehearsal process per device makes the timed process's warm-up call, filling the disk caches with exactly the kernels it uses. For the deltaSVM table, the rehearsal runs the whole build: CuPy compiles reductions per launch configuration, which depends on block size, so a smaller warm-up misses some (3 kernels, ~8 s on an L40S). Around every timed process, `jit_cache_files` snapshots the Numba and CuPy caches, which are written only when something compiles. The count of new files is recorded as `jit_compiles` (expected 0, with a warning otherwise).

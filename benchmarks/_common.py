@@ -126,6 +126,32 @@ def _gpu() -> str | None:
         return None
 
 
+def _apple_gpu() -> str | None:
+    """Apple GPU for MLX runs: chip, GPU cores, unified memory."""
+    if sys.platform != "darwin":
+        return None
+    chip = _run(["sysctl", "-n", "machdep.cpu.brand_string"]) or "Apple"
+    mem = _run(["sysctl", "-n", "hw.memsize"])
+    cores = None
+    out = _run(["system_profiler", "SPDisplaysDataType"])
+    for line in (out or "").splitlines():
+        if "Total Number of Cores" in line:
+            cores = line.split(":", 1)[1].strip()
+            break
+    parts = [f"{cores} GPU cores" if cores else None,
+             f"{int(mem) / 1024**3:.0f} GB unified memory" if mem else None]
+    return f"{chip} ({', '.join(p for p in parts if p)})"
+
+
+def _cpu_cores() -> str | None:
+    """Performance and efficiency core counts on Apple Silicon, else None."""
+    if sys.platform != "darwin":
+        return None
+    p = _run(["sysctl", "-n", "hw.perflevel0.physicalcpu"])
+    e = _run(["sysctl", "-n", "hw.perflevel1.physicalcpu"])
+    return f"{p} performance + {e} efficiency" if p and e else None
+
+
 def _slurm() -> str | None:
     """The Slurm job this process runs in: id, partition, node, constraint."""
     job = os.environ.get("SLURM_JOB_ID")
@@ -168,6 +194,12 @@ def _versions() -> str:
         import cupy as cp
 
         parts.append(f"cupy {cp.__version__}")
+    except ImportError:
+        pass
+    try:
+        import mlx.core as mx
+
+        parts.append(f"mlx {mx.__version__}")
     except ImportError:
         pass
     return ", ".join(parts)
@@ -340,7 +372,8 @@ def provenance(device: str | None = None, **extra) -> dict[str, str]:
         ),
         "host": socket.gethostname(),
         "command": " ".join([Path(sys.argv[0]).name] + sys.argv[1:]),
-        "cpu": f"{_cpu_model()}, {os.cpu_count()} logical cores, {usable_cores()} usable",
+        "cpu": f"{_cpu_model()}, {os.cpu_count()} logical cores, {usable_cores()} usable"
+        + (f" ({_cpu_cores()})" if _cpu_cores() else ""),
         "versions": _versions(),
     }
     if _slurm():
@@ -349,6 +382,8 @@ def provenance(device: str | None = None, **extra) -> dict[str, str]:
         info["device"] = device
     if device in ("cuda", "both"):
         info["gpu"] = _gpu() or "unavailable"
+    elif device == "mlx":
+        info["gpu"] = _apple_gpu() or "unavailable"
     info.update({k: str(v) for k, v in extra.items() if v is not None})
     return info
 
@@ -441,8 +476,9 @@ def merge_parts(parts: dict[str, Path], out: Path, on: dict | None = None) -> Pa
             elif header[key] != value:
                 header[f"{label}_{key}"] = value
     devices = {p.get("device") for p in provs.values()}
-    if "cuda" in devices:
-        header["device"] = "cuda"  # what a single run on CPU and GPU recorded
+    gpu = next((d for d in ("cuda", "mlx") if d in devices), None)
+    if gpu:
+        header["device"] = gpu  # what a single run on CPU and GPU recorded
         for label in labels:
             header.pop(f"{label}_device", None)
     header["parts"] = ", ".join(f"{label} {Path(parts[label]).name}" for label in labels)
@@ -595,6 +631,27 @@ def emit_result(**values) -> None:
     print("RESULT " + json.dumps(values), flush=True)
 
 
+def to_device(model, device: str):
+    """Move a GkmSVM or DeltaSVM to "cpu", "cuda" or "mlx"; returns it."""
+    if device == "cuda":
+        model.cuda()
+    elif device == "mlx":
+        model.mlx()
+    return model
+
+
+def _mlx(name: str):
+    """mlx.core's ``name`` function (older MLX: mlx.core.metal's), or None
+    without MLX."""
+    from gkmsvm.backend import HAS_MLX
+
+    if not HAS_MLX:
+        return None
+    import mlx.core as mx
+
+    return getattr(mx, name, None) or getattr(getattr(mx, "metal", None), name, None)
+
+
 def gpu_sync() -> None:
     """Wait for queued GPU work; a no-op without a GPU (CuPy also imports on a
     cluster's CPU nodes, where synchronizing raises)."""
@@ -604,17 +661,39 @@ def gpu_sync() -> None:
         import cupy as cp
 
         cp.cuda.Stream.null.synchronize()
+    sync = _mlx("synchronize")
+    if sync is not None:
+        sync()
 
 
 def gpu_pool_mb() -> float | None:
-    """MB held by CuPy's default memory pool (blocks are cached, so this tracks the peak)."""
+    """GPU memory in MB: CuPy's default memory pool (blocks are cached, so this
+    tracks the peak), or MLX's peak allocation since ``gpu_reset_peak``."""
     from gkmsvm.backend import cuda_available
 
-    if not cuda_available():
-        return None
-    import cupy as cp
+    if cuda_available():
+        import cupy as cp
 
-    return cp.get_default_memory_pool().total_bytes() / 1024**2
+        return cp.get_default_memory_pool().total_bytes() / 1024**2
+    peak = _mlx("get_peak_memory")
+    if peak is not None and peak():
+        return peak() / 1024**2
+    return None
+
+
+def gpu_reset_peak() -> None:
+    """Start GPU memory accounting afresh (after untimed warm-up calls):
+    frees CuPy's cached blocks, resets MLX's peak."""
+    from gkmsvm.backend import cuda_available
+
+    if cuda_available():
+        import cupy as cp
+
+        cp.get_default_memory_pool().free_all_blocks()
+    for name in ("clear_cache", "reset_peak_memory"):
+        fn = _mlx(name)
+        if fn is not None:
+            fn()
 
 
 def _jit_workload(device: str) -> None:
@@ -641,19 +720,16 @@ def _jit_workload(device: str) -> None:
                 device=device,
                 verbose=False,
             )
-        if device == "cuda":
-            model.cuda()
+        to_device(model, device)
         for table, index in ((True, True), (False, True), (False, False)):
             model.use_lmer_table, model.use_lmer_index = table, index
             to_cpu(model(X))
         for method in ("kernel", "gkmexplain"):
             to_cpu(model.score_variants(X, alt, method=method))
         to_cpu(ism(model, X[:4]))
-        if kernel == "estimated":
-            to_cpu(gkmexplain(model, X[:4]))
-        dsvm = model.to_deltasvm(query_norm=True)
-        if device == "cuda":
-            dsvm.cuda()
+        for mode in ("importance", "hypothetical", "perturbation"):
+            to_cpu(gkmexplain(model, X[:4], mode=mode))
+        dsvm = to_device(model.to_deltasvm(query_norm=True), device)
         to_cpu(dsvm.score_variants(X, alt))
     gpu_sync()
 
@@ -691,10 +767,12 @@ def warm_jit_cache(device: str) -> None:
     Numba (cache=True) and CuPy keep compiled kernels on disk. After an
     install or a kernel edit the first process to use a kernel compiles it,
     which would land in whichever timed run comes first. device "cuda" warms
-    CPU and CUDA kernels.
+    CPU and CUDA kernels; "mlx" CPU kernels and the Numba code the MLX paths
+    run on the host (MLX compiles its Metal kernels in each process, so a
+    process's first call on MLX still compiles those).
     """
     t0 = time.perf_counter()
-    for dev in ["cpu", "cuda"] if device == "cuda" else ["cpu"]:
+    for dev in ["cpu"] if device == "cpu" else ["cpu", device]:
         m = run_measured(
             [sys.executable, str(Path(__file__).resolve()), "--warm-jit", dev]
         )
