@@ -3,6 +3,12 @@
 All notable changes to gkmsvm-lite are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.0.post1] - 2026-11-01
+
+### Changed
+
+- `_csmo.c` no longer carries a BSD-2-Clause label; like the rest of the package it is MIT (`LICENSE`). No code changes.
+
 ## [0.2.0] - 2026-10-30
 
 ### Breaking changes
@@ -85,5 +91,6 @@ Removed or renamed API:
 
 First release.
 
+[0.2.0.post1]: https://github.com/adamyhe/gkmsvm-lite/compare/v0.2.0...v0.2.0.post1
 [0.2.0]: https://github.com/adamyhe/gkmsvm-lite/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/adamyhe/gkmsvm-lite/releases/tag/v0.1.0
