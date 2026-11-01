@@ -3,6 +3,18 @@
 All notable changes to gkmsvm-lite are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.1] - 2026-11-01
+
+### Changed
+
+- MLX: RBF ISM and l-mer index queries run in Metal at every index density, 1.4-5x the CPU (10 threads, M4) on the dsQTL `-t 3` model and its SV subsets; on dense indexes they used to fall back to the CPU, where Metal had been slower. ISM's thread blocks and each query row's threadgroup are now 1,024 threads (they were 128 and a thread per item in groups of 256), which keeps their atomics out of DRAM and off one another. End to end on MLX: RBF prediction 1.4-4.3x the CPU (was 0.86-1.14x), ISM 2.6-5.4x (was 1.0-3.2x).
+- MLX mutation impact queries in Metal up to 8 index entries per l-mer (1.3-2x the CPU) and keeps the CPU's fused pass above that, where querying ref and alt in full loses to it.
+
+### Added
+
+- Benchmarks: panel S7, GkmExplain (hypothetical, perturbation) and full ISM throughput on 300 bp sequences against LS-GKM, with float64-reference and summation-to-delta checks per run (`benchmarks/explain_throughput.py`, `make s7`).
+- Benchmarks: `--device mlx` for the timing panels and S4, and `make apple` (CPU, MLX and LS-GKM on one Mac, into `results/apple/`); `dev/gram_index_vs_masked.py --device mlx`.
+
 ## [0.2.0.post1] - 2026-11-01
 
 ### Changed
@@ -91,6 +103,7 @@ Removed or renamed API:
 
 First release.
 
+[0.2.1]: https://github.com/adamyhe/gkmsvm-lite/compare/v0.2.0.post1...v0.2.1
 [0.2.0.post1]: https://github.com/adamyhe/gkmsvm-lite/compare/v0.2.0...v0.2.0.post1
 [0.2.0]: https://github.com/adamyhe/gkmsvm-lite/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/adamyhe/gkmsvm-lite/releases/tag/v0.1.0
