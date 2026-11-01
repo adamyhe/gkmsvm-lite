@@ -1,6 +1,6 @@
 """GkmExplain and ISM throughput on whole sequences, with precision checks (Fig. S7).
 
-Attributes the first --sizes GM12878 DHS sequences (300 bp, gm12878_shared.fa,
+Attributes the first --sizes (ISM: --ism-sizes) GM12878 DHS sequences (300 bp, gm12878_shared.fa,
 22,384 of them) with two models:
 
   t2  ENCODE ENCFF579AOX (-t 2 l=11 k=7 d=3, 72,145 SVs): through the explain
@@ -110,6 +110,10 @@ from _common import (
 OPS = ("hypothetical", "perturbation", "ISM")
 LSGKM_MODE = {"hypothetical": "1", "perturbation": "4"}
 DEFAULT_SIZES = "100,1000,10000"
+# ISM's cost per sequence doesn't depend on how many there are (no table to
+# amortize), and -t 3 ISM takes ~1 s per sequence on an M4: 10k would be ~3 h
+# per call
+DEFAULT_ISM_SIZES = "100,1000"
 WARMUP_SEQS = 8
 # Substitutions per sequence in the ISM delta check
 ISM_SAMPLES = 12
@@ -388,7 +392,12 @@ def main():
         choices=["cpu", "cuda", "mlx"],
         help="cuda / mlx: run gkmsvm-lite on CPU and that GPU (default: cuda)",
     )
-    parser.add_argument("--sizes", default=DEFAULT_SIZES, help="Sequence counts")
+    parser.add_argument(
+        "--sizes", default=DEFAULT_SIZES, help="Sequence counts for GkmExplain"
+    )
+    parser.add_argument(
+        "--ism-sizes", default=DEFAULT_ISM_SIZES, help="Sequence counts for ISM"
+    )
     parser.add_argument("--kernels", default="t2,t3")
     parser.add_argument("--ops", default=",".join(OPS))
     parser.add_argument(
@@ -457,6 +466,8 @@ def main():
     if args.worker:
         _worker(json.loads(args.worker))
         return
+    # Progress shows up in a log as it happens (stdout to a file is block-buffered)
+    sys.stdout.reconfigure(line_buffering=True)
     if args.reference:
         _reference(json.loads(args.reference))
         return
@@ -513,14 +524,19 @@ def main():
     warm_binaries(*(b for bins, _ in c_impls.values() for b in bins.values()))
 
     seqs = read_seqs(SEQ_DIR / "gm12878_shared.fa")
-    sizes = sorted({min(int(s), len(seqs)) for s in args.sizes.split(",")})
+
+    def counts(arg):
+        return sorted({min(int(s), len(seqs)) for s in arg.split(",")})
+
+    op_sizes = {op: counts(args.ism_sizes if op == "ISM" else args.sizes) for op in ops}
+    sizes = sorted({n for v in op_sizes.values() for n in v})
     seqs = seqs[: max(sizes)]
     from gkmsvm.codec import encode_codes
 
     work = Path(tempfile.mkdtemp(prefix="explain_throughput_"))
     np.save(work / "codes.npy", np.stack([encode_codes(s) for s in seqs]))
     print(
-        f"Work dir: {work}\nSizes {sizes}, ops {ops}, gkmsvm-lite runs {lite_runs}, "
+        f"Work dir: {work}\nSizes {op_sizes}, gkmsvm-lite runs {lite_runs}, "
         f"C: {list(c_impls)}"
     )
 
@@ -608,7 +624,7 @@ def main():
                         + f"  [{status}]"
                     )
 
-                for n_seqs in sizes:
+                for n_seqs in op_sizes[op]:
                     for device, n_thr in lite_runs:
                         spec = {
                             "work": str(work),

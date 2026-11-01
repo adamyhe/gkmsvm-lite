@@ -50,7 +50,8 @@ SOLVER_ARGS   := --sizes 500,1000,2000 --n-test 200
 SOLVER_CPU_ARGS := --sizes 500,1000,2000 --n-test 200
 CTCF_ARGS     := --sizes 2000,5000 --n-test 200
 SWEEP_ARGS    := --sizes 1000,4000 --n-seqs 200
-EXPLAIN_ARGS  := --sizes 50,200 --n-check 16 --c-max-seqs 10 --c-ism-max-seqs 2
+EXPLAIN_ARGS  := --sizes 50,200 --ism-sizes 20 --repeats 1 --n-check 16 \
+                 --c-max-seqs 10 --c-ism-max-seqs 2
 DART_ARGS     := --max-variants 200
 DART4_ARGS    := --max-seqs 2000
 DART_TRAIN_ARGS := --n-pos 1000 --n-neg 1000
