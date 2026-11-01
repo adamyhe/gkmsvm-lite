@@ -9,8 +9,8 @@
  * Built as a Python extension module (for setuptools install) but the
  * solver function is called via ctypes, not the Python C API.
  *
- * BSD-2-Clause — this file does not contain LIBSVM code; the algorithm
- * is reimplemented from the Fan et al. 2005 description.
+ * Contains no LIBSVM code; the algorithm is reimplemented from
+ * Fan, Chen & Lin (2005).
  */
 
 #include <Python.h>
