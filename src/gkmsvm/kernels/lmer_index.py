@@ -413,41 +413,50 @@ extern "C" __global__ void lmer_index_query(
 """
 
 # Metal has no float64: count hits per mismatch level in int32 and combine
-# levels in float64 on the CPU, so results are exact
-_METAL_SRC = """
-    uint it = thread_position_in_grid.x;
-    uint b = thread_position_in_grid.y;
+# levels in float64 on the CPU, so results are exact. One threadgroup of
+# _METAL_QUERY_THREADS per query row, its threads striding over the row's
+# (window, neighbor) items (consecutive threads take consecutive neighbors of
+# a window, which the sorted masks keep close in the index). A thread per item
+# over many small threadgroups had every resident group adding into the same
+# row's counters, and lost to the CPU above ~2.5 index entries per l-mer.
+_METAL_QUERY_HEAD = """
+    uint b = threadgroup_position_in_grid.x;
+    uint tid = thread_position_in_threadgroup.x, nt = threads_per_threadgroup.x;
     uint W = (uint)params[0], n_masks = (uint)params[1], S = (uint)params[2];
     uint n_lmers = (uint)params[3], B = (uint)params[4];
-    if (it >= W * n_masks) return;
-    uint i = it / n_masks, t = it - i * n_masks;
-    uint v = bx[b * W + i] ^ masks[t];
-    if (v >= n_lmers) return;
-    uint base = ((uint)levels[t] * B + b) * S;
-    for (int e = offsets[v]; e < offsets[v + 1]; e++)
-        atomic_fetch_add_explicit(&counts[base + ids[e]], 1, memory_order_relaxed);
+    uint n_items = W * n_masks;
+    for (uint it = tid; it < n_items; it += nt) {
+        uint i = it / n_masks, t = it - i * n_masks;
+        uint v = bx[b * W + i] ^ masks[t];
+        if (v >= n_lmers) continue;
+        uint base = ((uint)levels[t] * B + b) * S;
 """
+_METAL_SRC = (
+    _METAL_QUERY_HEAD
+    + """
+        for (int e = offsets[v]; e < offsets[v + 1]; e++)
+            atomic_fetch_add_explicit(&counts[base + ids[e]], 1, memory_order_relaxed);
+    }
+"""
+)
 # With window weights (-t 4/5): each hit adds wx[b, i] * vals[e], exact in 64
 # bits as a low uint32 word plus a carry word (bumped by the thread whose add
 # wraps the low word)
-_METAL_SRC_W = """
-    uint it = thread_position_in_grid.x;
-    uint b = thread_position_in_grid.y;
-    uint W = (uint)params[0], n_masks = (uint)params[1], S = (uint)params[2];
-    uint n_lmers = (uint)params[3], B = (uint)params[4], wx_stride = (uint)params[5];
-    if (it >= W * n_masks) return;
-    uint i = it / n_masks, t = it - i * n_masks;
-    uint v = bx[b * W + i] ^ masks[t];
-    if (v >= n_lmers) return;
-    uint a = (uint)wx[b * wx_stride + i];
-    uint base = ((uint)levels[t] * B + b) * S;
-    for (int e = offsets[v]; e < offsets[v + 1]; e++) {
-        uint c = a * (uint)vals[e];
-        uint old = atomic_fetch_add_explicit(&lo[base + ids[e]], c, memory_order_relaxed);
-        if (old + c < old)
-            atomic_fetch_add_explicit(&hi[base + ids[e]], 1u, memory_order_relaxed);
+_METAL_SRC_W = (
+    _METAL_QUERY_HEAD
+    + """
+        uint wx_stride = (uint)params[5];
+        uint a = (uint)wx[b * wx_stride + i];
+        for (int e = offsets[v]; e < offsets[v + 1]; e++) {
+            uint c = a * (uint)vals[e];
+            uint old = atomic_fetch_add_explicit(&lo[base + ids[e]], c,
+                                                 memory_order_relaxed);
+            if (old + c < old)
+                atomic_fetch_add_explicit(&hi[base + ids[e]], 1u, memory_order_relaxed);
+        }
     }
 """
+)
 # ISM through the index on the GPU (LmerIndex.mutants): one thread block per
 # (position, sequence). Its threads scatter the hits of the windows covering
 # the position, before (slot 0) and after each substitution (slots 1-4), into
@@ -572,23 +581,35 @@ _METAL_MUTANTS = (
 """
 )
 _MUTANTS_THREADS = 128
+# Metal: 1024 threads per (position, sequence). Each threadgroup's [5, S]
+# scratch is device memory its float atomics go through; with 128-thread
+# groups, the resident ones' scratch outgrew the caches and the atomics went to
+# DRAM (0.5x the CPU at 18 index entries per l-mer, so MLX used to run ISM's
+# index pass on CPU above 6). Larger groups keep the same occupancy with fewer
+# scratch slices live. RBF ISM, 8 x 300 bp on an M4 against the CPU's 10
+# threads: 4.1x at 1.1 entries per l-mer, 3.0x at 4.4, 2.75x at 18 (the
+# dsQTL -t 3 model; 128 threads: 3.2x, 1.7x, 0.52x)
+_METAL_MUTANTS_THREADS = 1024
 # Scratch per launch: [items, 5, S]
 _MUTANTS_SCRATCH_BYTES = 256 * 2**20
-# Above this many index entries per l-mer, MLX runs ISM's index pass on CPU:
-# the scatter is device-memory float atomics, which an M4 does at ~1G/s (RBF,
-# 4 x 300 bp: 2.5x the CPU at 1.1 entries per l-mer, 1.65x at 4.4, 0.83x at
-# 8.9; the dsQTL -t 3 model has 18)
-_METAL_MUTANTS_MAX_DENSITY = 6.0
 
 # Rows per Metal launch: caps the int32 [levels, rows, S] counts
 _METAL_COUNT_BYTES = 256 * 2**20
-# Above this many distinct pair weights, MLX queries on CPU
+# Above this many distinct pair weights, MLX queries on CPU (one int32 [rows, S]
+# count block per weight)
 _METAL_MAX_LEVELS = 16
-# ... and above this many index entries per l-mer: the [levels, rows, S]
-# counts' scattered atomics lose to the CPU (200 x 300 bp queries, l = 10, on
-# an M4: 2.1x the CPU at 0.56 entries per l-mer, 1.08x at 2.2, 0.72x at 4.4,
-# 0.52x at 17.8, the dsQTL -t 3 model's)
-_METAL_QUERY_MAX_DENSITY = 2.5
+# Threads per query row (_METAL_SRC). 256 x 300 bp queries, l = 10, on an M4
+# against the CPU's 10 threads: 3.9x at 1.1 entries per l-mer, 3.2x at 4.4,
+# 1.45x at 18 (the dsQTL -t 3 model); a thread per item, in groups of 256, was
+# 1.7x, 0.76x and 0.45x
+_METAL_QUERY_THREADS = 1024
+# Mutation impact (explain.mutation_impact) on MLX queries ref and alt in full,
+# twice the work of the CPU's fused pass, which for a SNP visits only the
+# windows that differ: above this many index entries per l-mer it runs that
+# pass instead. 2000 SNPs in 300 bp, dsQTL -t 3 SV subsets, on an M4 against
+# the CPU's 10 threads: 1.97x at 1.1, 1.55x at 4.4, 1.26x at 6.7, 0.99x at
+# 8.9, 0.91x at 13.3, 0.75x at 18.2
+_METAL_IMPACT_MAX_DENSITY = 8.0
 
 
 @cache
@@ -689,19 +710,21 @@ class LmerIndex:
 
     def mutants_on_device(self, dev: str) -> bool:
         """Whether mutants() runs on dev (CUDA, MLX) rather than on CPU."""
-        if dev == "mlx":
-            return self.offsets[-1] <= _METAL_MUTANTS_MAX_DENSITY * self.n_lmers
-        return dev == "cuda"
+        return dev in ("cuda", "mlx")
+
+    def impact_on_device(self, dev: str) -> bool:
+        """Whether mutation impact queries on dev rather than in the CPU's fused
+        pass (impact()): as queries_on_device, and on MLX only up to
+        _METAL_IMPACT_MAX_DENSITY index entries per l-mer."""
+        if dev == "mlx" and self.offsets[-1] > _METAL_IMPACT_MAX_DENSITY * self.n_lmers:
+            return False
+        return self.queries_on_device(dev)
 
     def queries_on_device(self, dev: str) -> bool:
         """Whether pairwise() queries on dev (CUDA, MLX) rather than on CPU: MLX
-        queries on CPU above _METAL_MAX_LEVELS distinct weights or
-        _METAL_QUERY_MAX_DENSITY entries per l-mer."""
+        queries on CPU above _METAL_MAX_LEVELS distinct weights."""
         if dev == "mlx":
-            return (
-                len(self.table) <= _METAL_MAX_LEVELS
-                and self.offsets[-1] <= _METAL_QUERY_MAX_DENSITY * self.n_lmers
-            )
+            return len(self.table) <= _METAL_MAX_LEVELS
         return dev == "cuda"
 
     @property
@@ -909,8 +932,8 @@ class LmerIndex:
         import mlx.core as mx
 
         if not self.queries_on_device("mlx"):
-            # One int32 [rows, S] block per level; with many levels or a dense
-            # index, query on CPU, which shares memory with the GPU
+            # One int32 [rows, S] block per level; with many levels, query on
+            # CPU, which shares memory with the GPU
             out = self.pairwise(np.ascontiguousarray(to_cpu(bx)))
             return mx.array(out.astype(np.float32))
         if self.offsets[-1] >= 2**31:
@@ -927,13 +950,12 @@ class LmerIndex:
         words = 2 if weighted else 1
         rows = max(1, _METAL_COUNT_BYTES // (4 * words * n_lev * self.S))
         out = np.zeros((B, self.S), dtype=np.float64)
-        n_items = W * len(self.masks)
         for b0 in range(0, B, rows):
             nb = min(rows, B - b0)
             launch = dict(
                 template=[],
-                grid=((n_items + 255) // 256 * 256, nb, 1),
-                threadgroup=(256, 1, 1),
+                grid=(nb * _METAL_QUERY_THREADS, 1, 1),
+                threadgroup=(_METAL_QUERY_THREADS, 1, 1),
                 init_value=0,
             )
             q = mx.array(bx_np[b0 : b0 + nb].ravel())
@@ -1062,8 +1084,8 @@ class LmerIndex:
                 + [mx.array((i0,) + ints, dtype=mx.int64).astype(mx.int32)]
                 + [mx.array(floats, dtype=mx.float32)],
                 template=[],
-                grid=(n * _MUTANTS_THREADS, 1, 1),
-                threadgroup=(_MUTANTS_THREADS, 1, 1),
+                grid=(n * _METAL_MUTANTS_THREADS, 1, 1),
+                threadgroup=(_METAL_MUTANTS_THREADS, 1, 1),
                 output_shapes=[(n * 5 * S,), (4 * n_items,)],
                 output_dtypes=[mx.float32, mx.float32],
                 init_value=0,

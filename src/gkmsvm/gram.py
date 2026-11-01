@@ -8,6 +8,14 @@ from gkmsvm.backend import float_dtype, get_array_module, is_mlx, to_cpu
 from gkmsvm.kernels.base import GkmKernel
 from gkmsvm.svm import GkmSVM, _progress
 
+# MLX Grams take the masked join, not the l-mer index, which loses to it at
+# every N (-t 2 l=11 k=7 d=3, 300 bp, on an M4: 0.66x at 1k, 0.52x at 5k, 0.54x
+# at 10k with the row-per-threadgroup query; 0.2-0.37x with a thread per item).
+# Without diag_offset in Metal it computes every column, about twice the work;
+# even halved that would be about even.
+# benchmarks/dev/gram_index_vs_masked.py --device mlx sets this to time both
+_MLX_GRAM_INDEX = False
+
 
 def compute_gram(
     kernel: GkmKernel,
@@ -72,15 +80,15 @@ def compute_gram(
 
     from gkmsvm.kernels import lmer_index
 
-    # MLX keeps the masked join: the Metal index query loses to it at every N
-    # (0.2-0.37x at 1k-20k on an M4; its neighbor lookups alone take longer)
-    if lmer_index.applies(base) and not is_mlx(X):
+    mlx = is_mlx(X)
+    if lmer_index.applies(base) and (_MLX_GRAM_INDEX or not mlx):
         index = lmer_index.LmerIndex(base, by, by_rc)
         rows = max(1, GkmSVM._MAX_SCORE_BYTES // (8 * M))
         for r in _progress(range(0, N, rows), verbose, "Gram matrix"):
             e = min(r + rows, N)
             c = r if symmetric else 0
-            tile = index.pairwise(bx[r:e], r if symmetric else None)[:, c:]
+            # (MLX queries every column: no diag_offset in Metal)
+            tile = index.pairwise(bx[r:e], r if symmetric and not mlx else None)[:, c:]
             tile = tile_float(tile)
             if base.normalize:
                 norm = txp.sqrt(diag_x[r:e, None] * diag_y[c:][None, :])

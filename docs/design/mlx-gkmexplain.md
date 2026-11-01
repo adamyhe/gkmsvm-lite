@@ -13,7 +13,7 @@ Measured (100 random 300 bp sequences, M4; error relative to the CPU's largest a
 | dsQTL `-t 3` | hypothetical | 3.3e-7 | 20.3 | 16.6 |
 | dsQTL `-t 3` | perturbation | 5.1e-7 | 71.9 | 44.8 |
 
-Plain float32 per-window sums held to 4-6e-7 for `-t 2`. For `-t 3` the neighbor sums over the index's CSR entries (signed SV weights, ~18 entries per l-mer on 32,715 SVs) gave 6e-6 in float32 and 3e-7 with a Neumaier sum. The `-t 3` time is mostly the CPU index query for the RBF weights (the Metal index query is slower on that SV set: contended atomics). Importance sums to score − bias to 1.4e-7 of the largest score.
+Plain float32 per-window sums held to 4-6e-7 for `-t 2`. For `-t 3` the neighbor sums over the index's CSR entries (signed SV weights, ~18 entries per l-mer on 32,715 SVs) gave 6e-6 in float32 and 3e-7 with a Neumaier sum. For `-t 3` the RBF weights come from the l-mer index query, which runs in Metal (on the dsQTL model about 1.45× the CPU's query); MLX GkmExplain stays about 1.3× the CPU there, so the query isn't where its time goes. Importance sums to score − bias to 1.4e-7 of the largest score.
 
 The plan as written before the implementation follows.
 

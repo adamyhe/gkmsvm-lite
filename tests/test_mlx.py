@@ -824,12 +824,14 @@ class TestIsmIndexMLX:
             np.array(got), ref, rtol=0, atol=1e-5 * np.abs(ref).max()
         )
 
-    def test_dense_index_runs_on_cpu(self, monkeypatch):
-        """Above _METAL_MUTANTS_MAX_DENSITY the CPU pass runs; MLX result."""
+    def test_host_pass_runs_on_cpu(self, monkeypatch):
+        """When mutants_on_device says no, the CPU pass runs; MLX result."""
         from gkmsvm.ism import ism
         from gkmsvm.kernels import lmer_index
 
-        monkeypatch.setattr(lmer_index, "_METAL_MUTANTS_MAX_DENSITY", 0.0)
+        monkeypatch.setattr(
+            lmer_index.LmerIndex, "mutants_on_device", lambda self, dev: False
+        )
         monkeypatch.setattr(
             lmer_index.LmerIndex,
             "_mutants_gpu",
@@ -847,13 +849,13 @@ class TestIsmIndexMLX:
     @pytest.mark.parametrize("kernel_type", ["gkmrbf", "wgkmrbf"])
     @pytest.mark.parametrize("dense", [False, True])
     def test_mutation_impact_matches_cpu(self, kernel_type, dense, monkeypatch):
-        """RBF mutation impact through the index: queried in Metal, or (dense)
-        the CPU's fused pass; SNPs and indels."""
+        """RBF mutation impact through the index: queried in Metal, or (dense:
+        above _METAL_IMPACT_MAX_DENSITY) the CPU's fused pass; SNPs and indels."""
         from gkmsvm.explain import mutation_impact
         from gkmsvm.kernels import lmer_index
 
         if dense:
-            monkeypatch.setattr(lmer_index, "_METAL_QUERY_MAX_DENSITY", 0.0)
+            monkeypatch.setattr(lmer_index, "_METAL_IMPACT_MAX_DENSITY", 0.0)
         model, _, _ = self._case(kernel_type, True)
         rng = np.random.default_rng(5)
         ref = ["".join(rng.choice(list("ACGT"), k)) for k in rng.integers(20, 61, 8)]
@@ -861,7 +863,7 @@ class TestIsmIndexMLX:
         alt += [s[:9] + s[11:] for s in ref[5:7]] + [ref[7][:9] + "GT" + ref[7][9:]]
         expected = mutation_impact(model, ref, alt)
         model.mlx()
-        assert model._sv_index().queries_on_device("mlx") != dense
+        assert model._sv_index().impact_on_device("mlx") != dense
         got = mutation_impact(model, ref, alt)
         np.testing.assert_allclose(
             got, expected, rtol=0, atol=1e-5 * np.abs(expected).max()
@@ -874,7 +876,7 @@ class TestLmerIndexMLX:
     @pytest.mark.parametrize("which", ["t0", "t2_l9", "t2_l11"])
     @pytest.mark.parametrize("dense", [False, True])
     def test_index_matches_cpu(self, which, dense, monkeypatch):
-        """dense: above _METAL_QUERY_MAX_DENSITY the query runs on CPU."""
+        """dense: above _METAL_MAX_LEVELS the query runs on CPU."""
         from gkmsvm.codec import reverse_complement
         from gkmsvm.kernels import lmer_index
         from gkmsvm.kernels.direct import DirectGkmKernel
@@ -895,7 +897,7 @@ class TestLmerIndexMLX:
         bx[1, :3] = PAD_WINDOW
         ref = index.pairwise(bx)
         if dense:
-            monkeypatch.setattr(lmer_index, "_METAL_QUERY_MAX_DENSITY", 0.0)
+            monkeypatch.setattr(lmer_index, "_METAL_MAX_LEVELS", 0)
             monkeypatch.setattr(
                 lmer_index, "_metal_query", lambda weighted: pytest.fail("Metal")
             )

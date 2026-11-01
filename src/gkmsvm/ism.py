@@ -171,7 +171,7 @@ def _ism_index(model, x, _table=None, lengths=None):
     gamma = kernel.gamma if isinstance(kernel, RbfKernel) else np.nan
     coef = model.coefficients
     host = xp is np or not index.mutants_on_device(device_of(bx))
-    if host:  # (MLX with a dense index: the CPU pass is faster)
+    if host:
         bx = np.ascontiguousarray(to_cpu(bx))
         coef = to_cpu(coef)
     ref = index.pairwise(bx)  # [B, S], on the device mutants() runs on

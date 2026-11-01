@@ -1871,7 +1871,7 @@ def mutation_impact(
             continue
         index = model._sv_index()
         if index is not None and (
-            xp is np or not index.queries_on_device(device_of(bx))
+            xp is np or not index.impact_on_device(device_of(bx))
         ):
             # RBF through the index on CPU: one fused pass per variant, the
             # alt row visiting only the windows that differ from ref
