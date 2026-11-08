@@ -3,6 +3,29 @@
 All notable changes to gkmsvm-lite are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.1] - 2026-11-08
+
+### Changed
+
+- MLX: RBF ISM and l-mer index queries run in Metal at every index density, 1.4-5x the CPU (10 threads, M4) on the dsQTL `-t 3` model and its SV subsets; on dense indexes they used to fall back to the CPU, where Metal had been slower. ISM's thread blocks and each query row's threadgroup are now 1,024 threads (they were 128 and a thread per item in groups of 256), which keeps their atomics out of DRAM and off one another. End to end on MLX: RBF prediction 1.4-4.3x the CPU (was 0.86-1.14x), ISM 2.6-5.4x (was 1.0-3.2x).
+- MLX: index scoring (deltaSVM tables, prediction, variant and ISM scoring through the SV index) runs a fused Metal query + reduce: persistent threadgroups scatter each row's hits into a per-group scratch of length S and reduce coef · f(K) on the GPU, so the [B, S] block and the host combine are gone. A 65,536 l-mer deltaSVM chunk on the dsQTL `-t 3` model: 21.4 s to 0.68 s (CPU, 10 threads: 2.46 s).
+- MLX: query launches with fewer than 40 rows split each row across several threadgroups, so single SMO columns use the whole GPU: 6.3 to 1.2 ms per column; SMO at N = 10k with a 2,048-column cache 121 to 34 s.
+- MLX: mutation impact (GkmExplain `-m 5`, `score_variants(method="gkmexplain")`) runs a fused Metal pass at every index density: 28,309 dsQTL SNPs in 21 s on an M5 (10 CPU threads: 52 s), about 2e-5 relative to the CPU.
+- MLX: RBF GkmExplain (hypothetical, perturbation) overlaps each batch's Metal kernel with the next batch's CPU query of its SV weights: dsQTL `-t 3` model, 500 × 300 bp on an M5, hypothetical 8.8 to 5.6 s (10 CPU threads: 9.1 s), perturbation 1.6× the CPU.
+- MLX: base codes of a one-hot input are taken on the host (unified memory, no copy) rather than by an argmax on the GPU that packing then waited on. Small `-t 2` calls now match the CPU: predict 2,000 × 300 bp 48.6 to 35.8 ms (CPU 32.0), 2,000 variants 8.7 to 4.6 ms (CPU 4.6).
+- `solver="auto"` takes the precomputed Gram only when 1.1 × the Gram plus 2 GiB fits in 90% of available RAM (was: the Gram in 75%). Runs measure the Gram plus 0.9-2.0 GB, so on a 16 GB Mac the old rule let through runs that would swap.
+
+### Fixed
+
+- MLX precomputed Gram: MLX's buffer cache is cleared after each column panel. The panels grow, so the cache kept one buffer of every size, O(N²) beside the Gram: peak memory at N = 20k (M5) 11.1 to 5.0 GB.
+- macOS: available memory is read from the VM statistics (free + inactive pages). macOS has no `SC_AVPHYS_PAGES`, so every Mac used to read as 8 GB, which set `solver="auto"`'s precomputed-Gram limit (N of about 28k whatever the RAM) and the SMO cache size.
+
+### Added
+
+- Benchmarks: Fig. S4B–F, GkmExplain (hypothetical, perturbation) and full ISM throughput on 300 bp sequences against LS-GKM, with float64-reference and summation-to-delta checks per run (`benchmarks/explain_throughput.py`, `make s4-explain`).
+- Benchmarks: `--device mlx` for the timing panels and S4, and `make apple` (CPU, MLX and LS-GKM on one Mac, into `results/apple/`); `dev/gram_index_vs_masked.py --device mlx`.
+- Benchmarks: Fig. S7, gkmsvm-lite on Apple Silicon (`make apple`, `results/apple/`), and `dev/mlx_index_density.py`, the Metal paths against the CPU by index density.
+
 ## [0.2.0.post1] - 2026-11-01
 
 ### Changed
@@ -91,6 +114,7 @@ Removed or renamed API:
 
 First release.
 
+[0.2.1]: https://github.com/adamyhe/gkmsvm-lite/compare/v0.2.0.post1...v0.2.1
 [0.2.0.post1]: https://github.com/adamyhe/gkmsvm-lite/compare/v0.2.0...v0.2.0.post1
 [0.2.0]: https://github.com/adamyhe/gkmsvm-lite/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/adamyhe/gkmsvm-lite/releases/tag/v0.1.0
