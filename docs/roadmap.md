@@ -43,7 +43,7 @@
 - [x] `load_model()` unified loader (npz + LS-GKM auto-detect)
 - [x] Column-cached SMO solver (`solver="smo"`) — LRU-cached kernel columns, no N×N Gram matrix
 - [x] `train_gkmsvm()` solver selection: `auto` / `libsvm` / `smo` / `nystrom`
-- [x] Memory-aware solver auto-selection — Gram size against 75% of available RAM
+- [x] Memory-aware solver auto-selection — Gram size plus the run's other memory against 90% of available RAM
 - [x] Epsilon-SVR regression via `train_gkmsvr()` — continuous-valued prediction with configurable epsilon tube
 - [x] MLX backend for Apple Silicon GPU inference (`model.mlx()`)
 - [x] MLX shim for NumPy API compatibility (strides, copy, fancy indexing)
