@@ -15,7 +15,8 @@ from gkmsvm.backend import (
     to_mlx,
 )
 from gkmsvm.codec import encode_codes, to_codes
-from gkmsvm.svm import KERNEL_BUILDERS, GkmSVM, as_batch, resolve_kernel_type
+from gkmsvm.inputs import as_batch
+from gkmsvm.svm import KERNEL_BUILDERS, GkmSVM, resolve_kernel_type
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -648,7 +649,7 @@ def _to_codes(seqs, allow_other: bool = False):
     """(X [N, L] base codes, lengths [N] or None) from a [N, 4, L] one-hot or
     [N, L] codes array, or a list of DNA strings or arrays: DNA strings may
     hold N, and with allow_other any letter, read as A (as in LS-GKM); lists
-    of different lengths are padded to the longest (svm.as_batch)."""
+    of different lengths are padded to the longest (inputs.as_batch)."""
     if isinstance(seqs, np.ndarray) and seqs.ndim in (2, 3):
         return to_codes(seqs), None
     if isinstance(seqs, (list, tuple)):

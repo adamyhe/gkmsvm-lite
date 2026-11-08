@@ -628,10 +628,10 @@ class TestMaskedMLX:
     )
     @pytest.mark.parametrize("col_tile", [4096, 7])
     def test_join_matches_cpu(self, kernel_type, params, col_tile, monkeypatch):
-        import gkmsvm.kernels.masked as masked
         from gkmsvm.codec import reverse_complement
+        from gkmsvm.kernels import masked, masked_metal
 
-        monkeypatch.setattr(masked, "_METAL_COL_TILE", col_tile)
+        monkeypatch.setattr(masked_metal, "_METAL_COL_TILE", col_tile)
         kernel = _make_model(20, 60, kernel_type, params).kernel
         X = np.stack([one_hot_encode(s) for s in _make_seqs(21, 80, seed=3)])
         X[2, :, 5:45] = X[9, :, 30:70]
@@ -643,7 +643,7 @@ class TestMaskedMLX:
         plan = kernel._join_plan()
         args = (pack(X), pack(Y), plan, pack(reverse_complement(Y)))
         np.testing.assert_allclose(
-            masked.masked_pairwise_mlx(*args),
+            masked_metal.masked_pairwise_mlx(*args),
             masked.masked_pairwise(*args),
             rtol=1e-12,
             atol=1e-12,
@@ -686,17 +686,17 @@ class TestWeightedMLX:
     @pytest.mark.parametrize("padded", [False, True])
     @pytest.mark.parametrize("col_tile", [2048, 7])
     def test_join_is_exact(self, padded, col_tile, monkeypatch):
-        import gkmsvm.kernels.masked as masked
+        from gkmsvm.kernels import masked, masked_metal
         from gkmsvm.kernels.weighted import CenterWeightedGkmKernel
 
-        monkeypatch.setattr(masked, "_METAL_COL_TILE_W", col_tile)
+        monkeypatch.setattr(masked_metal, "_METAL_COL_TILE_W", col_tile)
         kernel = CenterWeightedGkmKernel(11, 7, d=3, M=255, H=1e9)  # all 255
         x = self._polya_and_random(18, 1000, 1)
         lengths = np.r_[1000, np.random.default_rng(2).integers(20, 1001, 17)]
         bx, bx_rc = kernel.pack_both(x, lengths if padded else None)
         w, w_rc = kernel.row_weights(bx), kernel.row_weights(bx_rc, rc=True)
         plan = kernel._join_plan()
-        got = masked.masked_pairwise_mlx(bx, bx, plan, bx_rc, wx=w, wy=w, wy_rc=w_rc)
+        got = masked_metal.masked_pairwise_mlx(bx, bx, plan, bx_rc, wx=w, wy=w, wy_rc=w_rc)
         # poly-A against poly-A: every forward pair a full match at weight 255,
         # none on the RC; exact (the CPU's float64 sums are off by ~1e-9)
         n = (lengths[:9] if padded else np.full(9, 1000)) - 11 + 1
@@ -722,7 +722,7 @@ class TestWeightedMLX:
     @pytest.mark.parametrize("kernel_type", ["wgkm", "wgkmrbf"])
     def test_brute_and_self_kernels(self, kernel_type):
         """On MLX they run in Metal and return MLX arrays."""
-        from gkmsvm.svm import as_batch
+        from gkmsvm.inputs import as_batch
 
         kernel = _make_model(
             3, 40, kernel_type, {"L": 8, "k": 5, "M": 20, "H": 6.0, "gamma": 2.0}
@@ -755,7 +755,7 @@ class TestMutantDiagMLX:
         from gkmsvm.kernels.direct import DirectGkmKernel
         from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
         from gkmsvm.kernels.weighted import CenterWeightedGkmKernel
-        from gkmsvm.svm import as_batch
+        from gkmsvm.inputs import as_batch
 
         cls, kw = {
             "gkm_cnt": (DirectGkmKernel, {}),
@@ -782,7 +782,7 @@ class TestIsmIndexMLX:
 
     @staticmethod
     def _case(kernel_type, padded):
-        from gkmsvm.svm import as_batch
+        from gkmsvm.inputs import as_batch
 
         rng = np.random.default_rng(11)
         params = {"L": 7, "k": 5, "d": 2, "gamma": 2.0, "M": 20, "H": 6.0}
@@ -1026,7 +1026,7 @@ def test_gkmexplain_metal_matches_cpu(kernel_type, mode):
         return out
 
     params = {"L": 7, "k": 5, "d": 2, "gamma": 2.0, "M": 20, "H": 6.0}
-    from gkmsvm.svm import as_batch
+    from gkmsvm.inputs import as_batch
 
     sv, sv_len = as_batch(seqs(60, 15, 70))
     model = GkmSVM(sv, rng.normal(size=60), 0.3, kernel_type, params, sv_lengths=sv_len)
@@ -1063,7 +1063,7 @@ def test_gkmexplain_metal_per_sv_matches_cpu(kernel_type, mode):
     queries and SVs with N: the CPU's attributions to 1e-6 of the largest,
     NumPy float64, and importance sums to score - bias (non-RBF)."""
     from gkmsvm.explain import gkmexplain
-    from gkmsvm.svm import as_batch
+    from gkmsvm.inputs import as_batch
 
     rng = np.random.default_rng(4)
 

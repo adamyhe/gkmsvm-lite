@@ -5,8 +5,9 @@ from __future__ import annotations
 import numpy as np
 
 from gkmsvm.backend import float_dtype, get_array_module, is_mlx, to_cpu
+from gkmsvm.inputs import _progress
 from gkmsvm.kernels.base import GkmKernel
-from gkmsvm.svm import GkmSVM, _progress
+from gkmsvm.svm import GkmSVM
 
 # MLX Grams take the masked join, not the l-mer index, which loses to it at
 # every N (-t 2 l=11 k=7 d=3, 300 bp, on an M4: 0.66x at 1k, 0.52x at 5k, 0.54x

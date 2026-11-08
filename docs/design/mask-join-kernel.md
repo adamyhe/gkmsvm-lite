@@ -135,9 +135,9 @@ SMO columns use the same index built over the training set: a column K(i, :) is 
 | Gram tiles (`compute_gram`: libsvm, Nyström) | l-mer index over the columns (self-Gram rows from the diagonal on; not on MLX), else masked join in column panels | `gram.py` |
 | SMO kernel columns (`KernelColumnCache.compute_columns`) | l-mer index over the training set (`-t 1`-`-t 5`), else batched masked join | `solver.py` |
 | Prediction `-t 0/1/2/4` | Exact l-mer table | `svm.py`, `lmer_table.py` |
-| Prediction `-t 3`, other kernels; ISM; mutation impact | Cached l-mer index over the SVs, else masked join | `svm.py`, `ism.py`, `explain.py` |
+| Prediction `-t 3`, other kernels; ISM; mutation impact | Cached l-mer index over the SVs, else masked join | `svm.py`, `ism.py`, `explain/impact.py` |
 | `to_deltasvm` | l-mer table, else scoring all 4^l l-mers | `svm.py` |
-| GkmExplain attribution | Explain table (`-t 0/1/2/4`), else the SVs' l-mer weights or the index (RBF), else per-SV packed kernels (per-position decomposition) | `explain.py` |
+| GkmExplain attribution | Explain table (`-t 0/1/2/4`), else the SVs' l-mer weights or the index (RBF), else per-SV packed kernels (per-position decomposition) | `explain/` |
 
 The brute-force packed kernels remain for calls with fewer than 16 sequences on a side and as the test oracle (`kernel.use_masked = False`).
 
@@ -201,7 +201,7 @@ Targets:
 ## Files
 
 - `src/gkmsvm/kernels/packed.py`: `PackedGkmKernel` (`pack`, `raw_packed`, `raw_diag_packed`), `PAD_WINDOW`.
-- `src/gkmsvm/kernels/direct.py`: brute-force packed kernels (`_fused_pairwise_packed_numba`, CUDA and Metal equivalents), `_min_matches`.
+- `src/gkmsvm/kernels/direct.py`: brute-force packed kernels (`_fused_pairwise_packed_numba`; CUDA and Metal equivalents in `direct_gpu.py`), `_min_matches`.
 - `src/gkmsvm/kernels/masked.py`: mask plans (`mask_plan`) and the joins on CPU, CUDA and Metal.
 - `src/gkmsvm/kernels/lmer_index.py`: the cached l-mer index.
 - `src/gkmsvm/lmer_table.py`: exact l-mer table build.

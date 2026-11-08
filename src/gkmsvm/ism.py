@@ -12,16 +12,10 @@ from __future__ import annotations
 import numpy as np
 
 from gkmsvm.backend import float_dtype, get_array_module, is_mlx, to_cpu
+from gkmsvm.inputs import _per_position, _progress, _rows, _short_rows, as_batch
 from gkmsvm.kernels.packed import PAD_WINDOW, device_of
 from gkmsvm.kernels.rbf import RbfKernel
-from gkmsvm.svm import (
-    GkmSVM,
-    _per_position,
-    _progress,
-    _rows,
-    _short_rows,
-    as_batch,
-)
+from gkmsvm.svm import GkmSVM
 
 
 def ism(

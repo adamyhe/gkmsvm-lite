@@ -87,7 +87,7 @@ def build_model(
     encoded = [encode_codes(seq, allow_other=True) for seq in sequences]
     # SVs of different lengths (LS-GKM trained on peaks as they are) are
     # padded to the longest, with sv_lengths
-    from gkmsvm.svm import as_batch
+    from gkmsvm.inputs import as_batch
 
     support_sequences, sv_lengths = as_batch(encoded)
     kernel_type = header.get("kernel_type")

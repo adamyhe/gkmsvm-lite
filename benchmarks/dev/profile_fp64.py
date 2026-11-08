@@ -90,13 +90,14 @@ def main():
           f"GPU {cp.cuda.runtime.getDeviceProperties(0)['name'].decode()}")
 
     def run_explain_sv():
-        saved, table = explain._explain_lmer, model.use_explain_table
-        explain._explain_lmer = lambda *a, **k: None
+        # core._gkmexplain calls _explain_lmer, so replace it there
+        saved, table = explain.core._explain_lmer, model.use_explain_table
+        explain.core._explain_lmer = lambda *a, **k: None
         model.use_explain_table = False
         try:
             return explain.gkmexplain(model, cp.asarray(ref51[:args.n_explain]))
         finally:
-            explain._explain_lmer, model.use_explain_table = saved, table
+            explain.core._explain_lmer, model.use_explain_table = saved, table
 
     def run_join(n):
         model.use_lmer_index = False
