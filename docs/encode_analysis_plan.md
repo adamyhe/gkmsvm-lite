@@ -49,10 +49,13 @@ Our own per-model results so far are the DART-Eval runs (benchmarks panel S5) on
 2. Extract      peaks + hg38/mm10 FASTA → 300 bp one-hot [N, 4, 300]
 3. GkmExplain   model + sequences → hypothetical attributions [N, 4, 300] (mode 1)
 4. TF-MoDISco   one-hot + attributions → motif patterns
-5. FiNeMo       one-hot + attributions + TF-MoDISco patterns → motif hits
+5. FiNeMo       one-hot + attributions + TF-MoDISco patterns → motif hits (BED) + HTML report
 6. Annotate     motifs vs JASPAR/HOCOMOCO → match rates
 7. Aggregate    per-model results → summary tables + figures
+8. Tracks       attributions × one-hot → per-model bigWig, viewed as dynseq tracks
 ```
+
+Every phase runs on every peak: no cap on peaks, and none on seqlets beyond `-n 2000000`.
 
 ---
 
@@ -78,6 +81,8 @@ Take each annotation's released files with `output_type` `TF binding prediction 
 | DNase-seq | **`peaks`** narrowPeak, `preferred_default` (ENCODE's main DNase call set; DNase has no IDR) | 1,420 | 199M |
 
 These peak counts are estimates: file sizes divided by the bytes per peak of about 20 downloaded files.
+
+TF has the largest total only because it has the most experiments. Per experiment it has the fewest peaks: about 95k on average, against about 140k for DNase and 170k for ATAC. Within each assay, sizes vary several-fold between experiments. Before sizing jobs, get each file's peak count from the ENCODE API and record it in the manifest's `n_peaks` column. Job limits and the pilot sample then come from the per-experiment distribution, not these totals.
 
 - **TF ChIP-seq:** match the model's experiment, assembly, analysis and biological replicates. 8 TF experiments have no released IDR ranked file; use the IDR thresholded peaks the model derives from (`derived_from`).
 - **Ambiguous matches:** 2,569 TF and 217 ATAC experiments have several IDR ranked files from the same analysis, likely the replicate-pair and pseudo-replicate rankings; the metadata doesn't say which one fed the default thresholded peaks. Choose the pooled true-replicate ranking. The counts above take the largest file, so they are close to an upper bound.
@@ -106,7 +111,9 @@ data/encode_gkmsvm/
 ├── sequences/       # {experiment}.seqs.npz   [N, 4, 300], shared by an experiment's models
 ├── attributions/    # {model}.attr.npz        [N, 4, 300]
 ├── modisco/         # {model}/                (modisco h5 + report)
-├── finemo/          # {model}/                (hits)
+├── windows/         # {experiment}.windows.bed.gz   the 300 bp windows, in sequences/ order
+├── finemo/          # {model}/                (hits BED + HTML report)
+├── tracks/          # {model}.importance.bw   hyp × one-hot, dynseq
 └── summary/         # aggregated results
 ```
 
@@ -120,7 +127,7 @@ For each peak file:
 2. Collapse peaks whose windows coincide. Relaxed narrowPeak files can list several summits in one region.
 3. Extract with `gkmsvm.fasta.extract_loci()` and one-hot encode.
 4. Drop windows with >10% N, and windows running off a chromosome end.
-5. Save `{experiment}.seqs.npz`.
+5. Save `{experiment}.seqs.npz`, and the kept windows in the same order as `{experiment}.windows.bed.gz`. FiNeMo's genomic coordinates, the bigWig tracks and the published data all use this BED.
 
 Windows are 300 bp to match the models' training sequences and SVs.
 
@@ -159,7 +166,8 @@ Both arrays are float32, saved with `np.savez_compressed`. Bytes per 300 bp sequ
 | **Total** | **550M** | | | **~3.9 TB** (6.6 TB uncompressed) |
 
 - **What dominates:** attributions are nearly all of the total; compression saves 6% on them and 95% on the one-hot arrays. Storing one-hot as int8 would save only about 0.25 TB more, if `modisco` and FiNeMo accept it.
-- **Not included:** the models (42 GB), genomes (about 6 GB), and the TF-MoDISco/FiNeMo outputs.
+- **Not included:** the models (42 GB), genomes (about 6 GB), the TF-MoDISco/FiNeMo outputs (size them from the pilot), and the importance bigWigs (at most 1.5 TB, Phase 8).
+- **Where:** about 3.9 TB has to outlive the run (until TF-MoDISco, FiNeMo and the tracks finish, and until the attributions are archived), so keep it on Oak, not `$SCRATCH`, which purges after 90 days.
 - **FiNeMo's preprocessing:** check whether it writes its own copy of sequences and attributions. If it does, delete that copy after each model.
 
 ---
@@ -171,9 +179,11 @@ For each model:
 ```bash
 modisco motifs -s sequences/${EXPERIMENT}.seqs.npz \
     -a attributions/${MODEL}.attr.npz \
-    -n 50000 -w 300 \
+    -n 2000000 -w 300 \
     -o modisco/${MODEL}/results.h5
 ```
+
+`-n` (`max_seqlets_per_metacluster`, default 20,000) is set above any experiment's seqlet count, so it doesn't subsample. `max_passing_windows_frac` (default 0.2) still limits which windows give seqlets. It acts as a significance threshold, so keep it.
 
 Programmatically, the `modisco` package (kundajelab/tfmodisco) still imports as `modiscolite`, and `TFMoDISco()` takes `[N, L, 4]`, so transpose our `[N, 4, L]` arrays (the CLI does this itself):
 
@@ -183,11 +193,11 @@ import modiscolite
 pos_patterns, neg_patterns = modiscolite.tfmodisco.TFMoDISco(
     hypothetical_contribs=attr.transpose(0, 2, 1),
     one_hot=seqs.transpose(0, 2, 1),
-    max_seqlets_per_metacluster=50000,
+    max_seqlets_per_metacluster=2_000_000,
 )
 ```
 
-**Runtime**: about 30–90 min per model (CPU-bound, about 8 GB RAM). Models run independently, so they parallelize fully.
+**Runtime**: from the pilot. Without the subsampling cap, clustering is the expensive phase. The coarse affinity compares every pair of seqlets in a metacluster, so time grows about quadratically with seqlets. Memory stays moderate because only the nearest-neighbour graph is kept. Time one large experiment per assay in the pilot. Models run independently, so they parallelize fully.
 
 **Output**: H5 file with motif patterns (PPMs, CWMs, seqlet assignments).
 
@@ -203,6 +213,10 @@ finemo extract-regions-modisco-fmt -s sequences/${EXPERIMENT}.seqs.npz \
 finemo call-hits -r finemo/${MODEL}/regions.npz -m modisco/${MODEL}/results.h5 \
     -o finemo/${MODEL}/
 ```
+
+Then `finemo report` writes the HTML quality report (hit statistics, and patterns compared against TF-MoDISco's seqlets). The hits and the report are the outputs to publish:
+- **Hits:** one BED per model, `{model}.hits.bed.gz`, in genomic coordinates. Give FiNeMo the windows (`windows/{experiment}.windows.bed.gz`) as its peaks so hits map back to the genome. If it writes only TSV, convert it.
+- **Report:** `finemo/{model}/report/`.
 
 Check these commands against the installed FiNeMo version. It runs on GPU, so schedule it with GkmExplain.
 
@@ -245,6 +259,52 @@ Use **motifcompendium** to aggregate per-model TF-MoDISco results into a unified
 
 ---
 
+## Phase 8: Contribution Tracks
+
+These are the main resource to distribute: per-base contribution scores that load into genome browsers.
+
+For each model:
+1. Multiply the hypothetical attributions by the one-hot (GkmExplain's `"importance"`, summed over bases) to get one score per position.
+2. Write them to `tracks/{model}.importance.bw` with [figwig](https://github.com/jmschrei/figwig) (`pip install figwig`; numpy + numba, multithreaded). Pass the windows from `windows/{experiment}.windows.bed.gz` and the assembly's chrom sizes to `write_bigwig(path, chrom_sizes, chroms, starts, scores[:, None, :])`. For peak sets too large to hold in memory, use `BigWigWriter` in batches.
+3. figwig rejects overlapping items, so merge windows whose summits are closer than 300 bp before writing, averaging the scores where they overlap. Write the merged runs as windows of their own widths, or as intervals through `BigWigWriter`. Record the rule in the track description.
+
+figwig's own `.fw` format holds many tracks over one genome, each with JSON attributes. It could carry all of a genome's models in one file for programmatic access. Browsers need bigWig, though (`figwig fw2bw` converts), so the published tracks stay bigWig.
+
+Displayed as dynseq (letters scaled by score): `logo on` in a UCSC track hub's trackDb, or the WashU browser's dynseq tracks. DNase/ATAC experiments get two tracks each, enhancer and promoter model, on the same windows.
+
+**Storage.** Measured with figwig 0.3.0 (default compression, 10 zoom levels) on 2,000 hypothetical attributions from ENCFF579AOX, written as 300 bp windows 1 kb apart:
+
+| Format | Bytes per base | Median TF model (89k peaks, 26.7 Mbp) | All models |
+|---|---|---|---|
+| bigWig, importance (1 track) | 6.0 | 160 MB | 1.5 TB |
+| figwig, importance (1 track) | 3.7 | 100 MB | 0.9 TB |
+| bigWig, hypothetical (4 files, one per base) | 23.8 | 640 MB | 5.9 TB |
+| figwig, hypothetical (4 tracks, 1 file) | 14.9 | 400 MB | 3.7 TB |
+| npz, hypothetical (reference, as in Storage) | 14.9 | | 3.7 TB |
+
+- **Totals:** these are upper bounds. They cover 248 Gbp of model-bases: TF 82 Gbp, plus DNase 60 Gbp and ATAC 24 Gbp, each counted twice for the enhancer and promoter models. Merging overlapping windows lowers that by however much the peaks overlap, which the pilot measures.
+- **Zoom levels:** about 1.9 B/base of the bigWig figure (about 30%). Without them the importance bigWig is 4.1 B/base. Browsers need them to show zoomed-out views, so keep them. Raising zlib to level 9 saves nothing.
+- **What to publish:** the importance bigWigs (1.5 TB at most) are the browser resource. Hypothetical attributions in figwig take the same space as the npz files and can be read by window, which makes them the better format for the archive. As bigWigs they would be 1.6x larger and four files per model.
+
+---
+
+## Data Release
+
+| Output | Where | Notes |
+|---|---|---|
+| Models, peaks, genomes | Not republished | The manifest lists ENCODE accessions and md5s |
+| Pipeline code | GitHub (`analysis/encode_gkmsvm/`), archived to Zenodo from a release | DOI for the version used |
+| Manifest, window BEDs | Zenodo | Windows let anyone rebuild the one-hot arrays from the genome |
+| **Contribution bigWigs** (hyp × one-hot) | Host serving HTTP range requests, plus a UCSC/WashU track hub | Main resource. Choose the host before the pilot (S3/GCS bucket, lab web server, or SDR if it serves ranges); don't assume Zenodo works for browser loading |
+| **FiNeMo hits BED + HTML report**, per model | Zenodo (split across records if needed) | Size from the pilot |
+| TF-MoDISco H5 + reports, motif compendium | Zenodo | |
+| Hypothetical attributions (~3.7 TB as figwig) | Stanford Digital Repository or equivalent, archive only | Optional: recomputable from the models, code and windows. figwig (4 tracks per model) is the same size as npz and can be read by window |
+| One-hot sequences | Not published | Rebuilt from the windows + genome |
+
+Check current Zenodo record limits (about 50 GB by default) and SDR's terms before the data-availability statement relies on them.
+
+---
+
 ## Execution Strategy
 
 ### SLURM job array design
@@ -267,16 +327,19 @@ np.savez_compressed('attributions/${MODEL}.attr.npz', arr_0=a.astype(np.float32)
 "
 
 modisco motifs -s sequences/${EXPERIMENT}.seqs.npz \
-    -a attributions/${MODEL}.attr.npz -n 50000 -w 300 \
+    -a attributions/${MODEL}.attr.npz -n 2000000 -w 300 \
     -o modisco/${MODEL}/results.h5
 
 finemo extract-regions-modisco-fmt -s sequences/${EXPERIMENT}.seqs.npz \
     -a attributions/${MODEL}.attr.npz -w 300 -o finemo/${MODEL}/regions.npz
 finemo call-hits -r finemo/${MODEL}/regions.npz -m modisco/${MODEL}/results.h5 \
-    -o finemo/${MODEL}/
+    -p windows/${EXPERIMENT}.windows.bed.gz -o finemo/${MODEL}/
+finemo report ...   # HTML quality report; flags per the installed version
+
+python 08_make_tracks.py ${MODEL} ${EXPERIMENT}   # tracks/${MODEL}.importance.bw
 ```
 
-Set `--time` from the pilot: the largest peak sets (TF up to 246k, DNase several hundred thousand) take several times the median.
+Set `--time` and `--mem` from the pilot and the per-experiment peak counts. The largest peak sets (TF up to 246k, DNase several hundred thousand) take several times the median for GkmExplain and FiNeMo, and more than that for TF-MoDISco, whose clustering grows about quadratically. TF-MoDISco is CPU-only, so it may be better as a separate CPU array than holding a GPU.
 
 ### Checkpointing
 
@@ -305,8 +368,9 @@ GPU-hours: from the pilot.
    - `05_run_finemo.sh` — SLURM array job template
    - `06_build_compendium.py` — motifcompendium aggregation
    - `07_figures.py` — Application note figures
+   - `08_make_tracks.py` — attributions × one-hot → per-model bigWig; track hub files
 
-2. **Output data**: Per-model attributions, modisco H5 + HTML reports, FiNeMo hits, unified motifcompendium
+2. **Output data** (see Data Release): per-model contribution bigWigs and track hub, FiNeMo hit BEDs + HTML reports, TF-MoDISco H5 + reports, the motif compendium, and an archive of the hypothetical attributions
 
 3. **Application note figures**: Runtime benchmarks, motif recovery rates, example logos, compendium heatmap
 
@@ -314,7 +378,8 @@ GPU-hours: from the pilot.
 
 ## Verification
 
-- **Pilot test**: Run full pipeline on 5 models (2 ChIP-seq, 2 DNase, 1 ATAC) on single GPU
+- **Pilot test**: Run full pipeline on 5 models (2 ChIP-seq, 2 DNase, 1 ATAC) on single GPU, then the pilot's 50 models chosen across the per-experiment size distribution, including the largest experiment of each assay
+- **Tracks**: a pilot bigWig loads as a dynseq track in UCSC (from the chosen host) and WashU, and its scores match the attribution npz at a few windows
 - **Sanity check**: CTCF ChIP-seq model should recover CTCF motif as top pattern
 - **Compare deltaSVM**: For models with precomputed k-mer weights, verify gkmexplain attributions are consistent with deltaSVM variant effect predictions
 - **Runtime profiling**: Log per-model wall-clock for explain, modisco and FiNeMo; size the full array from it
