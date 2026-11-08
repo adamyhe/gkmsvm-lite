@@ -722,7 +722,7 @@ class TestWeightedMLX:
     @pytest.mark.parametrize("kernel_type", ["wgkm", "wgkmrbf"])
     def test_brute_and_self_kernels(self, kernel_type):
         """On MLX they run in Metal and return MLX arrays."""
-        from gkmsvm.svm import as_batch
+        from gkmsvm.inputs import as_batch
 
         kernel = _make_model(
             3, 40, kernel_type, {"L": 8, "k": 5, "M": 20, "H": 6.0, "gamma": 2.0}
@@ -755,7 +755,7 @@ class TestMutantDiagMLX:
         from gkmsvm.kernels.direct import DirectGkmKernel
         from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
         from gkmsvm.kernels.weighted import CenterWeightedGkmKernel
-        from gkmsvm.svm import as_batch
+        from gkmsvm.inputs import as_batch
 
         cls, kw = {
             "gkm_cnt": (DirectGkmKernel, {}),
@@ -782,7 +782,7 @@ class TestIsmIndexMLX:
 
     @staticmethod
     def _case(kernel_type, padded):
-        from gkmsvm.svm import as_batch
+        from gkmsvm.inputs import as_batch
 
         rng = np.random.default_rng(11)
         params = {"L": 7, "k": 5, "d": 2, "gamma": 2.0, "M": 20, "H": 6.0}
@@ -1026,7 +1026,7 @@ def test_gkmexplain_metal_matches_cpu(kernel_type, mode):
         return out
 
     params = {"L": 7, "k": 5, "d": 2, "gamma": 2.0, "M": 20, "H": 6.0}
-    from gkmsvm.svm import as_batch
+    from gkmsvm.inputs import as_batch
 
     sv, sv_len = as_batch(seqs(60, 15, 70))
     model = GkmSVM(sv, rng.normal(size=60), 0.3, kernel_type, params, sv_lengths=sv_len)
@@ -1063,7 +1063,7 @@ def test_gkmexplain_metal_per_sv_matches_cpu(kernel_type, mode):
     queries and SVs with N: the CPU's attributions to 1e-6 of the largest,
     NumPy float64, and importance sums to score - bias (non-RBF)."""
     from gkmsvm.explain import gkmexplain
-    from gkmsvm.svm import as_batch
+    from gkmsvm.inputs import as_batch
 
     rng = np.random.default_rng(4)
 

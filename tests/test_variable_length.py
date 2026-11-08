@@ -36,7 +36,7 @@ def _onehot(s):
 
 def _model(svs, coef, kernel_type, bias=0.2):
     model = GkmSVM(_onehot(svs[0]), coef[:1], bias, kernel_type, PARAMS)  # kernel only
-    from gkmsvm.svm import as_batch
+    from gkmsvm.inputs import as_batch
 
     x, lengths = as_batch(
         [one_hot_encode(s, allow_n=True, dtype=np.float64) for s in svs]
@@ -62,7 +62,7 @@ def test_pack_pads_past_each_length():
 
     kernel = EstTruncGkmKernel(6, 4, d=2)
     seqs = ["ACGTACGTAC", "ACGTACG", "ACGTA"]  # 5, 2 and 0 windows
-    from gkmsvm.svm import as_batch
+    from gkmsvm.inputs import as_batch
 
     x, lengths = as_batch(seqs)
     fwd, rc = kernel.pack_both(x, lengths)
@@ -78,7 +78,7 @@ def test_pack_pads_past_each_length():
 @pytest.mark.parametrize("kernel_type", KERNELS)
 def test_kernel_paths_match_per_sequence(kernel_type):
     """Masked join, brute force and the self-kernels on padded rows and columns."""
-    from gkmsvm.svm import as_batch
+    from gkmsvm.inputs import as_batch
 
     rng = np.random.default_rng(0)
     xs, ys = _seqs(rng, 20, 12, 30), _seqs(rng, 25, 9, 33)
@@ -137,7 +137,7 @@ def test_model_scores_match_per_sequence(kernel_type):
 
 
 def test_padded_array_with_lengths_equals_list():
-    from gkmsvm.svm import as_batch
+    from gkmsvm.inputs import as_batch
 
     rng = np.random.default_rng(2)
     model, _ = _model(_seqs(rng, 20, 15, 25), rng.normal(size=20), "estimated")
@@ -147,7 +147,7 @@ def test_padded_array_with_lengths_equals_list():
 
 
 def test_uniform_lengths_are_not_padded():
-    from gkmsvm.svm import as_batch
+    from gkmsvm.inputs import as_batch
 
     x, lengths = as_batch(["ACGTACGTAA", "ACGTACGTCC"])
     assert lengths is None and x.shape == (2, 10)
@@ -298,7 +298,7 @@ def _close(got, expected, rtol, msg):
 def test_padded_kernels_on_device(device, kernel_type):
     """CUDA and Metal kernels skip PAD: padded rows and columns through the
     masked join and brute force, and the self-kernels, equal the CPU's."""
-    from gkmsvm.svm import as_batch
+    from gkmsvm.inputs import as_batch
 
     move, rtol = _device(device)
 
@@ -376,7 +376,7 @@ def test_training_on_device(device, kernel_type, solver):
     the CPU's, and the trained models (C-SVC and epsilon-SVR) the CPU's to
     the solver's tolerance."""
     from gkmsvm.gram import compute_gram
-    from gkmsvm.svm import as_batch
+    from gkmsvm.inputs import as_batch
     from gkmsvm.train import _build_kernel, train_gkmsvm, train_gkmsvr
 
     move, rtol = _device(device)
@@ -494,8 +494,8 @@ def test_gram_on_mixed_lengths(kernel_type):
     """The self- and cross-Gram (masked-join panels and brute-force tiles) and
     SMO columns of padded sequences equal per-pair kernel values."""
     from gkmsvm.gram import compute_gram
+    from gkmsvm.inputs import as_batch
     from gkmsvm.solver import KernelColumnCache
-    from gkmsvm.svm import as_batch
 
     rng = np.random.default_rng(12)
     xs, ys = _seqs(rng, 40, 10, 45), _seqs(rng, 20, 8, 50)
@@ -776,7 +776,7 @@ def test_deltasvm_on_mixed_lengths():
     queries = _seqs(rng, 8, 8, 40)
     expected = [float(np.asarray(dsvm(_onehot(q)))[0, 0]) for q in queries]
     np.testing.assert_allclose(np.asarray(dsvm(queries)).ravel(), expected, rtol=1e-12)
-    from gkmsvm.svm import as_batch
+    from gkmsvm.inputs import as_batch
 
     x, lengths = as_batch(queries)
     np.testing.assert_allclose(

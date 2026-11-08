@@ -6,7 +6,7 @@ from __future__ import annotations
 import numpy as np
 
 from gkmsvm.backend import get_array_module
-from gkmsvm.svm import _progress, _rows
+from gkmsvm.inputs import _progress, _rows
 
 # Threads to aim for per launch; mask slices (grid.y) make up for few windows
 _EXPLAIN_LMER_THREADS = 1 << 18

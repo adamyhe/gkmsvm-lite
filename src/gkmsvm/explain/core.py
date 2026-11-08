@@ -18,7 +18,8 @@ from gkmsvm.explain.weights import (
     _build_perturbation_tables,
     _explain_min_matches,
 )
-from gkmsvm.svm import GkmSVM, _per_position, _short_rows, as_batch
+from gkmsvm.inputs import _per_position, _short_rows, as_batch
+from gkmsvm.svm import GkmSVM
 
 _MODE_ALIASES: dict[int | str, str] = {
     0: "importance",

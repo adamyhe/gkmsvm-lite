@@ -7,8 +7,7 @@ from numba import njit, prange
 
 from gkmsvm.backend import get_array_module
 from gkmsvm.explain.common import _rbf_scale
-from gkmsvm.svm import (
-    GkmSVM,
+from gkmsvm.inputs import (
     _allele_arrays,
     _joint_lengths,
     _nan_rows,
@@ -16,6 +15,7 @@ from gkmsvm.svm import (
     _rows,
     _short_rows,
 )
+from gkmsvm.svm import GkmSVM
 
 
 @njit(parallel=True, cache=True)

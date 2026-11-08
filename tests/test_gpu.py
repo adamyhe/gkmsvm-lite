@@ -711,11 +711,11 @@ class TestMutantDiagGPU:
     @pytest.mark.parametrize("padded", [False, True])
     @pytest.mark.parametrize("include_rc", [True, False])
     def test_matches_cpu(self, kernel_type, padded, include_rc):
+        from gkmsvm.inputs import as_batch
         from gkmsvm.ism import _mutants
         from gkmsvm.kernels.direct import DirectGkmKernel
         from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
         from gkmsvm.kernels.weighted import CenterWeightedGkmKernel
-        from gkmsvm.svm import as_batch
 
         cls, kw = {
             "gkm_cnt": (DirectGkmKernel, {}),
@@ -742,7 +742,7 @@ class TestIsmIndexGPU:
 
     @staticmethod
     def _case(kernel_type, padded):
-        from gkmsvm.svm import as_batch
+        from gkmsvm.inputs import as_batch
 
         rng = np.random.default_rng(11)
         params = {"L": 7, "k": 5, "d": 2, "gamma": 2.0, "M": 20, "H": 6.0}

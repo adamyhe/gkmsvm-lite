@@ -123,7 +123,7 @@ def _load_inputs(args: argparse.Namespace, path: str, default_length: int | None
         return encode_codes(s, allow_n=True, allow_other=args.allow_other_bases)
 
     if getattr(args, "variable_length", False):
-        from gkmsvm.svm import as_batch
+        from gkmsvm.inputs import as_batch
 
         X, lengths = as_batch([encode(s) for s in seqs])
         return names, X, lengths, None

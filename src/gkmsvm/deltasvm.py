@@ -15,7 +15,7 @@ import numpy as np
 from numba import njit, prange
 
 from gkmsvm.backend import DeviceModel, float_dtype, get_array_module, get_strides
-from gkmsvm.svm import _progress, as_batch
+from gkmsvm.inputs import _progress, as_batch
 
 
 @njit(parallel=True, fastmath=True, cache=True)
