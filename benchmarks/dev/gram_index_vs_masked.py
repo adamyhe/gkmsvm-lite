@@ -5,7 +5,9 @@ compute_gram goes through the l-mer index whenever it applies
 blocks, each row only from the diagonal on. The masked join (column panels,
 the column index rebuilt for every panel) is what it replaced, and what
 kernels the index can't serve still use. This times both on the same N,
-forcing the join by making lmer_index.applies return False.
+forcing the join by making lmer_index.applies return False. On MLX,
+compute_gram takes the join unless gram._MLX_GRAM_INDEX is set, which the index
+runs here set.
 
 For each N, on GM12878 DHS and null sequences (300 bp), -t 2 l=11 k=7 d=3 by
 default. max_abs_diff compares the two Grams on --check-rows random rows.
@@ -15,6 +17,7 @@ float64 buffer (12.8 GB at N=40k).
 Usage (from the repo root):
   python benchmarks/dev/gram_index_vs_masked.py --device cpu --threads 16
   python benchmarks/dev/gram_index_vs_masked.py --device cuda --sizes 2000,10000,40000
+  python benchmarks/dev/gram_index_vs_masked.py --device mlx --threads 10 --sizes 1000,5000,20000
 """
 
 from __future__ import annotations
@@ -38,7 +41,7 @@ SETS = ["gm12878_shared.fa"] + [
 
 def load_onehot(n_max: int, device: str, seed: int):
     from gkmsvm import one_hot_encode
-    from gkmsvm.backend import to_gpu
+    from gkmsvm.backend import to_gpu, to_mlx
 
     seqs = []
     for name in SETS:
@@ -50,12 +53,12 @@ def load_onehot(n_max: int, device: str, seed: int):
     rng = np.random.default_rng(seed)
     pick = rng.permutation(len(seqs))[:n_max]
     X = np.stack([one_hot_encode(seqs[i]) for i in pick])
-    return to_gpu(X) if device == "cuda" else X
+    return to_gpu(X) if device == "cuda" else to_mlx(X) if device == "mlx" else X
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
+    ap.add_argument("--device", choices=["cpu", "cuda", "mlx"], default="cpu")
     ap.add_argument("--sizes", default=",".join(map(str, DEFAULT_SIZES)))
     ap.add_argument("--kernel", default="estimated", help="kernel type (default -t 2)")
     ap.add_argument("--l", type=int, default=11)
@@ -69,6 +72,7 @@ def main():
 
     import pandas as pd
 
+    from gkmsvm import gram as gram_module
     from gkmsvm.gram import compute_gram
     from gkmsvm.kernels import lmer_index
     from gkmsvm.svm import KERNEL_BUILDERS, resolve_kernel_type
@@ -84,6 +88,7 @@ def main():
 
     def timed(X, out, index):
         lmer_index.applies = applies if index else (lambda *a, **k: False)
+        gram_module._MLX_GRAM_INDEX = index
         gpu_sync()
         t0 = time.perf_counter()
         compute_gram(kernel, X, out=out)

@@ -126,6 +126,14 @@ def to_codes(x):
             f"expected a [B, 4, L] one-hot array or [B, L] base codes, got "
             f"{list(x.shape)}"
         )
+    if is_mlx(x):
+        # Read on the host (unified memory, no copy): every consumer packs the
+        # codes there, so an argmax launched on the GPU would only be waited on
+        # (~17 ms for 2,000 x 300 bp on an M5, vs ~4 ms here)
+        import mlx.core as mx
+
+        mx.eval(x)
+        return mx.array(np.argmax(np.asarray(x), axis=1).astype(np.uint8))
     return xp.argmax(x, axis=1).astype(xp.uint8)
 
 
