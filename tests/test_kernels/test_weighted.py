@@ -224,7 +224,7 @@ def _ref_explain(x, svs, coef, l=L, d=D):
     """Hypothetical GkmExplain from the definition: each window pair (i, j)
     with m mismatches adds coef / sqrt(K(x, x) K(sv, sv)) wx_i wy_j times
     alpha(m) (match) or kappa(m) (mismatch) at each position, to the SV's base."""
-    from gkmsvm.explain import _build_alpha_table, _build_kappa_table
+    from gkmsvm.explain.weights import _build_alpha_table, _build_kappa_table
 
     h = _build_estlmer_table(l, K, True)
     h[d + 1 :] = 0

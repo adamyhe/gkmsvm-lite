@@ -563,6 +563,7 @@ def test_lmer_path_past_neighbor_cap(monkeypatch):
     """-t 0 l=11 k=7 (143,980 neighbors) takes the l-mer path once the SVs have
     enough windows per neighbor, and equals the pair loop."""
     from gkmsvm import explain
+    from gkmsvm.explain import lmer as explain_lmer
     from gkmsvm.svm import GkmSVM
 
     rng = np.random.default_rng(6)
@@ -570,13 +571,13 @@ def test_lmer_path_past_neighbor_cap(monkeypatch):
     model = GkmSVM(sv, rng.normal(size=30), 0.2, "gkm_cnt", {"L": 11, "k": 7})
     x = np.eye(4)[rng.integers(0, 4, (3, 40))].transpose(0, 2, 1)
     calls = []
-    lmer_cpu = explain._explain_lmer_cpu
+    lmer_cpu = explain_lmer._explain_lmer_cpu
     monkeypatch.setattr(
-        explain, "_explain_lmer_cpu", lambda *a: calls.append(1) or lmer_cpu(*a)
+        explain_lmer, "_explain_lmer_cpu", lambda *a: calls.append(1) or lmer_cpu(*a)
     )
     pair = explain.gkmexplain(model, x, mode="hypothetical")
     assert calls == []  # 1,800 SV windows: pair loop
-    monkeypatch.setattr(explain, "_EXPLAIN_SV_WINDOWS_PER_NEIGHBOR", 0.01)
+    monkeypatch.setattr(explain_lmer, "_EXPLAIN_SV_WINDOWS_PER_NEIGHBOR", 0.01)
     lmer = explain.gkmexplain(model, x, mode="hypothetical")
     assert calls
     np.testing.assert_allclose(lmer, pair, rtol=1e-12, atol=1e-15)

@@ -347,7 +347,7 @@ class GkmSVM(DeviceModel):
         self._lmer_table: np.ndarray | bool | None = None
         self._lmer_table_dev = None
         # GkmExplain attributions of every l-mer window for non-RBF kernels
-        # (explain._build_explain_table), on CPU, one per mode: "auto" builds
+        # (explain.table._build_explain_table), on CPU, one per mode: "auto" builds
         # one when a call explains enough sequences and it fits; True/False
         # force it on or off
         self.use_explain_table: bool | str = "auto"

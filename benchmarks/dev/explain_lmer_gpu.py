@@ -10,7 +10,7 @@ sequences, l=11 k=7 d=3, for each kernel and path:
 
 The fused paths are forced with model.use_lmer_index = False; for -t 0
 (143,980 neighbors at dmax 5) the l-mer paths are forced by lowering
-explain._EXPLAIN_SV_WINDOWS_PER_NEIGHBOR. Each row also reports the largest
+explain.lmer._EXPLAIN_SV_WINDOWS_PER_NEIGHBOR. Each row also reports the largest
 difference from cpu-lmer relative to its peak. The explain table
 (-t 0/2) is turned off.
 
@@ -75,7 +75,7 @@ def main():
     )
     args = ap.parse_args()
 
-    explain._EXPLAIN_SV_WINDOWS_PER_NEIGHBOR = 0
+    explain.lmer._EXPLAIN_SV_WINDOWS_PER_NEIGHBOR = 0
     rng = np.random.default_rng(0)
     x = onehot(rng, args.n, args.len)
     print(f"{'kernel':6} {'S':>6} {'path':11} {'ms/seq':>9} {'max rel diff':>13}")
