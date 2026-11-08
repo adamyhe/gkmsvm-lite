@@ -45,7 +45,9 @@ src/gkmsvm/
 │   ├── packed.py        # PackedGkmKernel: pack(), raw_packed(), raw_diag_packed()
 │   ├── direct.py        # -t 0 gkm_cnt + brute-force packed kernels (CPU/CUDA/Metal)
 │   ├── esttrunc.py      # -t 1 gkm_estfull, -t 2 gkm_esttrunc
-│   ├── masked.py        # masked-join kernel (CPU/CUDA/Metal)
+│   ├── masked.py        # masked-join kernel: mask plan, CPU join, dispatch
+│   ├── masked_cuda.py   # its CUDA index and join
+│   ├── masked_metal.py  # its Metal index and join
 │   ├── lmer_index.py    # cached l-mer -> SV index for scoring (CPU/CUDA/Metal): LmerIndex, launch limits
 │   ├── lmer_index_cpu.py  # its numba kernels
 │   ├── lmer_index_gpu.py  # its CUDA and Metal sources

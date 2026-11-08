@@ -275,20 +275,22 @@ class PackedGkmKernel(GkmKernel):
 
 def _masked(bx, by, plan, by_rc, diag_offset, dev, wx=None, wy=None, wy_rc=None):
     """wx, wy, wy_rc: row_weights of the rows, columns and RC columns."""
-    from gkmsvm.kernels import masked
-
     if dev == "cpu":
-        return masked.masked_pairwise(
+        from gkmsvm.kernels.masked import masked_pairwise
+
+        return masked_pairwise(
             bx, by, plan, by_rc, diag_offset=diag_offset, wx=wx, wy=wy, wy_rc=wy_rc
         )
     if dev == "cuda":
-        return masked.masked_pairwise_gpu(
-            bx, by, plan, by_rc, wx=wx, wy=wy, wy_rc=wy_rc
-        )
+        from gkmsvm.kernels.masked_cuda import masked_pairwise_gpu
+
+        return masked_pairwise_gpu(bx, by, plan, by_rc, wx=wx, wy=wy, wy_rc=wy_rc)
     import mlx.core as mx
 
+    from gkmsvm.kernels.masked_metal import masked_pairwise_mlx
+
     # Exact integer counts combined in float64; Metal holds float32
-    out = masked.masked_pairwise_mlx(bx, by, plan, by_rc, wx=wx, wy=wy, wy_rc=wy_rc)
+    out = masked_pairwise_mlx(bx, by, plan, by_rc, wx=wx, wy=wy, wy_rc=wy_rc)
     return mx.array(out.astype(np.float32))
 
 

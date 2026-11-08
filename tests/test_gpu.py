@@ -654,15 +654,15 @@ class TestMaskedGPU:
     @pytest.mark.parametrize("which", ["t0", "t1", "t2_l9", "t2_l11"])
     @pytest.mark.parametrize("col_tile", [8192, 7])
     def test_matches_cpu(self, which, col_tile, monkeypatch):
-        import gkmsvm.kernels.masked as masked
         from gkmsvm.codec import reverse_complement
+        from gkmsvm.kernels import masked, masked_cuda
         from gkmsvm.kernels.direct import (
             DirectGkmKernel,
             _fused_pairwise_packed_numba,
         )
         from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
 
-        monkeypatch.setattr(masked, "_GPU_COL_TILE", col_tile)
+        monkeypatch.setattr(masked_cuda, "_GPU_COL_TILE", col_tile)
         kernel = {
             "t0": lambda: DirectGkmKernel(8, 5),
             "t1": lambda: EstTruncGkmKernel(9, 6, d=3, truncate=False),
@@ -682,7 +682,7 @@ class TestMaskedGPU:
         ref = _fused_pairwise_packed_numba(
             bx, by, t, l, mm
         ) + _fused_pairwise_packed_numba(bx, by_rc, t, l, mm)
-        got = masked.masked_pairwise_gpu(
+        got = masked_cuda.masked_pairwise_gpu(
             cp.asarray(bx), cp.asarray(by), plan, cp.asarray(by_rc)
         )
         np.testing.assert_allclose(cp.asnumpy(got), ref, rtol=1e-12, atol=1e-12)
@@ -873,10 +873,10 @@ class TestWeightedGPU:
     @pytest.mark.parametrize("length", [60, 61])  # odd/even window counts
     @pytest.mark.parametrize("padded", [False, True])  # per-row weights
     def test_masked_join_matches_cpu(self, col_tile, length, padded, monkeypatch):
-        from gkmsvm.kernels import masked
+        from gkmsvm.kernels import masked, masked_cuda
         from gkmsvm.kernels.weighted import CenterWeightedGkmKernel
 
-        monkeypatch.setattr(masked, "_GPU_COL_TILE_W", col_tile)
+        monkeypatch.setattr(masked_cuda, "_GPU_COL_TILE_W", col_tile)
         kernel = CenterWeightedGkmKernel(8, 5, d=2, M=20, H=6.0)
         rng = np.random.default_rng(5)
         lx = rng.integers(20, 81, 21) if padded else None
@@ -887,7 +887,7 @@ class TestWeightedGPU:
         wx, wy = kernel.row_weights(bx), kernel.row_weights(by)
         wy_rc = kernel.row_weights(by_rc, rc=True)
         ref = masked.masked_pairwise(bx, by, plan, by_rc, wx=wx, wy=wy, wy_rc=wy_rc)
-        got = masked.masked_pairwise_gpu(
+        got = masked_cuda.masked_pairwise_gpu(
             cp.asarray(bx),
             cp.asarray(by),
             plan,
