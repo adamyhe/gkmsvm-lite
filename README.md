@@ -118,16 +118,6 @@ All LS-GKM kernel types are supported:
 | [Design decisions](docs/design.md)             | Architecture, kernel math, format specifications                             |
 | [Roadmap](docs/roadmap.md)                     | Completed features and what's next                                           |
 
-## Examples
-
-| Notebook | Contents | |
-| -------- | -------- | - |
-| [deltasvm_dsqtl.ipynb](examples/deltasvm_dsqtl.ipynb) | Train gkm-SVMs on GM12878 DNase peaks, build deltaSVM weights, and score dsQTLs (Lee et al. 2015) | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/adamyhe/gkmsvm-lite/blob/main/examples/deltasvm_dsqtl.ipynb) |
-| [gkmexplain_encode.ipynb](examples/gkmexplain_encode.ipynb) | GkmExplain and ISM on a 72k-SV ENCODE ATAC-seq model | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/adamyhe/gkmsvm-lite/blob/main/examples/gkmexplain_encode.ipynb) |
-| [gkmexplain_replication.ipynb](examples/gkmexplain_replication.ipynb) | Reproduce the GkmExplain paper's Nanog analyses, through TF-MoDISco | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/adamyhe/gkmsvm-lite/blob/main/examples/gkmexplain_replication.ipynb) |
-
-In Colab, the notebooks' first code cell clones this repository and installs gkmsvm-lite from it. Choose a GPU runtime for CUDA acceleration.
-
 ## Citation
 
 If you use gkmsvm-lite, please cite the relevant methods papers:
