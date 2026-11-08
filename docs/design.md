@@ -71,7 +71,7 @@ Two solver backends, selected automatically based on available memory:
 
 **Nyström approximation** (`solver="nystrom"`): kernel values against m landmarks (O(N m) evaluations), a low-rank N×N approximation, then sklearn. Saves kernel evaluations, not memory; the solution is approximate.
 
-`solver="auto"` uses the precomputed Gram when N²×8 bytes fits in 75% of available RAM (and under `max_gram_gb`); the Gram is always held in host RAM, whatever the training device. Otherwise it falls back to SMO. Available RAM is `MemAvailable` capped at what the process's cgroup limits leave (`train._cgroup_available_memory`, over its cgroup and every ancestor, since Slurm limits the job's cgroup rather than the task's), so on a shared node the choice and SMO's cache respect a job's `--mem`.
+`solver="auto"` uses the precomputed Gram when 1.1 × the N × N float64 Gram plus 2 GiB (the run's other memory) fits in 90% of available RAM (`train._gram_fits_on_cpu`; and the Gram is under `max_gram_gb`); the Gram is always held in host RAM, whatever the training device. Otherwise it falls back to SMO. Available RAM is `MemAvailable` capped at what the process's cgroup limits leave (`train._cgroup_available_memory`, over its cgroup and every ancestor, since Slurm limits the job's cgroup rather than the task's), so on a shared node the choice and SMO's cache respect a job's `--mem`.
 
 The scoring formula `Σ coef_i × K(x, sv_i) + bias` is identical for SVC and SVR — only the dual coefficients differ (α_i × y_i for SVC, α_i − α*_i for SVR). The `GkmSVM` model class is shared.
 

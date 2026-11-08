@@ -52,6 +52,7 @@ which also fills the GPU rows' max_abs_diff.
 Usage:
   python benchmarks/timing_variants.py --device cuda
   python benchmarks/timing_variants.py --device cuda --lsgkm-bin ~/lsgkm/bin
+  python benchmarks/timing_variants.py --device mlx --lsgkm-bin ~/lsgkm/bin --threads 4
   python benchmarks/timing_variants.py --device cpu --n-variants 500 --methods ISM
 """
 
@@ -86,6 +87,7 @@ from _common import (
     rewrite_table,
     run_measured,
     set_cpu_threads,
+    to_device,
     warm_binaries,
     warm_jit_cache,
     worker_result,
@@ -174,11 +176,11 @@ def _score_deltasvm(spec: dict) -> None:
 
     work = Path(spec["work"])
     t0 = time.perf_counter()
-    # The deltaSVM run's table: CPU's, or CUDA's in a --gpu-only part
+    # The deltaSVM run's table: CPU's, or the GPU's in a --gpu-only part
     table = next(
         (
             p
-            for p in (work / f"lite_deltaSVM_{d}.npy" for d in ("cpu", "cuda"))
+            for p in (work / f"lite_deltaSVM_{d}.npy" for d in ("cpu", "cuda", "mlx"))
             if p.exists()
         ),
         work / "lite_deltaSVM_cpu.npy",
@@ -219,9 +221,7 @@ def _worker(spec: dict) -> None:
         _score_deltasvm(spec)
         return
     t0 = time.perf_counter()
-    model = load_lsgkm_model(spec["model"])
-    if spec["device"] == "cuda":
-        model.cuda()
+    model = to_device(load_lsgkm_model(spec["model"]), spec["device"])
     data = np.load(Path(spec["work"]) / "variants.npz")
     ref, alt = data["ref"], data["alt"]
     method, bs = spec["method"], spec["batch_size"]
@@ -366,8 +366,8 @@ def main():
     parser.add_argument(
         "--device",
         default="cuda",
-        choices=["cpu", "cuda"],
-        help="cuda times gkmsvm-lite on CPU and GPU; cpu on CPU only",
+        choices=["cpu", "cuda", "mlx"],
+        help="cuda / mlx time gkmsvm-lite on CPU and that GPU; cpu on CPU only",
     )
     parser.add_argument(
         "--methods",
@@ -434,8 +434,8 @@ def main():
     parser.add_argument(
         "--gpu-only",
         action="store_true",
-        help="Time only gkmsvm-lite on CUDA (no LS-GKM, mLS-GKM or gkmsvm-lite "
-        "CPU), for a GPU part merged with a CPU part's file",
+        help="Time only gkmsvm-lite on --device's GPU (no LS-GKM, mLS-GKM or "
+        "gkmsvm-lite CPU), for a GPU part merged with a CPU part's file",
     )
     parser.add_argument(
         "--arrays",
@@ -460,8 +460,8 @@ def main():
     if args.merge_parts:
         _merge(args)
         return
-    if args.gpu_only and args.device != "cuda":
-        parser.error("--gpu-only needs --device cuda")
+    if args.gpu_only and args.device == "cpu":
+        parser.error("--gpu-only needs --device cuda or mlx")
     # Workers inherit this through the environment
     lite_threads = set_cpu_threads(args.threads)
     if not args.no_warm_jit:
@@ -529,7 +529,7 @@ def main():
         print(f"{MLSGKM} gkmexplain skipped: wrong for non-RBF models")
     # (device, CPU threads) for each gkmsvm-lite run
     lite_runs = ([] if args.gpu_only else [("cpu", t) for t in cpu_threads]) + (
-        [("cuda", lite_threads)] if args.device == "cuda" else []
+        [(args.device, lite_threads)] if args.device != "cpu" else []
     )
     arrays = Path(args.arrays) if args.arrays else None
     if arrays:

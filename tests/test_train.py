@@ -271,6 +271,15 @@ class TestTrainGkmsvm:
         assert "nystrom" in str(smo_warnings[0].message).lower()
         assert "downsampling" in str(smo_warnings[0].message).lower()
 
+    def test_gram_fits_counts_run_overhead(self, monkeypatch):
+        """The precomputed Gram is chosen only when the Gram and the run's other
+        memory fit: 6.2 GB available (a 16 GB Mac) takes N = 20k, not 24k."""
+        from gkmsvm import train
+
+        monkeypatch.setattr(train, "_available_memory", lambda xp: int(6.2 * 1024**3))
+        assert train._gram_fits_on_cpu(20_000)
+        assert not train._gram_fits_on_cpu(24_000)
+
     def test_device_auto_works(self):
         rng = np.random.default_rng(42)
         pos = _random_seqs_str(15, 20, rng)
@@ -435,3 +444,20 @@ class TestCgroupMemory:
         assert train._available_memory(np) == 12345
         monkeypatch.setattr(train, "_cgroup_available_memory", lambda: None)
         assert train._available_memory(np) > 12345
+
+
+def test_darwin_available_memory():
+    """macOS reads free + inactive pages, not the 8 GB fallback (it has no
+    SC_AVPHYS_PAGES); elsewhere the probe returns None."""
+    import os
+    import sys
+
+    from gkmsvm import train
+
+    got = train._darwin_available_memory()
+    if sys.platform != "darwin":
+        assert got is None
+        return
+    total = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    assert 0 < got <= total
+    assert train._available_memory(np) == got

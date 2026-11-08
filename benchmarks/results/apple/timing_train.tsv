@@ -1,0 +1,34 @@
+# gkmsvm-lite vs LS-GKM C timing comparison
+# commit: 519f2d5
+# date: 2026-11-03 02:51 UTC
+# host: Adams-MacBook-Air.local
+# command: timing_train.py --conda-env lsgkm --lsgkm-bin /Users/adamhe/github/lsgkm/bin --device mlx --threads 4 --sizes 500,1000,2000,5000,10000,20000 --output results/apple/timing_train.tsv
+# cpu: Apple M5, 10 logical cores, 10 usable (4 performance + 6 efficiency)
+# versions: gkmsvm-lite 0.2.1, python 3.11.18, numpy 2.4.6, numba 0.68.1 (4 threads, workqueue layer), mlx 0.32.4
+# device: mlx
+# gpu: Apple M5 (10 GPU cores, 16 GB unified memory)
+# kernel: -t 2 -l 11 -k 7 -d 3
+# lsgkm: gkmtrain: ls-gkm 0.1.1 (bioconda) (/Users/adamhe/conda/envs/lsgkm/bin/gkmtrain); gkmpredict: ls-gkm 0.1.1 (bioconda) (/Users/adamhe/conda/envs/lsgkm/bin/gkmpredict)
+# lsgkm_threads: 4
+# lsgkm_cache_mb: 100 (default)
+# lite_cpu_threads: 4
+# test_sequences: 1000
+# inference_repeats: 3
+
+## Training
+N	seq_len	gram_gb	t_lsgkm_train	t_lite_cpu_train	t_lite_cpu_smo_train	t_lite_gpu_train	t_lite_gpu_smo_train	mem_lsgkm_mb	mem_lite_cpu_mb	mem_lite_cpu_smo_mb	mem_lite_gpu_mb	mem_lite_gpu_smo_mb	n_sv_lsgkm	n_sv_lite	t_lite_cpu_gram	t_lite_gpu_gram	lsgkm_cache_mb
+500	300	0.002	2.94	0.62	NA	0.12	NA	NA	NA	NA	NA	NA	500	500	0.61	0.11	NA
+1000	300	0.007	7.28	1.46	NA	0.23	NA	NA	NA	NA	NA	NA	997	997	1.45	0.22	NA
+2000	300	0.030	18.22	4.22	NA	0.51	NA	NA	NA	NA	NA	NA	1968	1968	4.20	0.49	NA
+5000	300	0.186	59.84	20.69	NA	2.00	NA	NA	NA	NA	NA	NA	4597	4597	20.55	1.85	NA
+10000	300	0.745	405.41	64.47	NA	6.70	NA	NA	NA	NA	NA	NA	8511	8512	63.76	5.99	NA
+20000	300	2.980	970.84	192.03	NA	27.81	NA	NA	NA	NA	NA	NA	15087	15087	189.85	24.95	NA
+
+## Inference
+N_train	n_sv	n_test	t_lsgkm_infer	t_lite_cpu_infer	t_lite_gpu_infer	t_mlsgkm_infer
+500	500	1000	9.303	0.513	0.548	NA
+1000	997	1000	9.441	0.531	0.557	NA
+2000	1968	1000	9.687	0.564	0.569	NA
+5000	4597	1000	10.004	0.633	0.604	NA
+10000	8512	1000	10.573	0.755	0.712	NA
+20000	15087	1000	11.526	0.917	0.881	NA

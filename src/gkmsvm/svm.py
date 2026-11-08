@@ -5,7 +5,13 @@ from typing import TYPE_CHECKING
 import numpy as np
 from numba import njit, prange
 
-from gkmsvm.backend import DeviceModel, float_dtype, get_array_module, to_cpu
+from gkmsvm.backend import (
+    DeviceModel,
+    float_dtype,
+    get_array_module,
+    is_mlx,
+    to_cpu,
+)
 from gkmsvm.kernels.direct import DirectGkmKernel
 from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
 from gkmsvm.kernels.packed import (
@@ -461,6 +467,16 @@ class GkmSVM(DeviceModel):
             c["index"] = lmer_index.LmerIndex(base, *packed) if use else None
         return c["index"]
 
+    @staticmethod
+    def _fused_reduce(index, x) -> bool:
+        """Whether scoring x reduces through the index without a [B, S] block
+        (on CPU, and on MLX in Metal)."""
+        if index is None:
+            return False
+        if is_mlx(x):
+            return index.reduce_on_device("mlx")
+        return get_array_module(x) is np
+
     def _sv_raw(self, bx):
         """Base-kernel K_raw [B, S] of packed query rows bx against the SVs."""
         index = self._sv_index()
@@ -478,8 +494,9 @@ class GkmSVM(DeviceModel):
         diag_x = base.raw_diag_packed(bx, bx_rc) if base.normalize else None
         gamma = kernel.gamma if isinstance(kernel, RbfKernel) else np.nan
         index = self._sv_index()
-        if xp is np and index is not None:
-            # Fused index query + reduction: no [B, S] block at all
+        if self._fused_reduce(index, x):
+            # Fused index query + reduction (numba, or Metal on MLX): no [B, S]
+            # block at all
             inv_dx, inv_ds = self._inv_norms(diag_x, x.shape[0])
             return index.reduce(bx, inv_dx, inv_ds, self.coefficients, gamma)[:, None]
         raw = self._sv_raw(bx)
@@ -641,6 +658,8 @@ class GkmSVM(DeviceModel):
         if table is not None:
             return self._score_lmer_table(x, table, lengths)
         rows = max(1, self._MAX_SCORE_BYTES // (8 * self.num_support_vectors))
+        if is_mlx(x) and self._fused_reduce(self._sv_index(), x):
+            rows = x.shape[0]  # nothing [rows, S] to bound
         parts = [
             self._sv_scores(x[s : s + rows], _rows(lengths, s, rows))
             for s in range(0, x.shape[0], rows)

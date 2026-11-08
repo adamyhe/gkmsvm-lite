@@ -142,8 +142,15 @@ class PackedGkmKernel(GkmKernel):
         W = L - self.l + 1
         dev = device_of(x)
         xp = np if dev == "mlx" else get_array_module(x)
-        codes = to_codes(x)
-        base = (to_cpu(codes) if dev == "mlx" else codes).astype(xp.uint32)
+        if dev == "mlx":
+            # Packing runs on the host: read x there without a copy (unified
+            # memory) and take its codes in NumPy, rather than wait on an argmax
+            # launched on the GPU for them (~17 ms for 2,000 x 300 bp, M5)
+            import mlx.core as mx
+
+            mx.eval(x)
+            x = np.asarray(x)
+        base = to_codes(x).astype(xp.uint32)
         packed = xp.zeros((B, W), dtype=xp.uint32)
         for k in range(self.l):
             packed |= base[:, k : k + W] << xp.uint32(2 * k)

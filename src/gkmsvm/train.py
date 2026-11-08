@@ -67,8 +67,9 @@ def train_gkmsvm(
         M: Weight of the center window, 1-255 (-t 4, -t 5; default 50, as LS-GKM).
         H: Half-life of the window weights in bp (-t 4, -t 5; default 50).
         include_rc: Include reverse complement in kernel.
-        solver: ``"auto"`` (``"libsvm"`` when the N x N Gram fits in 75%
-            of available RAM and under ``max_gram_gb``, else ``"smo"``),
+        solver: ``"auto"`` (``"libsvm"`` when the N x N Gram, with the
+            training run's other memory, fits in available RAM and the Gram
+            is under ``max_gram_gb``, else ``"smo"``),
             ``"libsvm"`` (precomputed Gram in host RAM, tiles computed on
             ``device``, solved by sklearn's LIBSVM), ``"smo"`` (column-cached
             SMO, O(cache_size x N) memory), or ``"nystrom"`` (Nyström
@@ -531,6 +532,9 @@ def _available_memory(xp) -> int:
                     return available if cgroup is None else min(available, cgroup)
     except (FileNotFoundError, OSError):
         pass
+    darwin = _darwin_available_memory()
+    if darwin is not None:
+        return darwin
     try:
         import os
 
@@ -541,6 +545,35 @@ def _available_memory(xp) -> int:
     except (AttributeError, ValueError, OSError):
         pass
     return 8 * 1024**3
+
+
+def _darwin_available_memory() -> int | None:
+    """macOS: free plus inactive pages from ``host_statistics64`` (psutil's
+    ``available``: inactive pages are reclaimable without swapping), in bytes.
+    macOS has no ``SC_AVPHYS_PAGES``, so without this every Mac would read
+    as 8 GB. None elsewhere or if the call fails."""
+    import sys
+
+    if sys.platform != "darwin":
+        return None
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+        libc.mach_host_self.restype = ctypes.c_uint
+        page_size = ctypes.c_size_t()
+        if libc.host_page_size(libc.mach_host_self(), ctypes.byref(page_size)) != 0:
+            return None
+        # vm_statistics64: free_count, active_count, inactive_count are its first
+        # three natural_t (uint32) fields; HOST_VM_INFO64 = 4, count 38 natural_t
+        stats = (ctypes.c_uint32 * 64)()
+        count = ctypes.c_uint32(38)
+        if libc.host_statistics64(libc.mach_host_self(), 4, stats, ctypes.byref(count)):
+            return None
+        free, inactive = stats[0], stats[2]
+        return (free + inactive) * page_size.value or None
+    except (OSError, AttributeError, ValueError):
+        return None
 
 
 def _cgroup_available_memory(
@@ -593,12 +626,22 @@ def _cgroup_available_memory(
     return None
 
 
+# A precomputed-Gram run's peak memory beyond the N x N float64 Gram: 0.9-2.0 GB
+# measured from N = 10k to 44k (CPU, CUDA host and MLX; benchmarks/ S3), plus
+# about a tenth of the Gram at the largest N
+_GRAM_RUN_OVERHEAD = 2 * 1024**3
+_GRAM_RUN_FACTOR = 1.1
+# Of available memory, what a training run may plan to take
+_GRAM_RAM_FRACTION = 0.9
+
+
 def _gram_fits_on_cpu(N: int) -> bool:
-    """Whether an N x N float64 Gram fits in 75% of available RAM (it is
-    always held in host memory, whatever the training device)."""
-    gram_bytes = N * N * 8
-    available = _available_memory(np)
-    return gram_bytes < available * 0.75
+    """Whether a precomputed-Gram run fits in available RAM: an N x N float64
+    Gram (always in host memory, whatever the training device) plus the run's
+    other memory (_GRAM_RUN_FACTOR, _GRAM_RUN_OVERHEAD), in _GRAM_RAM_FRACTION
+    of what is available."""
+    need = N * N * 8 * _GRAM_RUN_FACTOR + _GRAM_RUN_OVERHEAD
+    return need < _available_memory(np) * _GRAM_RAM_FRACTION
 
 
 def _to_codes(seqs, allow_other: bool = False):

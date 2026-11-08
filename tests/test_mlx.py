@@ -824,12 +824,14 @@ class TestIsmIndexMLX:
             np.array(got), ref, rtol=0, atol=1e-5 * np.abs(ref).max()
         )
 
-    def test_dense_index_runs_on_cpu(self, monkeypatch):
-        """Above _METAL_MUTANTS_MAX_DENSITY the CPU pass runs; MLX result."""
+    def test_host_pass_runs_on_cpu(self, monkeypatch):
+        """When mutants_on_device says no, the CPU pass runs; MLX result."""
         from gkmsvm.ism import ism
         from gkmsvm.kernels import lmer_index
 
-        monkeypatch.setattr(lmer_index, "_METAL_MUTANTS_MAX_DENSITY", 0.0)
+        monkeypatch.setattr(
+            lmer_index.LmerIndex, "mutants_on_device", lambda self, dev: False
+        )
         monkeypatch.setattr(
             lmer_index.LmerIndex,
             "_mutants_gpu",
@@ -845,15 +847,16 @@ class TestIsmIndexMLX:
         )
 
     @pytest.mark.parametrize("kernel_type", ["gkmrbf", "wgkmrbf"])
-    @pytest.mark.parametrize("dense", [False, True])
-    def test_mutation_impact_matches_cpu(self, kernel_type, dense, monkeypatch):
-        """RBF mutation impact through the index: queried in Metal, or (dense)
-        the CPU's fused pass; SNPs and indels."""
+    @pytest.mark.parametrize("chunked", [False, True])
+    def test_mutation_impact_matches_cpu(self, kernel_type, chunked, monkeypatch):
+        """RBF mutation impact through the index in Metal (LmerIndex.impact on
+        MLX, the fused pass) vs the CPU's fused pass; SNPs and indels."""
         from gkmsvm.explain import mutation_impact
         from gkmsvm.kernels import lmer_index
 
-        if dense:
-            monkeypatch.setattr(lmer_index, "_METAL_QUERY_MAX_DENSITY", 0.0)
+        if chunked:  # several launches, each group looping over variants
+            monkeypatch.setattr(lmer_index, "_METAL_REDUCE_ITEMS", 2000)
+            monkeypatch.setattr(lmer_index, "_METAL_REDUCE_GROUPS", 2)
         model, _, _ = self._case(kernel_type, True)
         rng = np.random.default_rng(5)
         ref = ["".join(rng.choice(list("ACGT"), k)) for k in rng.integers(20, 61, 8)]
@@ -861,10 +864,59 @@ class TestIsmIndexMLX:
         alt += [s[:9] + s[11:] for s in ref[5:7]] + [ref[7][:9] + "GT" + ref[7][9:]]
         expected = mutation_impact(model, ref, alt)
         model.mlx()
-        assert model._sv_index().queries_on_device("mlx") != dense
+        calls = []
+        orig = lmer_index.LmerIndex._impact_mlx
+        monkeypatch.setattr(
+            lmer_index.LmerIndex,
+            "_impact_mlx",
+            lambda self, *a: calls.append(1) or orig(self, *a),
+        )
+        monkeypatch.setattr(
+            lmer_index.LmerIndex,
+            "pairwise",
+            lambda *a, **k: pytest.fail("built a [B, S] block"),
+        )
         got = mutation_impact(model, ref, alt)
+        assert calls
         np.testing.assert_allclose(
             got, expected, rtol=0, atol=1e-5 * np.abs(expected).max()
+        )
+
+
+class TestReduceMLX:
+    """Kernel scoring through the l-mer index in Metal (LmerIndex.reduce on
+    MLX, the fused query + reduction) vs the CPU's fused pass."""
+
+    @pytest.mark.parametrize(
+        "kernel_type", ["gkmrbf", "wgkmrbf", "gkm_esttrunc", "wgkm"]
+    )
+    @pytest.mark.parametrize("padded", [False, True])
+    @pytest.mark.parametrize("chunked", [False, True])
+    def test_scores_match_cpu(self, kernel_type, padded, chunked, monkeypatch):
+        from gkmsvm.kernels import lmer_index
+
+        if chunked:  # several launches, each group looping over rows
+            monkeypatch.setattr(lmer_index, "_METAL_REDUCE_ITEMS", 2000)
+            monkeypatch.setattr(lmer_index, "_METAL_REDUCE_GROUPS", 2)
+        model, x, lengths = TestIsmIndexMLX._case(kernel_type, padded)
+        ref = np.asarray(model(x, lengths=lengths))
+        model.mlx()
+        calls = []
+        orig = lmer_index.LmerIndex._reduce_mlx
+        monkeypatch.setattr(
+            lmer_index.LmerIndex,
+            "_reduce_mlx",
+            lambda self, *a: calls.append(1) or orig(self, *a),
+        )
+        monkeypatch.setattr(
+            lmer_index.LmerIndex,
+            "pairwise",
+            lambda *a, **k: pytest.fail("built a [B, S] block"),
+        )
+        got = model(to_mlx(x), lengths=lengths)
+        assert calls and isinstance(got, mx.array)
+        np.testing.assert_allclose(
+            np.array(got), ref, rtol=0, atol=1e-5 * np.abs(ref).max()
         )
 
 
@@ -874,7 +926,7 @@ class TestLmerIndexMLX:
     @pytest.mark.parametrize("which", ["t0", "t2_l9", "t2_l11"])
     @pytest.mark.parametrize("dense", [False, True])
     def test_index_matches_cpu(self, which, dense, monkeypatch):
-        """dense: above _METAL_QUERY_MAX_DENSITY the query runs on CPU."""
+        """dense: above _METAL_MAX_LEVELS the query runs on CPU."""
         from gkmsvm.codec import reverse_complement
         from gkmsvm.kernels import lmer_index
         from gkmsvm.kernels.direct import DirectGkmKernel
@@ -895,7 +947,7 @@ class TestLmerIndexMLX:
         bx[1, :3] = PAD_WINDOW
         ref = index.pairwise(bx)
         if dense:
-            monkeypatch.setattr(lmer_index, "_METAL_QUERY_MAX_DENSITY", 0.0)
+            monkeypatch.setattr(lmer_index, "_METAL_MAX_LEVELS", 0)
             monkeypatch.setattr(
                 lmer_index, "_metal_query", lambda weighted: pytest.fail("Metal")
             )
@@ -985,9 +1037,14 @@ def test_gkmexplain_metal_matches_cpu(kernel_type, mode):
     with warnings.catch_warnings():
         warnings.simplefilter("error")  # a CPU fallback warns
         got = gkmexplain(model, q, mode=mode)
+        # Several batches: each batch's kernel is deferred past the next's CPU work
+        batched = gkmexplain(model, q, mode=mode, batch_size=4)
     assert isinstance(got, np.ndarray) and got.dtype == np.float64
     np.testing.assert_allclose(
         got, expected, rtol=0, atol=1e-6 * np.abs(expected).max()
+    )
+    np.testing.assert_allclose(
+        batched, expected, rtol=0, atol=1e-6 * np.abs(expected).max()
     )
     if mode == "hypothetical" and kernel_type not in ("gkmrbf", "wgkmrbf"):
         imp = gkmexplain(model, q, mode="importance").sum(axis=(1, 2))

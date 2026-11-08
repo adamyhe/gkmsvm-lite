@@ -537,9 +537,13 @@ def _metal_slices(n, per_slice, B, W):
     return n_slices, chunk, groups
 
 
-def _metal_fold(kernel, inputs, packed_x, n_slices, groups, inv_dx, l, seqlen):
+def _metal_fold(
+    kernel, inputs, packed_x, n_slices, groups, inv_dx, l, seqlen, defer=False
+):
     """Launch a Metal explain kernel over (groups, n_slices, B) threadgroups and
-    fold its window partials: [B, 4, seqlen] float64 NumPy."""
+    fold its window partials: [B, 4, seqlen] float64 NumPy. defer: start the
+    kernel (mx.async_eval) and return a function that waits for it and folds,
+    so the caller can work on the CPU meanwhile."""
     import mlx.core as mx
 
     B, W = packed_x.shape
@@ -552,8 +556,16 @@ def _metal_fold(kernel, inputs, packed_x, n_slices, groups, inv_dx, l, seqlen):
         output_dtypes=[mx.float32],
         init_value=0,
     )[0]
-    part = np.array(part).reshape(n_slices, B, W, 4, 16)
-    return _fold_windows(np.ascontiguousarray(packed_x), part, inv_dx, l, seqlen)
+    packed_x = np.ascontiguousarray(packed_x)
+
+    def finish():
+        p = np.array(part).reshape(n_slices, B, W, 4, 16)
+        return _fold_windows(packed_x, p, inv_dx, l, seqlen)
+
+    if defer:
+        mx.async_eval(part)
+        return finish
+    return finish()
 
 
 @njit(parallel=True, cache=True)
@@ -594,11 +606,12 @@ def _explain_lmer_metal(
     perturbation,
     wx,
     cache,
+    defer=False,
 ):
     """_explain_lmer_gpu in Metal: [B, 4, seqlen] float64 NumPy. V (float32 on
     the device, cached in `cache`) or, for RBF, the l-mer index and per-query
     SV weights w [B, S]; wx: query window weights ([B or 1, W] float64, [1, 0]
-    unweighted)."""
+    unweighted). defer: as for _metal_fold."""
     import mlx.core as mx
 
     B, W = packed_x.shape
@@ -656,7 +669,15 @@ def _explain_lmer_metal(
         mx.array(params, dtype=mx.int32),
     ]
     return _metal_fold(
-        _metal_explain_lmer(), inputs, packed_x, n_slices, groups, inv_dx, l, seqlen
+        _metal_explain_lmer(),
+        inputs,
+        packed_x,
+        n_slices,
+        groups,
+        inv_dx,
+        l,
+        seqlen,
+        defer,
     )
 
 
@@ -1644,34 +1665,40 @@ def _explain_lmer(
         )
     seqlen = x.shape[-1]
     parts = []
+    # Metal: each batch's kernel runs while the CPU queries the next batch's SV
+    # weights (RBF) and packs it; its partials are folded after that
+    pending = None
     for _, packed_x, packed_x_rc, wx in _batches(base, x, lengths, batch_size, verbose):
         inv_dx = _inv_dx(base, packed_x, packed_x_rc)
         B_b, W = packed_x.shape
         n_split = max(1, min(W, -(-numba.get_num_threads() // B_b)))
-        # (on Metal too, the CPU query: exact in float64, and faster than the
-        # Metal one on large SV sets: contended atomics)
+        # (on Metal too, the CPU query: exact in float64, and it runs while the
+        # GPU explains the previous batch; the Metal query alone is ~1.4x the
+        # CPU's on the dsQTL -t 3 model, M5, but would queue behind that kernel)
         w = None
         if index is not None:
             w = _rbf_weights(index, packed_x, inv_dx, coef, inv_ds, gamma)
         if metal:
-            parts.append(
-                _explain_lmer_metal(
-                    packed_x,
-                    inv_dx,
-                    V,
-                    index,
-                    w,
-                    masks,
-                    levels,
-                    table_a,
-                    table_b,
-                    l,
-                    seqlen,
-                    perturbation,
-                    wx,
-                    model._sv_cache,
-                )
+            job = _explain_lmer_metal(
+                packed_x,
+                inv_dx,
+                V,
+                index,
+                w,
+                masks,
+                levels,
+                table_a,
+                table_b,
+                l,
+                seqlen,
+                perturbation,
+                wx,
+                model._sv_cache,
+                defer=True,
             )
+            if pending is not None:
+                parts.append(pending())
+            pending = job
         elif index is None:
             parts.append(
                 _explain_lmer_cpu(
@@ -1709,6 +1736,8 @@ def _explain_lmer(
                     index.vals,
                 )
             )
+    if pending is not None:
+        parts.append(pending())
     return np.concatenate(parts)
 
 
@@ -1871,15 +1900,20 @@ def mutation_impact(
             continue
         index = model._sv_index()
         if index is not None and (
-            xp is np or not index.queries_on_device(device_of(bx))
+            xp is np
+            or index.impact_on_device(device_of(bx))
+            or not index.queries_on_device(device_of(bx))
         ):
-            # RBF through the index on CPU: one fused pass per variant, the
-            # alt row visiting only the windows that differ from ref
+            # RBF through the index: one fused pass per variant (on CPU, or in
+            # Metal on MLX), the alt row visiting only the windows that differ
+            # from ref
             inv_dr, inv_ds = model._inv_norms(
                 to_cpu(diag_r) if base.normalize else None, n
             )
-            out = index.impact(to_cpu(bx), inv_dr, inv_ds, to_cpu(coef), gamma)
-            parts.append(out[:, None])
+            if not index.impact_on_device(device_of(bx)):
+                bx = to_cpu(bx)
+            out = index.impact(bx, inv_dr, inv_ds, to_cpu(coef), gamma)
+            parts.append(to_cpu(out).astype(np.float64)[:, None])
             continue
         k_both = model._sv_raw(bx)
         if xp is np:
