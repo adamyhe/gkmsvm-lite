@@ -50,6 +50,8 @@ SOLVER_ARGS   := --sizes 500,1000,2000 --n-test 200
 SOLVER_CPU_ARGS := --sizes 500,1000,2000 --n-test 200
 CTCF_ARGS     := --sizes 2000,5000 --n-test 200
 SWEEP_ARGS    := --sizes 1000,4000 --n-seqs 200
+EXPLAIN_ARGS  := --sizes 50,200 --ism-sizes 20 --repeats 1 --n-check 16 \
+                 --c-max-seqs 10 --c-ism-max-seqs 2
 DART_ARGS     := --max-variants 200
 DART4_ARGS    := --max-seqs 2000
 DART_TRAIN_ARGS := --n-pos 1000 --n-neg 1000
@@ -71,6 +73,7 @@ SOLVER_CPU_ARGS := --sizes 1000,2000,5000,10000,20000
 CTCF_ARGS     := --sizes 5000,10000,15000,20000,25000,30000,45000,60000,75000,90000 \
                  --lsgkm-caches 100,8000 --timeout 172800
 SWEEP_ARGS    :=
+EXPLAIN_ARGS  :=
 DART_ARGS     :=
 DART4_ARGS    :=
 DART_TRAIN_ARGS :=
@@ -161,7 +164,10 @@ S1 := $(OUT)/dsqtl_retrained_per_model.tsv
 S2 := $(OUT)/throughput.tsv
 S3 := $(OUT)/training_memory.tsv $(OUT)/training_memory_cpu.tsv
 S3B := $(OUT)/training_memory_ctcf.tsv
-S4 := $(OUT)/completeness.tsv
+# S4: GkmExplain completeness (A) and GkmExplain/ISM throughput with precision checks (B-F)
+S4C := $(OUT)/completeness.tsv
+S4E := $(OUT)/explain_throughput.tsv
+S4 := $(S4C) $(S4E)
 S5 := $(foreach c,$(DART_TASK4),$(OUT)/dart_task4_$(c).tsv) \
       $(foreach c,$(DART_RETRAIN),$(OUT)/dart_retrained_task4_$(c).tsv) \
       $(foreach m,$(DART_TASK5),$(OUT)/dart_task5_$(m).tsv)
@@ -218,6 +224,18 @@ $(OUT)/training_memory_ctcf.tsv: $(PARTS)/training_memory_ctcf.cpu.tsv \
                                  $(PARTS)/training_memory_ctcf.gpu.tsv
 	$(PY) training_memory.py --merge-parts $^ \
 	    --arrays $(PARTS)/training_memory_ctcf.arrays --output $@
+
+$(PARTS)/explain_throughput.cpu.tsv: explain_throughput.py timing_variants.py $(DSQTL)
+	$(call on,cpu)$(PY) explain_throughput.py --device cpu $(LSGKM) $(MLS) $(THR) \
+	    $(EXPLAIN_ARGS) --output $@
+
+$(PARTS)/explain_throughput.gpu.tsv: explain_throughput.py timing_variants.py $(DSQTL)
+	$(call on,gpu)$(PY) explain_throughput.py --device $(DEVICE) --gpu-only $(THR) \
+	    $(EXPLAIN_ARGS) --output $@
+
+$(OUT)/explain_throughput.tsv: $(PARTS)/explain_throughput.cpu.tsv \
+                               $(PARTS)/explain_throughput.gpu.tsv
+	$(PY) explain_throughput.py --merge-parts $^ --output $@
 else
 $(OUT)/throughput.tsv: throughput_sweep.py $(COMMON)
 	$(PY) throughput_sweep.py --device $(DEVICE) $(LSGKM) $(MLS) $(THR) $(SWEEP_ARGS) --output $@
@@ -233,6 +251,10 @@ $(OUT)/training_memory_cpu.tsv: training_memory.py $(DSQTL)
 
 $(OUT)/training_memory_ctcf.tsv: training_memory.py data/ctcf/train_pos.fa $(DSQTL)
 	$(PY) training_memory.py --data ctcf --device $(DEVICE) $(LSGKM) $(THR) $(CTCF_ARGS) \
+	    --output $@
+
+$(OUT)/explain_throughput.tsv: explain_throughput.py timing_variants.py $(DSQTL)
+	$(PY) explain_throughput.py --device $(DEVICE) $(LSGKM) $(MLS) $(THR) $(EXPLAIN_ARGS) \
 	    --output $@
 endif
 
@@ -279,6 +301,8 @@ s2: $(S2)
 s3: $(S3)
 s3b: $(S3B)
 s4: $(S4)
+s4-completeness: $(S4C)
+s4-explain: $(S4E)
 s5: $(S5)
 s5-retrained: $(S5R)
 
@@ -298,6 +322,8 @@ s3-cpu-lite:  $(OUT)/training_memory_cpu.tsv
 s3-gpu:       $(PARTS)/training_memory.gpu.tsv
 s3b-cpu:      $(PARTS)/training_memory_ctcf.cpu.tsv
 s3b-gpu:      $(PARTS)/training_memory_ctcf.gpu.tsv
+s4-explain-cpu: $(PARTS)/explain_throughput.cpu.tsv
+s4-explain-gpu: $(PARTS)/explain_throughput.gpu.tsv
 
 # Every download the panels need, so concurrent jobs never fetch the same file
 data: $(foreach m,$(sort $(DART_TASK5) $(foreach c,$(DART_TASK4),$(call model_of,$(c)))),\
@@ -313,22 +339,36 @@ paper: fig1a fig1b fig1c fig1d s1 s2 s3 s4 s5
 quick:
 	$(MAKE) paper QUICK=1
 
+# Apple Silicon: gkmsvm-lite on CPU and MLX, and LS-GKM, all on this machine,
+# into results/$(APPLE_SET)/ (not in the paper). The panels that fit a laptop,
+# with 1A's agreement checks run on MLX: S3 stops at N=40k (on a 16 GB machine
+# the precomputed and Nystrom Grams stop fitting past 20k and are recorded as
+# skipped; SMO and LS-GKM run), and S3B is left out. Pass THREADS=4 (LS-GKM
+# takes 1, 4 or 16) and, for 1C's and S4's gkmexplain, LSGKM_BIN.
+APPLE_SET     ?= apple
+APPLE_PANELS  ?= fig1a fig1b fig1c s2 s3 s4
+APPLE_SIZES   ?= 1000,2000,5000,10000,20000,40000
+apple:
+	$(MAKE) $(APPLE_PANELS) DEVICE=mlx SET=$(APPLE_SET) \
+	    SOLVER_ARGS="--sizes $(APPLE_SIZES)" SOLVER_CPU_ARGS="--sizes $(APPLE_SIZES)"
+
 figures:
 	RESULTS_DIR=$(OUT) RESULTS_ROOT=$(ROOT) FIGURES_DIR=$(FIG_OUT) $(PY) -m jupyter nbconvert \
 	    --to notebook --execute --inplace figures.ipynb
 
 help:
 	@echo "Figure 1:   fig1a fig1b fig1c fig1d"
-	@echo "Supplement: s1 s2 s3 s4 s5; s3b (large-N CTCF scaling, not in paper: up to a day)"
+	@echo "Supplement: s1 s2 s3 s4 (s4-completeness s4-explain) s5; s3b (large-N CTCF scaling, not in paper: up to a day)"
 	@echo "Checks:     s5-retrained (DART-Eval Task 5 with the retrained GM12878 model)"
 	@echo "All:        paper (results), figures (PDFs), quick (small run), data (downloads)"
-	@echo "SPLIT=1:    <panel>-cpu / <panel>-gpu parts (fig1b fig1c s2 s3 s3b; also"
+	@echo "Apple:      apple (CPU + MLX + LS-GKM on this Mac: $(APPLE_PANELS); APPLE_SET=$(APPLE_SET))"
+	@echo "SPLIT=1:    <panel>-cpu / <panel>-gpu parts (fig1b fig1c s2 s3 s3b s4-explain; also"
 	@echo "            fig1b-cpu-t1, s3-cpu-lite), then <panel> merges; see sherlock/"
 	@echo "Options:    DEVICE=$(DEVICE) QUICK=1 SET=<label> PY=$(PY) THREADS=1|4|16 LSGKM_ENV=$(LSGKM_ENV) LSGKM_BIN=<dir> MLSGKM_BIN=<dir>"
 	@echo "            DART_WORK_DIR=$(DART_WORK_DIR) DART_MODELS=$(DART_MODELS)"
 
 .DEFAULT_GOAL := help
-.PHONY: fig1a fig1b fig1c fig1d s1 s2 s3 s3b s4 s5 s5-retrained paper quick figures help \
-        fig1b-cpu fig1b-cpu-t1 fig1b-gpu fig1c-cpu fig1c-gpu s2-cpu s2-gpu \
-        s3-cpu s3-cpu-lite s3-gpu s3b-cpu s3b-gpu data
+.PHONY: fig1a fig1b fig1c fig1d s1 s2 s3 s3b s4 s4-completeness s4-explain s5 s5-retrained paper quick apple \
+        figures help fig1b-cpu fig1b-cpu-t1 fig1b-gpu fig1c-cpu fig1c-gpu s2-cpu s2-gpu \
+        s3-cpu s3-cpu-lite s3-gpu s3b-cpu s3b-gpu s4-explain-cpu s4-explain-gpu data
 .SECONDARY:

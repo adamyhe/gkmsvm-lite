@@ -35,6 +35,7 @@ from urllib.request import urlretrieve
 
 import dsqtl_auprc as bench
 import numpy as np
+from _common import to_device
 from sklearn.metrics import average_precision_score
 
 PAPER_TAGS = {"t2": "t2_l10_k6_d3_t16", "t3": "t3_l10_k6_d3_c10_g2_t16"}
@@ -113,8 +114,7 @@ def _lmer_weights(model, idx: np.ndarray, device: str) -> np.ndarray:
 
     saved = model.use_lmer_table, model.use_lmer_index
     model.use_lmer_table = model.use_lmer_index = False
-    if device == "cuda":
-        model.cuda()
+    to_device(model, device)
     try:
         w = to_cpu(model(_lmer_onehot(idx), batch_size=8192)).ravel() - float(
             model.bias
@@ -158,7 +158,7 @@ def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
+    parser.add_argument("--device", default="cpu", choices=["cpu", "cuda", "mlx"])
     parser.add_argument("--negsets", type=int, nargs="+", default=[1, 2, 3, 4, 5])
     parser.add_argument(
         "--tags", nargs="+", default=["t3", "t2"], choices=list(PAPER_TAGS)
@@ -212,8 +212,7 @@ def main():
             paper_dsvm = _paper_scores("deltaSVM", tag, negset, names19)
 
             t0 = time.time()
-            if args.device == "cuda":
-                model.cuda()
+            to_device(model, args.device)
             dsvm = model.to_deltasvm(device="cpu", query_norm=True)
             model.cpu()
             dsvm.cpu()
@@ -245,8 +244,7 @@ def main():
 
             if t == "t3":
                 for kind, method in (("ISM", "kernel"), ("GkmExplain", "gkmexplain")):
-                    if args.device == "cuda":
-                        model.cuda()
+                    to_device(model, args.device)
                     from gkmsvm.backend import to_cpu
 
                     ours = to_cpu(

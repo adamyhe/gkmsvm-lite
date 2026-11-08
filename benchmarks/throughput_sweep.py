@@ -22,6 +22,7 @@ loading its model file, as in normal use.
 
 Usage:
   python benchmarks/throughput_sweep.py --device cuda
+  python benchmarks/throughput_sweep.py --device mlx --threads 4
   python benchmarks/throughput_sweep.py --device cpu --sizes 1000,4000 --no-lsgkm
 """
 
@@ -55,6 +56,7 @@ from _common import (
     read_seqs,
     run_measured,
     set_cpu_threads,
+    to_device,
     warm_binaries,
     worker_result,
     write_seqs,
@@ -94,10 +96,7 @@ def _worker(spec: dict) -> None:
     X = np.stack([one_hot_encode(s) for s in read_seqs(spec["queries"])])
 
     def prepare(path):
-        model = load_model(path)
-        if spec["device"] == "cuda":
-            model.cuda()
-        return model
+        return to_device(load_model(path), spec["device"])
 
     warm = prepare(spec["warmup_model"])  # compiles kernels on a small model
     _ = to_cpu(warm(X[:32]))
@@ -123,8 +122,8 @@ def main():
     parser.add_argument(
         "--device",
         default="cuda",
-        choices=["cpu", "cuda"],
-        help="cuda: run gkmsvm-lite on CPU and CUDA (default: cuda)",
+        choices=["cpu", "cuda", "mlx"],
+        help="cuda / mlx: run gkmsvm-lite on CPU and that GPU (default: cuda)",
     )
     parser.add_argument(
         "--sizes",
@@ -158,8 +157,8 @@ def main():
     parser.add_argument(
         "--gpu-only",
         action="store_true",
-        help="Time only gkmsvm-lite on CUDA (no LS-GKM, mLS-GKM or gkmsvm-lite "
-        "CPU), for a GPU part merged with a CPU part's file",
+        help="Time only gkmsvm-lite on --device's GPU (no LS-GKM, mLS-GKM or "
+        "gkmsvm-lite CPU), for a GPU part merged with a CPU part's file",
     )
     parser.add_argument(
         "--merge-parts",
@@ -177,8 +176,8 @@ def main():
     if args.merge_parts:
         merge_parts(dict(zip(("cpu", "gpu"), args.merge_parts)), args.output)
         return
-    if args.gpu_only and args.device != "cuda":
-        parser.error("--gpu-only needs --device cuda")
+    if args.gpu_only and args.device == "cpu":
+        parser.error("--gpu-only needs --device cuda or mlx")
 
     import pandas as pd
     from gkmsvm import load_lsgkm_model
@@ -210,11 +209,11 @@ def main():
     order = np.random.default_rng(0).permutation(S)
     kernels = args.kernels.split(",")
     devices = (
-        ["cuda"]
+        [args.device]
         if args.gpu_only
-        else ["cpu", "cuda"]
-        if args.device == "cuda"
         else ["cpu"]
+        if args.device == "cpu"
+        else ["cpu", args.device]
     )
     # Untimed: page in the C binaries before their first timed run
     warm_binaries(*(b for _, b, _ in c_runs))

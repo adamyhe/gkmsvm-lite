@@ -5,12 +5,15 @@ null set 1, -t 2 l=10 k=6 d=3, C=1: the GkmExplain paper's -t 2 settings) with:
 
   libsvm   precomputed N x N Gram in host RAM (tiles computed on --device) +
            sklearn's LIBSVM solver. What solver="auto" uses while the Gram
-           fits in 75% of RAM.
+           fits in RAM (train._gram_fits_on_cpu).
   smo      column-cached SMO, O(cache_size x N) memory. auto's fallback.
   nystrom  low-rank Nystrom approximation (approximate).
   lsgkm    LS-GKM gkmtrain at -T --threads, scored with gkmpredict.
 
-Every run is a separate process, so peak_rss_mb is that run's own peak.
+Every run is a separate process, so peak_rss_mb is that run's own peak. On
+macOS RSS leaves out the Metal buffers MLX allocates in unified memory, so
+peak_footprint_mb records the run's lifetime peak physical footprint, which
+counts them (empty elsewhere).
 Held-out accuracy uses --n-test positives and negatives excluded from every
 training set. r_vs_exact is the Pearson correlation of held-out decision
 values with the exact gkmsvm-lite model at the same N (libsvm, else smo).
@@ -55,6 +58,7 @@ from _common import (
     rewrite_table,
     run_measured,
     set_cpu_threads,
+    to_device,
     warm_binaries,
     warm_jit_cache,
     worker_result,
@@ -100,8 +104,7 @@ def _worker(spec: dict) -> None:
     pool = gpu_pool_mb()
 
     X = np.stack([one_hot_encode(s) for s in test])
-    if spec["device"] == "cuda":
-        model.cuda()
+    to_device(model, spec["device"])
     scores = to_cpu(model(X, batch_size=256)).ravel()
     np.save(work / f"scores_{spec['solver']}_{spec['N']}.npy", scores)
     emit_result(train_s=train_s, n_sv=int(model.num_support_vectors), gpu_pool_mb=pool)
@@ -146,7 +149,7 @@ def main():
     parser.add_argument(
         "--device",
         default="cuda",
-        choices=["cpu", "cuda"],
+        choices=["cpu", "cuda", "mlx"],
         help="Device for gkmsvm-lite kernel computation",
     )
     parser.add_argument(
@@ -324,9 +327,10 @@ def main():
             # Both build a dense N x N (approximate, for Nystrom) Gram in host RAM
             if solver in ("libsvm", "nystrom") and not _gram_fits_on_cpu(N):
                 rows.append(
-                    {**row, "status": "skipped", "wall_s": None, "peak_rss_mb": None}
+                    {**row, "status": "skipped", "wall_s": None, "peak_rss_mb": None,
+                     "peak_footprint_mb": None}
                 )
-                print(f"  {solver}: skipped, Gram exceeds 75% of RAM")
+                print(f"  {solver}: skipped, Gram does not fit in available RAM")
                 continue
             if solver == "lsgkm":
                 prefix = work / f"lsgkm_{N}_{cache:g}"
@@ -398,7 +402,11 @@ def main():
             if m.status != "ok":
                 print(f"  {name} {m.status}: {m.stderr[-300:]}")
             row.update(
-                status=m.status, wall_s=m.wall_s, peak_rss_mb=m.peak_rss_mb, run=name
+                status=m.status,
+                wall_s=m.wall_s,
+                peak_rss_mb=m.peak_rss_mb,
+                peak_footprint_mb=m.peak_footprint_mb,
+                run=name,
             )
             rows.append(row)
 
