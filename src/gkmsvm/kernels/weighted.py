@@ -23,15 +23,15 @@ from functools import cache
 import numpy as np
 from numba import njit, prange
 
-from gkmsvm.kernels.direct import (
+from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
+from gkmsvm.kernels.packed import _concat_windows, device_of
+from gkmsvm.kernels.primitives import (
     _counts,
     _packed_mismatches,
     _rc_window,
     _spans,
     row_stride,
 )
-from gkmsvm.kernels.esttrunc import EstTruncGkmKernel
-from gkmsvm.kernels.packed import _concat_windows, device_of
 from gkmsvm.kernels.rbf import RbfKernel
 
 

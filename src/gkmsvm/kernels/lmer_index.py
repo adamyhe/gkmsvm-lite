@@ -25,7 +25,6 @@ from itertools import combinations, product
 import numpy as np
 
 from gkmsvm.backend import to_cpu
-from gkmsvm.kernels.direct import row_stride
 from gkmsvm.kernels.lmer_index_cpu import (
     _counting_sort,
     _query_cpu,
@@ -42,6 +41,7 @@ from gkmsvm.kernels.lmer_index_gpu import (
     _metal_query,
     _metal_reduce,
 )
+from gkmsvm.kernels.primitives import row_stride
 
 # Neighbors per query window above which the masked join is used instead
 MAX_NEIGHBORS = 8192

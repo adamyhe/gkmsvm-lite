@@ -6,8 +6,8 @@ from __future__ import annotations
 import numpy as np
 from numba import njit, prange
 
-from gkmsvm.kernels.direct import _packed_mismatches
 from gkmsvm.kernels.packed import PAD_WINDOW
+from gkmsvm.kernels.primitives import _packed_mismatches
 
 
 @njit(parallel=True, cache=True, fastmath=True)

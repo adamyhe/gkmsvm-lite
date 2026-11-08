@@ -25,7 +25,7 @@ from math import comb
 import numpy as np
 from numba import njit, prange
 
-from gkmsvm.kernels.direct import _spans
+from gkmsvm.kernels.primitives import _spans
 
 # Largest number of masks worth joining; above this the brute-force loop wins
 _MAX_MASKS = 1000

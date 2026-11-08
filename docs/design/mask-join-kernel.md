@@ -201,7 +201,7 @@ Targets:
 ## Files
 
 - `src/gkmsvm/kernels/packed.py`: `PackedGkmKernel` (`pack`, `raw_packed`, `raw_diag_packed`), `PAD_WINDOW`.
-- `src/gkmsvm/kernels/direct.py`: brute-force packed kernels (`_fused_pairwise_packed_numba`, CUDA and Metal equivalents), `_min_matches`.
+- `src/gkmsvm/kernels/direct.py`: brute-force packed kernels (`_fused_pairwise_packed_numba`; CUDA and Metal equivalents in `direct_gpu.py`), `_min_matches`.
 - `src/gkmsvm/kernels/masked.py`: mask plans (`mask_plan`) and the joins on CPU, CUDA and Metal.
 - `src/gkmsvm/kernels/lmer_index.py`: the cached l-mer index.
 - `src/gkmsvm/lmer_table.py`: exact l-mer table build.

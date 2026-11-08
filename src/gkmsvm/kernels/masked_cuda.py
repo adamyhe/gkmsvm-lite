@@ -7,8 +7,8 @@ from functools import cache
 
 import numpy as np
 
-from gkmsvm.kernels.direct import row_stride
 from gkmsvm.kernels.masked import _column_weights, mask_runs
+from gkmsvm.kernels.primitives import row_stride
 
 # ---------------------------------------------------------------------------
 # CUDA (CuPy)
