@@ -3,6 +3,12 @@
 All notable changes to gkmsvm-lite are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- Internal module layout, no change to the public API or results: `explain.py` is now the `gkmsvm.explain` package (`core`, `table`, `lmer`, `cpu`, `cuda`, `metal`, `weights`, `impact`, `common`); the l-mer index, masked-join and direct kernels each have their CPU, CUDA and Metal code in separate modules (`lmer_index_cpu`, `lmer_index_gpu`, `masked_cuda`, `masked_metal`, `direct_gpu`, `primitives`); and `svm.py`'s input helpers (`as_batch`, allele pairs, NaN/zero masking) moved to `gkmsvm/inputs.py`. Code that imported private helpers from `gkmsvm.svm` or the old `explain`/`lmer_index`/`masked`/`direct` modules needs the new paths.
+
 ## [0.2.1] - 2026-11-08
 
 ### Changed
@@ -114,6 +120,7 @@ Removed or renamed API:
 
 First release.
 
+[Unreleased]: https://github.com/adamyhe/gkmsvm-lite/compare/v0.2.1...HEAD
 [0.2.1]: https://github.com/adamyhe/gkmsvm-lite/compare/v0.2.0.post1...v0.2.1
 [0.2.0.post1]: https://github.com/adamyhe/gkmsvm-lite/compare/v0.2.0...v0.2.0.post1
 [0.2.0]: https://github.com/adamyhe/gkmsvm-lite/compare/v0.1.0...v0.2.0
