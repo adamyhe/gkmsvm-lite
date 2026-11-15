@@ -76,11 +76,11 @@
 - [x] SVR oracle: `train_gkmsvr` gives kundajelab/lsgkm-svr's epsilon-SVR models (`-t 2/3/4`: same SVs, coefficients to 1e-3, predictions to 5e-4), and its model files reproduce its gkmpredict
 - [x] `-t 4/5` on CUDA and Metal: weighted brute force and self-kernels in both; on MLX the masked join and l-mer index count weighted hits in Metal, exact in 64 bits (uint32 word + carry). MLX 1500 x 1500 300 bp Gram 1.66 s -> 0.65 s (`-t 2` 0.58 s)
 - [x] ISM mutant self-kernels on CUDA and Metal (every kernel type): only the pairs touching a changed window, as on CPU, replacing a W^2 pass per mutant (MLX) and a CPU round trip (`-t 4/5`). MLX ISM 32 x 300 bp against 2,000 SVs: `-t 2` 323 -> 41 ms, `-t 4` 157 -> 42 ms
-- [x] ISM through the l-mer index on CUDA and Metal (RBF, and non-RBF without the l-mer table): one thread block per (position, sequence) scatters the changed windows' hits and reduces over the SVs, no [mutants, S] block. MLX `-t 3` 2,000 SVs 32 x 300 bp 3.4 s -> 1.0 s (CPU 2.2 s); dense indexes (> 6 entries per l-mer) run the CPU pass on MLX
+- [x] ISM through the l-mer index on CUDA and Metal (RBF, and non-RBF without the l-mer table): one thread block per (position, sequence) scatters the changed windows' hits and reduces over the SVs, no [mutants, S] block. MLX `-t 3` 2,000 SVs 32 x 300 bp 3.4 s -> 1.0 s (CPU 2.2 s); dense indexes (> 6 entries per l-mer) ran the CPU pass on MLX until the 1,024-thread blocks (below)
 - [x] GkmExplain's per-SV kernel in Metal: per-window float32 partials folded in float64 on CPU, a ballot over the lanes holding a pair; 2.3-5.7x the CPU on an M4, no CPU fallback left for GkmExplain on MLX
 - [x] Mutation impact through the l-mer table (`-t 0/1/2/4`): alt minus ref table sums over the ref norm, as prediction. dsQTL `-t 2` model, 500 variants: 7.0 s -> 0.01 s on CPU, 13.8 s -> 0.03 s on MLX
-- [x] MLX queries a dense l-mer index (> 2.5 entries per l-mer) on CPU: dsQTL `-t 3` model, 500 x 300 bp: prediction 11.7 s -> 5.3 s (CPU 4.9 s), mutation impact 23.0 s -> 10.1 s (CPU 9.8 s)
-- [x] RBF mutation impact in one fused CPU pass per variant through the l-mer index (the alt row visits only the windows that differ from ref): dsQTL `-t 3` model, 500 variants: 9.8 s -> 5.1 s on CPU, 10.1 s -> 5.0 s on MLX
+- [x] (superseded by the 1,024-thread Metal paths below) MLX queries a dense l-mer index (> 2.5 entries per l-mer) on CPU: dsQTL `-t 3` model, 500 x 300 bp: prediction 11.7 s -> 5.3 s (CPU 4.9 s), mutation impact 23.0 s -> 10.1 s (CPU 9.8 s)
+- [x] RBF mutation impact in one fused CPU pass per variant through the l-mer index (the alt row visits only the windows that differ from ref): dsQTL `-t 3` model, 500 variants: 9.8 s -> 5.1 s on CPU, 10.1 s -> 5.0 s on MLX (MLX now runs its own Metal pass, below)
 - [x] GkmExplain on Metal takes the l-mer path from 12 SV windows per neighbor (6 elsewhere): Metal's per-SV kernel is faster up to ~2,900 300 bp SVs for `-t 0` without d (0.57 s vs 0.81 s at 2,000)
 - [x] GkmExplain on MLX: the l-mer path in Metal, per-window float32 partials folded in float64 on CPU (`docs/design/mlx-gkmexplain.md`); within 6e-7 of the CPU's largest attribution, 1.2-5x the CPU on an M4
 - [x] SMO SVR: `train_gkmsvr(solver="smo")` (and `"auto"` when the Gram doesn't fit), the C SMO over LIBSVM's 2N epsilon-SVR dual variables with N cached columns; lsgkm-svr's models to 2e-7, LIBSVM's on mixed lengths, KKT conditions to the tolerance, on CPU, CUDA and MLX
@@ -92,6 +92,7 @@
 - [x] `device="auto"` uses CUDA only when CuPy finds a GPU (`backend.cuda_available()`)
 - [x] `solver="auto"` and the SMO cache respect a job's cgroup memory limit (`train._cgroup_available_memory`)
 - [x] Full dsQTL re-run on the CUDA host (L40S, 2026-10-29): `benchmarks/agreement_lsgkm.py` with all five negsets and both kernels. Mutation impact to 5.0e-6, ISM to 1.0e-5, deltaSVM (as `deltasvm.pl` scores it) to 5.4e-5 of the paper's outputs, so the CUDA paths are now checked against lsgkm directly
+- [x] Faster MLX Metal paths (2026-11-08), no CPU fallback at any index density: ISM blocks and index query threadgroups of 1,024 threads keep their atomics out of DRAM (RBF ISM vs 10 CPU threads on an M4: 4.1x at 1.1 entries per l-mer, 2.75x at the dsQTL `-t 3` model's 18); fused Metal query + reduce for index scoring (dsQTL `-t 3` deltaSVM, 65,536 l-mers on an M5: 21.4 s -> 0.68 s, CPU 2.46 s); small query launches split rows over groups (SMO at N=10k: 121 -> 34 s); mutation impact in one fused Metal pass (28,309 dsQTL SNPs on an M5: 21 s, CPU 52 s)
 - [x] Application-note benchmarks on Sherlock (`benchmarks/sherlock/`): CPU parts on a whole EPYC 9384X node, GPU parts on an L40S, plus A100 and P100 GPU sets
 
 ## Next
@@ -102,7 +103,13 @@ Gaps found by checking against LS-GKM (2026-10-19), most important first:
 
 Performance gaps:
 
-- None open. Dense RBF ISM on MLX (the dsQTL `-t 3` model, 18 index entries per l-mer) runs the CPU pass: Metal is 0.5x the CPU there, and running both at once on split positions gained nothing (each half alone 2.0 s, together 3.4 s). RBF (`-t 3`/`-t 5`) has no explain table by construction: the table sums the SVs into one 4^l vector V before any query, and an RBF SV's weight depends on the query through exp(γ(K(x, sv) − 1)), so V would be per query and cost as much as the index path's query.
+- [ ] **Fused mutation impact on CUDA** — CUDA still builds K for ref and alt in full with `pairwise()`; CPU (`LmerIndex.impact`) and Metal (`_METAL_IMPACT`) visit only the windows where the alleles differ, in one pass per variant.
+
+Known limits (measured, not planned):
+
+- MLX Grams keep the masked join: the Metal index query is 0.52-0.66x the join on an M4 (`gram._MLX_GRAM_INDEX`).
+- RBF GkmExplain on Metal is 1.2-1.6x the CPU; a faster Metal index query didn't change that, so its time isn't in the query.
+- RBF (`-t 3`/`-t 5`) has no explain table by construction: the table sums the SVs into one 4^l vector V before any query, and an RBF SV's weight depends on the query through exp(γ(K(x, sv) − 1)), so V would be per query and cost as much as the index path's query.
 
 Features:
 
