@@ -55,11 +55,23 @@ def test_table_matches_kernel(case, include_rc, normalize):
     np.testing.assert_allclose(got, ref, rtol=1e-10, atol=1e-12)
 
 
-def test_auto_skips_small_models():
+def test_auto_builds_when_the_call_pays_for_it(monkeypatch):
+    """"auto" builds the table only when a call's queries would cost more
+    without it than the build, then reuses it for every call."""
     rng = np.random.default_rng(1)
     model = _model("t2", True, rng, n_sv=20)
     model(_onehot(3, 50, rng))
-    assert model._lmer_table is None  # "auto" with < 500 SVs: never built
+    assert model._lmer_table is None  # a few queries: cheaper without it
+    # As if the build were 1,000x cheaper (or the call 1,000x larger)
+    monkeypatch.setattr(GkmSVM, "_LMER_TABLE_BUILD_S", 2e-10)
+    x = _onehot(3, 50, rng)
+    got = model(x)
+    assert isinstance(model._lmer_table, np.ndarray)
+    monkeypatch.setattr(GkmSVM, "_LMER_TABLE_BUILD_S", 1.0)
+    model(_onehot(1, 50, rng))  # built, so used whatever the call's size
+    assert model._lmer_table_for(np) is not None
+    model.use_lmer_table = False
+    np.testing.assert_allclose(got, model(x), rtol=1e-10, atol=1e-12)
 
 
 def test_rbf_uses_kernel_path():
@@ -94,8 +106,9 @@ def test_to_deltasvm_matches_brute(case, include_rc, query_norm):
     np.testing.assert_allclose(
         np.asarray(fast.weights), np.asarray(brute.weights), rtol=1e-6, atol=1e-7
     )
-    # to_deltasvm must not disturb the model's own scoring
-    np.testing.assert_array_equal(np.asarray(model(X)), before)
+    # to_deltasvm must not disturb the model's own scoring (the table it built
+    # now scores the model, equal to the kernel path up to rounding)
+    np.testing.assert_allclose(np.asarray(model(X)), before, rtol=1e-12, atol=1e-14)
 
 
 @pytest.mark.parametrize("query_norm", [False, True])

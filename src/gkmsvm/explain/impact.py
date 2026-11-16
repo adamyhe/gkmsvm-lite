@@ -110,6 +110,14 @@ def mutation_impact(
             short = short.reshape(2, -1).any(axis=0)
 
     B = ref.shape[0]
+    # Without the table, the fused index pass visits the windows that differ
+    # between the alleles, once per allele (l per SNP); the masked join scores
+    # every window of both
+    W = max(L - base.l + 1, 0)
+    per_variant = 2 * W
+    if model.use_lmer_index and model._index_applies():
+        per_variant = 2 * min(base.l, W)
+    model._plan_lmer_table(B * per_variant, model._device_name())
     bs = B if batch_size is None else model._min_batch_size(batch_size)
     starts = _progress(range(0, B, bs), verbose, "Mutation impact")
 

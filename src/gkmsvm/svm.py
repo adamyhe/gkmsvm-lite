@@ -214,8 +214,9 @@ class GkmSVM(DeviceModel):
         # applies; False forces the masked join / brute-force kernel
         self.use_lmer_index = True
         # Exact l-mer weight table for non-RBF kernels (lmer_table.py):
-        # "auto" uses it when it applies and there are enough SVs to pay for
-        # building it; True/False force it on or off
+        # "auto" builds it when a call queries enough windows to pay for
+        # building it (_plan_lmer_table) and uses it once built; True/False
+        # force it on or off
         self.use_lmer_table: bool | str = "auto"
         self._lmer_table: np.ndarray | bool | None = None
         self._lmer_table_dev = None
@@ -333,12 +334,19 @@ class GkmSVM(DeviceModel):
         if "index" not in c:
             from gkmsvm.kernels import lmer_index
 
-            packed = self._sv_packed()
-            base = self.kernel.base
-            n_windows = sum(p.size for p in packed if p is not None)
-            use = n_windows > 0 and lmer_index.applies(base, n_windows)
-            c["index"] = lmer_index.LmerIndex(base, *packed) if use else None
+            c["index"] = (
+                lmer_index.LmerIndex(self.kernel.base, *self._sv_packed())
+                if self._index_applies()
+                else None
+            )
         return c["index"]
+
+    def _index_applies(self) -> bool:
+        """Whether the l-mer index can serve this model's SVs (without building it)."""
+        from gkmsvm.kernels import lmer_index
+
+        n_windows = sum(p.size for p in self._sv_packed() if p is not None)
+        return n_windows > 0 and lmer_index.applies(self.kernel.base, n_windows)
 
     @staticmethod
     def _fused_reduce(index, x) -> bool:
@@ -423,9 +431,13 @@ class GkmSVM(DeviceModel):
             than the window length l (with a warning), as LS-GKM gives.
         """
         x, lengths = as_batch(x, lengths)
-        short = _short_rows(lengths, self.kernel.base.l)
+        l = self.kernel.base.l
+        short = _short_rows(lengths, l)
         if short is not None and short.all():
             return _nan_rows(np.zeros((x.shape[0], 1)), short)
+        self._plan_lmer_table(
+            x.shape[0] * max(x.shape[-1] - l + 1, 0), self._device_name()
+        )
         batch_size = self._min_batch_size(batch_size)
         if batch_size is not None and x.shape[0] > batch_size:
             chunks = range(0, x.shape[0], batch_size)
@@ -438,8 +450,22 @@ class GkmSVM(DeviceModel):
 
         return _nan_rows(self._score_unbatched(self._match_device(x), lengths), short)
 
-    # "auto" builds the l-mer table only for models at least this large
-    _LMER_TABLE_MIN_SVS = 500
+    # "auto" builds the l-mer table when a call's estimated cost without it
+    # exceeds the build's (_plan_lmer_table). Building costs ~2e-7 s per l-mer
+    # on CPU (16 threads: 0.16 s at l=10, 0.74 s at l=11, 3.8 s at l=12, about
+    # the same for 50 or 20k SVs; CUDA and MLX models build it on CPU too).
+    # Without it, each (query window, neighbor) pair costs ~a + b e seconds
+    # through the l-mer index, e the indexed SV windows (fwd + RC) per l-mer:
+    # fit to 1,000 x 300 bp -t 2 queries, l=10/11 d=3, 50-32k SVs, on 16 CPU
+    # threads and an RTX 3080 (CPU 0.135 ns at e < 0.03 to 2.7 ns at e = 18;
+    # CUDA 0.05 to 0.76 ns). b is the per-entry cost at large e, so the
+    # estimate is low at e ~ 1 (CPU 0.62 ns measured at e = 1.1, 0.30
+    # estimated) and the table comes a little later than it could. MLX uses
+    # the CPU's values. With the table a window is one lookup (~27 ns per
+    # 300 bp row on CPU), so a call that builds it costs at most about twice
+    # what the cheaper choice would have.
+    _LMER_TABLE_BUILD_S = 2e-7
+    _LMER_QUERY_S = {"cpu": (0.135e-9, 0.15e-9), "cuda": (0.05e-9, 0.035e-9)}
 
     # Without the l-mer table or index, each kernel call pays a fixed per-SV
     # cost (the masked join indexes every SV window: ~6 s for 32k SVs on CPU),
@@ -479,12 +505,43 @@ class GkmSVM(DeviceModel):
             self._lmer_table = False if table is None else table
         return None if self._lmer_table is False else self._lmer_table
 
+    def _plan_lmer_table(self, n_windows: int, device: str) -> None:
+        """Under "auto", build the l-mer table if querying n_windows windows
+        without it would cost more than building it (_LMER_TABLE_BUILD_S).
+
+        Called once per scoring, ISM or mutation-impact call with the windows
+        it would query through the index, before it splits into batches.
+        """
+        from gkmsvm.kernels.lmer_index import _dmax, neighbor_count
+        from gkmsvm.lmer_table import MAX_TABLE_L
+
+        kernel = self.kernel
+        if (
+            self.use_lmer_table != "auto"
+            or self._lmer_table is not None
+            or not isinstance(kernel, PackedGkmKernel)
+            or kernel.l > MAX_TABLE_L
+            or _dmax(kernel) is None
+        ):
+            return
+        l = kernel.l
+        S = self.num_support_vectors
+        sv_len = self.support_sequences.shape[-1]
+        if self.sv_lengths is not None:
+            sv_len = float(np.mean(to_cpu(self.sv_lengths)))
+        per_lmer = 2 * S * max(sv_len - l + 1, 0) / 4**l
+        a, b = self._LMER_QUERY_S.get(device, self._LMER_QUERY_S["cpu"])
+        query_s = n_windows * neighbor_count(l, _dmax(kernel)) * (a + b * per_lmer)
+        if query_s >= self._LMER_TABLE_BUILD_S * 4**l:
+            self._build_lmer_table()
+
     def _lmer_table_for(self, xp):
-        """The l-mer table on xp's device, or None when it doesn't apply."""
+        """The l-mer table on xp's device, or None when it doesn't apply.
+        "auto" never builds it here (see _plan_lmer_table)."""
         use = self.use_lmer_table
         if use is False or not isinstance(self.kernel, PackedGkmKernel):
             return None
-        if use == "auto" and self.num_support_vectors < self._LMER_TABLE_MIN_SVS:
+        if use == "auto" and self._lmer_table is None:
             return None
         table = self._build_lmer_table()
         if table is None:

@@ -161,6 +161,10 @@ class DeviceModel:
                 f"Unknown device {device!r}. Use 'auto', 'cpu', 'cuda', or 'mlx'."
             )
 
+    def _device_name(self) -> str:
+        """'cpu', 'cuda' or 'mlx'."""
+        return "cuda" if self._on_gpu else "mlx" if self._on_mlx else "cpu"
+
     def _match_device(self, x: Any) -> Any:
         """x on the model's device."""
         if self._on_gpu and not is_gpu(x):
