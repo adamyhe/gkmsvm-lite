@@ -94,6 +94,7 @@
 - [x] Full dsQTL re-run on the CUDA host (L40S, 2026-10-29): `benchmarks/agreement_lsgkm.py` with all five negsets and both kernels. Mutation impact to 5.0e-6, ISM to 1.0e-5, deltaSVM (as `deltasvm.pl` scores it) to 5.4e-5 of the paper's outputs, so the CUDA paths are now checked against lsgkm directly
 - [x] Faster MLX Metal paths (2026-11-08), no CPU fallback at any index density: ISM blocks and index query threadgroups of 1,024 threads keep their atomics out of DRAM (RBF ISM vs 10 CPU threads on an M4: 4.1x at 1.1 entries per l-mer, 2.75x at the dsQTL `-t 3` model's 18); fused Metal query + reduce for index scoring (dsQTL `-t 3` deltaSVM, 65,536 l-mers on an M5: 21.4 s -> 0.68 s, CPU 2.46 s); small query launches split rows over groups (SMO at N=10k: 121 -> 34 s); mutation impact in one fused Metal pass (28,309 dsQTL SNPs on an M5: 21 s, CPU 52 s)
 - [x] Application-note benchmarks on Sherlock (`benchmarks/sherlock/`): CPU parts on a whole EPYC 9384X node, GPU parts on an L40S, plus A100 and P100 GPU sets
+- [x] Fused mutation impact on CUDA (`_IMPACT_CUDA`), as on CPU and Metal: the alt allele visits only the windows that differ, and under RBF the shared windows add K(ref) only for SVs the differing ones reached; no [2n, S] block (the full dsQTL set with the default `batch_size` had run out of GPU memory). RTX 3080 vs the `pairwise()` path: 300 bp SNPs `-t 3` 4.51 -> 2.36 s, `-t 2` (no l-mer table) 3.10 -> 0.23 s per 4,000 (non-RBF models with 500+ SVs read the l-mer table by default, still faster: 0.051 s); dsQTL 19 bp SNPs, where every window differs, `-t 3` 2.41 -> 2.20 s
 
 ## Next
 
@@ -103,7 +104,7 @@ Gaps found by checking against LS-GKM (2026-10-19), most important first:
 
 Performance gaps:
 
-- [ ] **Fused mutation impact on CUDA** — CUDA still builds K for ref and alt in full with `pairwise()`; CPU (`LmerIndex.impact`) and Metal (`_METAL_IMPACT`) visit only the windows where the alleles differ, in one pass per variant.
+- None open.
 
 Known limits (measured, not planned):
 

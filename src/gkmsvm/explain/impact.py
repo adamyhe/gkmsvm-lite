@@ -145,9 +145,9 @@ def mutation_impact(
             or index.impact_on_device(device_of(bx))
             or not index.queries_on_device(device_of(bx))
         ):
-            # RBF through the index: one fused pass per variant (on CPU, or in
-            # Metal on MLX), the alt row visiting only the windows that differ
-            # from ref
+            # RBF through the index: one fused pass per variant (on CPU, CUDA,
+            # or in Metal on MLX), the alt row visiting only the windows that
+            # differ from ref
             inv_dr, inv_ds = model._inv_norms(
                 to_cpu(diag_r) if base.normalize else None, n
             )
