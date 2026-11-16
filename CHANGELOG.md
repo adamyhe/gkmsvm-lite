@@ -5,8 +5,12 @@ All notable changes to gkmsvm-lite are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-16
+
 ### Changed
 
+- CUDA: mutation impact (GkmExplain `-m 5`, `score_variants(method="gkmexplain")`) runs a fused pass through the l-mer index, which no longer builds K for ref and alt in full. Each chunk of variants scatters only the windows where the alleles differ into float64 scratch, and a block per variant reduces it. RTX 3080: 300 bp SNPs × 4,000, `-t 3` 4.51 to 2.36 s, `-t 2` without the l-mer table 3.10 to 0.23 s; dsQTL `-t 3`, 28,309 SNPs, 2.41 to 2.20 s. The full dsQTL set no longer runs out of GPU memory at the default `batch_size`.
+- `use_lmer_table="auto"` builds the l-mer table when a scoring, ISM or mutation-impact call would cost more through the l-mer index than the build (~2e-7 s per l-mer), and reuses a table once built, including the one `to_deltasvm` builds. It replaces a fixed cutoff of 500 SVs, which skipped the table for small models however many sequences they scored (up to 20x slower), and built it for large models scoring a handful of sequences. Scores after `to_deltasvm` can differ from before at the 1e-16 level.
 - Internal module layout, no change to the public API or results: `explain.py` is now the `gkmsvm.explain` package (`core`, `table`, `lmer`, `cpu`, `cuda`, `metal`, `weights`, `impact`, `common`); the l-mer index, masked-join and direct kernels each have their CPU, CUDA and Metal code in separate modules (`lmer_index_cpu`, `lmer_index_gpu`, `masked_cuda`, `masked_metal`, `direct_gpu`, `primitives`); and `svm.py`'s input helpers (`as_batch`, allele pairs, NaN/zero masking) moved to `gkmsvm/inputs.py`. Code that imported private helpers from `gkmsvm.svm` or the old `explain`/`lmer_index`/`masked`/`direct` modules needs the new paths.
 
 ## [0.2.1] - 2026-11-08
@@ -120,7 +124,8 @@ Removed or renamed API:
 
 First release.
 
-[Unreleased]: https://github.com/adamyhe/gkmsvm-lite/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/adamyhe/gkmsvm-lite/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/adamyhe/gkmsvm-lite/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/adamyhe/gkmsvm-lite/compare/v0.2.0.post1...v0.2.1
 [0.2.0.post1]: https://github.com/adamyhe/gkmsvm-lite/compare/v0.2.0...v0.2.0.post1
 [0.2.0]: https://github.com/adamyhe/gkmsvm-lite/compare/v0.1.0...v0.2.0
