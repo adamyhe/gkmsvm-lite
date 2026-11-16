@@ -45,7 +45,11 @@ def ism(
     """
     x, lengths = as_batch(x, lengths)
     x = model._match_device(x)
-    short = _short_rows(lengths, model.kernel.base.l, "ISM deltas")
+    l = model.kernel.base.l
+    short = _short_rows(lengths, l, "ISM deltas")
+    # Without the table, each (position, sequence) queries the l windows
+    # covering the position before and after each substitution
+    model._plan_lmer_table(5 * l * x.shape[0] * x.shape[-1], model._device_name())
 
     def rows(s, e):
         return _ism_packed(model, x[s:e], _rows(lengths, s, e - s))

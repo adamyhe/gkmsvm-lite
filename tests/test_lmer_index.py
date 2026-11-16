@@ -108,6 +108,35 @@ def test_mutation_impact_index_vs_join(kernel_type, params):
     )
 
 
+@pytest.mark.parametrize("kernel_type,params", MODELS)
+def test_mutation_impact_cuda_matches_cpu(kernel_type, params, monkeypatch):
+    """The fused CUDA pass (_IMPACT_CUDA) over several scratch chunks, which it
+    zeroes for the next: SNPs, unchanged rows (no window differs) and a deletion."""
+    from gkmsvm.backend import cuda_available
+    from gkmsvm.explain import mutation_impact
+
+    if not cuda_available():
+        pytest.skip("No CUDA GPU (or CuPy not installed)")
+    rng = np.random.default_rng(6)
+    model = _model(kernel_type, params, rng)
+    model.use_lmer_table = False
+    ref = _onehot(37, 40, rng)
+    alt = ref.copy()
+    pos = rng.integers(0, 40, 37)
+    alt[np.arange(37), :, pos] = np.eye(4)[(ref[np.arange(37), :, pos].argmax(1) + 1) % 4]
+    alt[5] = ref[5]
+    refs, alts = list(ref), list(alt)
+    alts[9] = np.concatenate([ref[9][:, :12], ref[9][:, 15:]], axis=1)
+    expected = mutation_impact(model, refs, alts)
+    gpu = model.cuda()
+    assert gpu._sv_index().impact_on_device("cuda")
+    # 3 variants per chunk
+    monkeypatch.setattr(lmer_index, "_IMPACT_SCRATCH_BYTES", 3 * 3 * 8 * 30)
+    got = mutation_impact(gpu, refs, alts)
+    assert got[5, 0] == 0
+    np.testing.assert_allclose(got, expected, rtol=1e-10, atol=1e-12)
+
+
 KERNEL_OBJS = {
     "t2": lambda: EstTruncGkmKernel(8, 5, d=3),
     "t3": lambda: RbfGkmKernel(8, 5, d=3, gamma=2.0),

@@ -171,6 +171,106 @@ extern "C" __global__ void lmer_index_mutants(
 """
 )
 
+# Mutation impact (explain.mutation_impact) on CUDA, fused as _query_impact_cpu
+# and _METAL_IMPACT, over a chunk of variants with scratch s0, s1, s2 [n, S]
+# float64. lmer_index_impact_hits takes one (window, neighbor) item per thread
+# over a compacted list of (variant, window) pairs. pass 0, the windows where
+# the alleles differ (all of them past an indel): ref's hits go to s1, alt's to
+# s2. pass 1 (RBF only), the windows the alleles share: ref's hits go to s0,
+# only for SVs pass 0 reached (any other has dK = 0), which
+# lmer_index_impact_mark sets in a bitmap [n, ceil(S / 32)] between the passes
+# (4 KiB per variant at 32k SVs, so pass 1's tests hit L1; testing s1 and s2
+# in global memory made 300 bp RBF variants 1.6x slower). Then
+# dK = s2 - s1, K_raw(ref) = s0 + s1, and lmer_index_impact_reduce (a block per
+# variant) reduces over the SVs, zeroing the scratch for the next chunk.
+# Consecutive items share a variant, so the blocks resident at once write a few
+# variants' scratch rows and the atomics stay in L2 (persistent blocks each
+# walking variants through their own scratch slice put them in DRAM: 9x slower).
+_IMPACT_CUDA = r"""
+extern "C" __global__ void lmer_index_impact_hits(
+    const long long* __restrict__ pairs, long long n_items, int pass,
+    const unsigned int* __restrict__ bxr, const unsigned int* __restrict__ bxa,
+    int W, const unsigned char* __restrict__ wxr,
+    const unsigned char* __restrict__ wxa, int wx_stride,
+    const long long* __restrict__ offsets, const int* __restrict__ ids,
+    const unsigned char* __restrict__ vals, const unsigned int* __restrict__ masks,
+    const double* __restrict__ weights, int n_masks, long long n_lmers, int S,
+    int weighted, double* s0, double* s1, double* s2,
+    const unsigned int* __restrict__ bits)
+{
+    long long it = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (it >= n_items) return;
+    long long p = pairs[it / n_masks];  // b * W + i
+    int t = (int)(it % n_masks);
+    int b = (int)(p / W), i = (int)(p - (long long)b * W);
+    long long row = (long long)b * S;
+    double wt = weights[t];
+    for (int al = 0; al < (pass ? 1 : 2); al++) {
+        long long v = (long long)((al ? bxa[p] : bxr[p]) ^ masks[t]);
+        if (v >= n_lmers) continue;  // padding window
+        double w = wt;
+        if (weighted) w *= al ? wxa[(long long)b * wx_stride + i]
+                              : wxr[(long long)b * wx_stride + i];
+        double* dst = (pass ? s0 : al ? s2 : s1) + row;
+        for (long long e = offsets[v]; e < offsets[v + 1]; e++) {
+            int s = ids[e];
+            if (pass && !((bits[(long long)b * ((S + 31) >> 5) + (s >> 5)]
+                           >> (s & 31)) & 1u))
+                continue;
+            atomicAdd(&dst[s], weighted ? w * vals[e] : w);
+        }
+    }
+}
+
+extern "C" __global__ void lmer_index_impact_mark(
+    int S, const double* __restrict__ s1, const double* __restrict__ s2,
+    unsigned int* __restrict__ bits)
+{
+    // A block per variant; each warp's ballot over 32 consecutive SVs is a word
+    int b = blockIdx.x, n_words = (S + 31) >> 5;
+    long long row = (long long)b * S;
+    for (int s0 = 0; s0 < n_words * 32; s0 += blockDim.x) {
+        int s = s0 + threadIdx.x;
+        bool hit = s < S && (s1[row + s] != 0.0 || s2[row + s] != 0.0);
+        unsigned int word = __ballot_sync(0xffffffffu, hit);
+        if ((threadIdx.x & 31) == 0 && (s >> 5) < n_words)
+            bits[(long long)b * n_words + (s >> 5)] = word;
+    }
+}
+
+extern "C" __global__ void lmer_index_impact_reduce(
+    int S, const double* __restrict__ inv_dr, const double* __restrict__ inv_ds,
+    const double* __restrict__ coef, int rbf, double gamma, double floor_,
+    double* s0, double* s1, double* s2, double* __restrict__ out)
+{
+    __shared__ double red[32];
+    int b = blockIdx.x, tid = threadIdx.x, nt = blockDim.x;
+    long long row = (long long)b * S;
+    double dr = inv_dr[b], acc = 0.0;
+    for (int s = tid; s < S; s += nt) {
+        double rd = s1[row + s], ad = s2[row + s];
+        if (rd == 0.0 && ad == 0.0) continue;
+        s1[row + s] = 0.0;
+        s2[row + s] = 0.0;
+        double z = dr * inv_ds[s], dk = (ad - rd) * z;
+        if (rbf) {
+            double k = (rd + s0[row + s]) * z;
+            s0[row + s] = 0.0;
+            dk = k > 0.0 ? dk * (exp(gamma * (k - 1.0)) - floor_) / k : 0.0;
+        }
+        acc += coef[s] * dk;
+    }
+    for (int o = 16; o > 0; o >>= 1) acc += __shfl_down_sync(0xffffffffu, acc, o);
+    if ((tid & 31) == 0) red[tid >> 5] = acc;
+    __syncthreads();
+    if (tid == 0) {
+        double total = 0.0;
+        for (int q = 0; q < (nt + 31) / 32; q++) total += red[q];
+        out[b] = total;
+    }
+}
+"""
+
 _METAL_MUTANTS_HEADER = """
 #define SCR_ADD(i, x) atomic_fetch_add_explicit(&scratch[i], x, memory_order_relaxed)
 #define SCR(i) atomic_load_explicit(&scratch[i], memory_order_relaxed)

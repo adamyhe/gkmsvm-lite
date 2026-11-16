@@ -34,6 +34,7 @@ from gkmsvm.kernels.lmer_index_cpu import (
 )
 from gkmsvm.kernels.lmer_index_gpu import (
     _CUDA_SRC,
+    _IMPACT_CUDA,
     _MUTANTS_CUDA,
     _cuda_fn,
     _metal_impact,
@@ -117,6 +118,11 @@ def index_neighbors(kernel):
 
 
 _MUTANTS_THREADS = 128
+# Fused mutation impact on CUDA (_IMPACT_CUDA): scratch per launch, 3 float64
+# rows of length S per variant (2 without RBF)
+_IMPACT_SCRATCH_BYTES = 256 * 2**20
+# and (window, neighbor) items per launch, within the grid's 2^31 - 1 blocks
+_IMPACT_ITEMS = 2**32
 # Metal: 1024 threads per (position, sequence). Each threadgroup's [5, S]
 # scratch is device memory its float atomics go through; with 128-thread
 # groups, the resident ones' scratch outgrew the caches and the atomics went to
@@ -204,9 +210,9 @@ class LmerIndex:
         return dev in ("cuda", "mlx")
 
     def impact_on_device(self, dev: str) -> bool:
-        """Whether impact() runs on dev's rows: CPU, and MLX in the fused Metal
-        pass (as reduce_on_device). CUDA queries pairwise() instead."""
-        return dev == "cpu" or self.reduce_on_device(dev)
+        """Whether impact() runs on dev's rows: CPU, CUDA (_IMPACT_CUDA), and MLX
+        in the fused Metal pass (as reduce_on_device)."""
+        return dev in ("cpu", "cuda") or self.reduce_on_device(dev)
 
     def queries_on_device(self, dev: str) -> bool:
         """Whether pairwise() queries on dev (CUDA, MLX) rather than on CPU: MLX
@@ -294,13 +300,17 @@ class LmerIndex:
     def impact(self, bx, inv_dr, inv_ds, coef, gamma=np.nan):
         """Mutation impact [n] of rows bx = [ref (n rows); alt (n rows)]
         (see _query_impact_cpu); inv_dr: 1 / sqrt(K_raw(ref, ref)) [n]. CPU rows
-        give float64 NumPy; MLX rows (see impact_on_device) float32 MLX."""
+        give float64 NumPy, CUDA rows float64 CuPy, MLX rows (see
+        impact_on_device) float32 MLX."""
         import numba
 
         from gkmsvm.kernels.packed import device_of
 
-        if device_of(bx) == "mlx":
+        dev = device_of(bx)
+        if dev == "mlx":
             return self._impact_mlx(bx, inv_dr, inv_ds, coef, gamma)
+        if dev == "cuda":
+            return self._impact_cuda(bx, inv_dr, inv_ds, coef, gamma)
         bx = np.ascontiguousarray(bx)
         return _query_impact_cpu(
             bx,
@@ -426,6 +436,104 @@ class LmerIndex:
                     vals,
                     np.int32(weighted),
                     np.int64(diag_offset + b0 if diag_offset >= 0 else -1),
+                ),
+            )
+        return out
+
+    def _impact_cuda(self, bx, inv_dr, inv_ds, coef, gamma):
+        """impact() on CUDA (_IMPACT_CUDA): float64 [n] on the device."""
+        import cupy as cp
+
+        offsets, ids, masks, weights, vals = self._arrays("cuda")
+        bx = cp.ascontiguousarray(bx, dtype=cp.uint32)
+        n, W = bx.shape[0] // 2, bx.shape[1]
+        S = self.S
+        weighted = vals is not None
+        if vals is None:
+            vals = cp.zeros(1, dtype=cp.uint8)
+        wx_stride = 0
+        wxr = wxa = vals  # (unread without window weights)
+        if weighted:
+            wx_np = np.ascontiguousarray(self.row_weights(bx))
+            wx_stride = row_stride(wx_np, W)
+            wx = cp.asarray(wx_np)
+            wxr, wxa = (wx[:n], wx[n:]) if wx_stride else (wx, wx)
+        rbf = not np.isnan(gamma)
+        out = cp.empty(n, dtype=cp.float64)
+        rows = min(
+            n,
+            max(1, _IMPACT_SCRATCH_BYTES // ((3 if rbf else 2) * 8 * S)),
+            max(1, _IMPACT_ITEMS // (W * len(self.masks))),
+        )
+        s1, s2 = cp.zeros((rows, S)), cp.zeros((rows, S))
+        s0 = cp.zeros((rows, S)) if rbf else s1  # (unread without RBF)
+        bits = cp.zeros((rows, (S + 31) // 32) if rbf else 1, dtype=cp.uint32)
+        inv_dr, inv_ds, coef = (
+            cp.ascontiguousarray(cp.asarray(a, dtype=cp.float64))
+            for a in (inv_dr, inv_ds, coef)
+        )
+        hits = _cuda_fn(_IMPACT_CUDA, "lmer_index_impact_hits")
+        mark = _cuda_fn(_IMPACT_CUDA, "lmer_index_impact_mark")
+        reduce = _cuda_fn(_IMPACT_CUDA, "lmer_index_impact_reduce")
+        block = 256
+        for b0 in range(0, n, rows):
+            nb = min(rows, n - b0)
+            r, a = bx[b0 : b0 + nb], bx[n + b0 : n + b0 + nb]
+            wr = wxr[b0 : b0 + nb] if wx_stride else wxr
+            wa = wxa[b0 : b0 + nb] if wx_stride else wxa
+            diff = r != a
+            if wx_stride:
+                diff |= wr != wa
+            for p, sel in enumerate((diff, ~diff) if rbf else (diff,)):
+                pairs = cp.flatnonzero(sel)
+                n_items = len(pairs) * len(self.masks)
+                if n_items == 0:
+                    continue
+                if p == 1:
+                    mark((nb,), (block,), (np.int32(S), s1, s2, bits))
+                hits(
+                    ((n_items + block - 1) // block,),
+                    (block,),
+                    (
+                        pairs,
+                        np.int64(n_items),
+                        np.int32(p),
+                        r,
+                        a,
+                        np.int32(W),
+                        wr,
+                        wa,
+                        np.int32(wx_stride),
+                        offsets,
+                        ids,
+                        vals,
+                        masks,
+                        weights,
+                        np.int32(len(self.masks)),
+                        np.int64(self.n_lmers),
+                        np.int32(S),
+                        np.int32(weighted),
+                        s0,
+                        s1,
+                        s2,
+                        bits,
+                    ),
+                )
+            reduce(
+                (nb,),
+                (block,),
+                (
+                    np.int32(S),
+                    inv_dr[b0 : b0 + nb],
+                    inv_ds,
+                    coef,
+                    np.int32(rbf),
+                    np.float64(gamma if rbf else 0.0),
+                    np.float64(np.exp(-gamma) if rbf else 0.0),
+                    s0,
+                    s1,
+                    s2,
+                    out[b0 : b0 + nb],
                 ),
             )
         return out

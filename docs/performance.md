@@ -6,7 +6,7 @@ Every kernel works on windows packed 2 bits per base into uint32 (`PackedGkmKern
 
 | Work | Path | Cost |
 |---|---|---|
-| Scoring `-t 0/1/2/4` (l <= 12, 500+ SVs) | Exact l-mer weight table (`lmer_table.py`): one lookup per window | Independent of the number of SVs once built |
+| Scoring `-t 0/1/2/4` (l <= 12, calls large enough to pay for the build) | Exact l-mer weight table (`lmer_table.py`): one lookup per window | Independent of the number of SVs once built |
 | Scoring, ISM, mutation impact `-t 1-5` (d-cutoff, neighborhood <= 8,192 l-mers, or <= 32,768 for large SV sets) | Cached l-mer index over the SVs (`kernels/lmer_index.py`): each query window visits its d-mismatch neighborhood (CPU, CUDA, Metal) | Proportional to the matching (window, SV) pairs; nothing per SV |
 | Gram tiles and SMO columns `-t 1-5` (neighborhood <= 8,192) | l-mer index over the training set (Gram: not on MLX); a self-Gram row block computes only its columns from the diagonal on | One query row per SMO column |
 | Other scoring, Gram tiles, SMO columns (`-t 0`, MLX Grams) | Masked join (`kernels/masked.py`) when both sides have 16+ sequences, else brute force (XOR + popcount over all window pairs) | Masked join indexes one side per call (the forward columns only, probed with both strands of the rows, when the columns are larger) |
