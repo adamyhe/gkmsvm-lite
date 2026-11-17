@@ -37,6 +37,7 @@ Homepage = "https://github.com/adamyhe/gkmsvm-lite"
 Repository = "https://github.com/adamyhe/gkmsvm-lite"
 Issues = "https://github.com/adamyhe/gkmsvm-lite/issues"
 Documentation = "https://github.com/adamyhe/gkmsvm-lite/tree/main/docs"
+Changelog = "https://github.com/adamyhe/gkmsvm-lite/blob/main/CHANGELOG.md"
 
 [project.scripts]
 gkmsvm = "gkmsvm.cli:main"
