@@ -5,6 +5,10 @@ All notable changes to gkmsvm-lite are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- RBF GkmExplain (`-t 3`, `-t 5`, `-t 6`) on CPU and MLX: for long queries on dense l-mer indexes, each batch builds every row's l-mer weights in one pass over the index and takes the non-RBF l-mer path, instead of summing an l-mer's index entries at every neighbor visit. A fitted cost rule picks between the two per batch; short queries keep the old path. The dsQTL `-t 3` model, 64 × 300 bp on an M4: CPU hypothetical 1.2-1.4×, perturbation 2.4-3.1×; MLX 1.1-1.3× and 2.1-2.5×. Results agree with the old path to 2e-13 on CPU and 2e-7 on MLX. CUDA is unchanged.
+
 ## [0.2.2] - 2026-11-16
 
 ### Changed

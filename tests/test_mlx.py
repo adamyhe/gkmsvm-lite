@@ -1006,13 +1006,19 @@ def test_gkmexplain_mlx_reuses_cpu_model():
     ["gkm_cnt", "gkm_estfull", "gkm_esttrunc", "gkmrbf", "wgkm", "wgkmrbf"],
 )
 @pytest.mark.parametrize("mode", ["hypothetical", "perturbation"])
-def test_gkmexplain_metal_matches_cpu(kernel_type, mode):
-    """The Metal l-mer path (index path for RBF) on mixed-length queries and
-    SVs with N: the CPU's attributions to 1e-6 of the largest, no CPU
-    fallback warning, and importance sums to score - bias (non-RBF)."""
+@pytest.mark.parametrize("dense", [False, True])
+def test_gkmexplain_metal_matches_cpu(kernel_type, mode, dense, monkeypatch):
+    """The Metal l-mer path (RBF: index sums per visit, or per-row V built 2
+    rows at a time) on mixed-length queries and SVs with N: the CPU's
+    attributions to 1e-6 of the largest, no CPU fallback warning, and
+    importance sums to score - bias (non-RBF)."""
     import warnings
 
     from gkmsvm.explain import gkmexplain
+    from gkmsvm.explain import lmer as explain_lmer
+
+    if dense and kernel_type not in ("gkmrbf", "wgkmrbf"):
+        pytest.skip("per-row V is for RBF kernels")
 
     rng = np.random.default_rng(3)
 
@@ -1033,6 +1039,8 @@ def test_gkmexplain_metal_matches_cpu(kernel_type, mode):
     model.use_explain_table = False
     q = seqs(9, 9, 80)
     expected = gkmexplain(model, q, mode=mode)
+    monkeypatch.setattr(explain_lmer, "_DENSE_V", dense)
+    monkeypatch.setattr(explain_lmer, "_DENSE_V_BYTES", 2 * 8 * 4**7)
     model.mlx()
     with warnings.catch_warnings():
         warnings.simplefilter("error")  # a CPU fallback warns

@@ -64,6 +64,7 @@ _EXPLAIN_LMER_METAL = (
     uint use_index = (uint)params[3], S = (uint)params[4], n_lmers = (uint)params[5];
     uint perturbation = (uint)params[6], weighted = (uint)params[7];
     uint wx_stride = (uint)params[8], B = (uint)params[9], l = (uint)params[10];
+    uint v_row = b * (uint)params[11];  // V's row: each row's own (_dense_V) or one
     // Groups past the last window still take part in the shuffles
     bool valid = i < W;
     uint u = valid ? bx[b * W + i] : 0u;
@@ -92,7 +93,7 @@ _EXPLAIN_LMER_METAL = (
                     }
                     wv = hi + lo;
                 } else {
-                    wv = V[v];
+                    wv = V[v_row + v];
                 }
                 if (weighted) wv *= wx[b * wx_stride + i];
                 my_a = wv * table_a[levels[t]];
@@ -218,10 +219,12 @@ def _explain_lmer_metal(
     cache,
     defer=False,
 ):
-    """_explain_lmer_gpu in Metal: [B, 4, seqlen] float64 NumPy. V (float32 on
-    the device, cached in `cache`) or, for RBF, the l-mer index and per-query
-    SV weights w [B, S]; wx: query window weights ([B or 1, W] float64, [1, 0]
-    unweighted). defer: as for _metal_fold."""
+    """_explain_lmer_gpu in Metal: [B, 4, seqlen] float64 NumPy. V: the SVs'
+    [4^l] l-mer weights (float32 on the device, cached in `cache`) or each
+    row's own [B, 4^l] (RBF, _dense_V; uploaded per call); or V None and, for
+    RBF, the l-mer index and per-query SV weights w [B, S]. wx: query window
+    weights ([B or 1, W] float64, [1, 0] unweighted). defer: as for
+    _metal_fold."""
     import mlx.core as mx
 
     B, W = packed_x.shape
@@ -236,7 +239,12 @@ def _explain_lmer_metal(
     _, masks_d, levels_d = cache[key]
     zero_f, zero_i = mx.zeros(1, dtype=mx.float32), mx.zeros(1, dtype=mx.int32)
     use_index = V is None
-    if use_index:
+    v_stride = 0
+    if V is not None and V.ndim == 2:
+        V_d, S, v_stride = mx.array(np.asarray(V, dtype=np.float32)), 0, V.shape[1]
+        offsets = ids = zero_i
+        w_d, vals = zero_f, mx.zeros(1, dtype=mx.uint32)
+    elif use_index:
         offsets, ids, _, _, vals = index._arrays("mlx")
         w_d = mx.array(np.ascontiguousarray(w, dtype=np.float32))
         V_d, S = zero_f, w.shape[1]
@@ -263,6 +271,7 @@ def _explain_lmer_metal(
         wx_stride,
         B,
         l,
+        v_stride,
     ]
     inputs = [
         mx.array(np.ascontiguousarray(packed_x, dtype=np.uint32)),
