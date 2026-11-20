@@ -139,8 +139,15 @@ _METAL_REDUCE_GROUPS = 128
 # (window, neighbor) items per _METAL_REDUCE launch, so no launch runs long
 _METAL_REDUCE_ITEMS = 2**28
 
-# Rows per Metal launch: caps the int32 [levels, rows, S] counts
+# int32 [levels, rows, S] counts in flight per pairwise_metal wave
 _METAL_COUNT_BYTES = 256 * 2**20
+# and per launch, so the counts the resident threadgroups add into stay in
+# the caches. 128 x 300 bp rows on an M4 (dsQTL -t 3 SV subsets, 4 levels),
+# ms per row at 256 KB / 4 MB / 64 MB per launch, CPU's 10 threads: 500 SVs
+# 0.19 / 0.20 / 0.19, CPU 0.65; 8,000 SVs 1.00 / 1.18 / 1.33, CPU 3.80;
+# 32,715 SVs (a row per launch) 3.64 / 4.02 / 9.08, CPU 11.85. Launches had
+# held up to 512 rows of the full model
+_METAL_LAUNCH_COUNT_BYTES = 256 * 2**10
 # Above this many distinct pair weights, MLX queries on CPU (one int32 [rows, S]
 # count block per weight)
 _METAL_MAX_LEVELS = 16
@@ -547,6 +554,16 @@ class LmerIndex:
             # CPU, which shares memory with the GPU
             out = self.pairwise(np.ascontiguousarray(to_cpu(bx)))
             return mx.array(out.astype(np.float32))
+        return mx.array(self.pairwise_metal(bx)().astype(np.float32))
+
+    def pairwise_metal(self, bx):
+        """Start pairwise() of rows bx in Metal (queries_on_device("mlx") must
+        hold) and return a function that waits for it and gives K_raw [B, S]
+        float64 NumPy, combined on the CPU from exact per-level counts, so the
+        caller can work on the CPU meanwhile. Launches of at most
+        _METAL_LAUNCH_COUNT_BYTES of counts, up to _METAL_COUNT_BYTES in flight."""
+        import mlx.core as mx
+
         if self.offsets[-1] >= 2**31:
             raise ValueError("l-mer index too large for the Metal kernel")
         offsets, ids, masks, levels, vals = self._arrays("mlx")
@@ -559,12 +576,13 @@ class LmerIndex:
             wx_stride = row_stride(wx_np, W)
         n_lev = len(self.table)
         words = 2 if weighted else 1
-        rows = max(1, _METAL_COUNT_BYTES // (4 * words * n_lev * self.S))
-        out = np.zeros((B, self.S), dtype=np.float64)
-        for b0 in range(0, B, rows):
-            nb = min(rows, B - b0)
+        row_bytes = 4 * words * n_lev * self.S
+        rows = max(1, _METAL_LAUNCH_COUNT_BYTES // row_bytes)
+        wave = max(rows, _METAL_COUNT_BYTES // row_bytes // rows * rows)
+
+        def launch(b0, nb):
             split = max(1, -(-_METAL_QUERY_MIN_GROUPS // nb))
-            launch = dict(
+            kw = dict(
                 template=[],
                 grid=(nb * split * _METAL_QUERY_THREADS, 1, 1),
                 threadgroup=(_METAL_QUERY_THREADS, 1, 1),
@@ -577,32 +595,51 @@ class LmerIndex:
                     dtype=mx.int32,
                 )
                 wq = wx_np[b0 : b0 + nb] if wx_stride else wx_np
-                lo, hi = query(
+                return query(
                     inputs=[q, mx.array(wq.ravel()), offsets, ids, vals, masks]
                     + [levels, params],
                     output_shapes=[(n_lev * nb * self.S,)] * 2,
                     output_dtypes=[mx.uint32, mx.uint32],
-                    **launch,
+                    **kw,
                 )
-                counts = (np.array(hi).astype(np.uint64) << np.uint64(32)) | np.array(
-                    lo
-                ).astype(np.uint64)
-            else:
-                params = mx.array(
-                    [W, len(self.masks), self.S, self.n_lmers, nb, split],
-                    dtype=mx.int32,
-                )
-                counts = query(
-                    inputs=[q, offsets, ids, masks, levels, params],
-                    output_shapes=[(n_lev * nb * self.S,)],
-                    output_dtypes=[mx.int32],
-                    **launch,
-                )[0]
-                counts = np.array(counts)
-            counts = counts.reshape(n_lev, nb, self.S)
-            for m in range(n_lev):
-                out[b0 : b0 + nb] += self.table[m] * counts[m].astype(np.float64)
-        return mx.array(out.astype(np.float32))
+            params = mx.array(
+                [W, len(self.masks), self.S, self.n_lmers, nb, split], dtype=mx.int32
+            )
+            return query(
+                inputs=[q, offsets, ids, masks, levels, params],
+                output_shapes=[(n_lev * nb * self.S,)],
+                output_dtypes=[mx.int32],
+                **kw,
+            )
+
+        def start(w0):
+            outs = [
+                (b0, min(rows, B - b0), launch(b0, min(rows, B - b0)))
+                for b0 in range(w0, min(B, w0 + wave), rows)
+            ]
+            mx.async_eval([a for *_, o in outs for a in o])
+            return outs
+
+        first = start(0)
+
+        def finish():
+            out = np.zeros((B, self.S), dtype=np.float64)
+            for w0 in range(0, B, wave):
+                outs = first if w0 == 0 else start(w0)
+                for b0, nb, o in outs:
+                    if weighted:
+                        lo, hi = o
+                        counts = (np.array(hi).astype(np.uint64) << np.uint64(32)) | (
+                            np.array(lo).astype(np.uint64)
+                        )
+                    else:
+                        counts = np.array(o[0])
+                    counts = counts.reshape(n_lev, nb, self.S)
+                    for m in range(n_lev):
+                        out[b0 : b0 + nb] += self.table[m] * counts[m].astype(np.float64)
+            return out
+
+        return finish
 
     def _reduce_mlx(self, bx, inv_dx, inv_ds, coef, gamma):
         """reduce() in Metal (_METAL_REDUCE): float32 [B] on the device."""

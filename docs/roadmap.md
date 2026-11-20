@@ -96,6 +96,7 @@
 - [x] Application-note benchmarks on Sherlock (`benchmarks/sherlock/`): CPU parts on a whole EPYC 9384X node, GPU parts on an L40S, plus A100 and P100 GPU sets
 - [x] Fused mutation impact on CUDA (`_IMPACT_CUDA`), as on CPU and Metal: the alt allele visits only the windows that differ, and under RBF the shared windows add K(ref) only for SVs the differing ones reached; no [2n, S] block (the full dsQTL set with the default `batch_size` had run out of GPU memory). RTX 3080 vs the `pairwise()` path: 300 bp SNPs `-t 3` 4.51 -> 2.36 s, `-t 2` (no l-mer table) 3.10 -> 0.23 s per 4,000 (non-RBF models read the l-mer table once a call pays for building it, still faster: 0.051 s); dsQTL 19 bp SNPs, where every window differs, `-t 3` 2.41 -> 2.20 s
 - [x] RBF GkmExplain through per-row V (CPU, Metal): each batch builds its rows' l-mer weights in one pass over the l-mer index and takes the non-RBF V path, picked per batch by a fitted cost rule (`benchmarks/dev/explain_dense_v.py`); dsQTL `-t 3`, 64 x 300 bp on an M4: CPU hypothetical 1.2-1.4x, perturbation 2.4-3.1x, MLX 1.1-1.3x and 2.1-2.5x
+- [x] MLX RBF GkmExplain: each batch's SV-weight query split between Metal and the CPU, rebalanced per batch (`lmer._SplitQuery`), and Metal index queries in launches of at most 256 KB of counters (2.5x faster per row on the dsQTL model). dsQTL `-t 3`, 200 x 300 bp on an M4: hypothetical 2.69 -> 1.43 s, perturbation 7.27 -> 1.75 s (2.2x and 3.5x the CPU's 10 threads)
 
 ## Next
 
@@ -109,8 +110,7 @@ Performance gaps:
 
 Known limits (measured, not planned):
 
-- MLX Grams keep the masked join: the Metal index query is 0.52-0.66x the join on an M4 (`gram._MLX_GRAM_INDEX`).
-- RBF GkmExplain hypothetical on Metal is about 1.3x the CPU: it waits on the CPU's query of each batch's per-query SV weights (2.26 s of 2.69 s per 200 x 300 bp on an M4), while the GPU is idle most of the time. Splitting that query between the CPU and Metal is untried.
+- MLX Grams keep the masked join: the Metal index query is 0.56-0.71x the join on an M4 at N = 1k-10k (`gram._MLX_GRAM_INDEX`; rechecked after the 256 KB query launches, which barely move it on this sparse `-t 2` l=11 index).
 - RBF (`-t 3`/`-t 5`) has no explain table by construction: the table sums the SVs into one 4^l vector V before any query, and an RBF SV's weight depends on the query through exp(γ(K(x, sv) − 1)), so V would be per query and cost as much as the index path's query.
 
 Features:

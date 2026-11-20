@@ -67,8 +67,13 @@ def _rbf_weights(index, packed_x, inv_dx, coef, inv_ds, gamma):
     """Per-query SV weights [B, S] of an RBF model's l-mer path: coef_s /
     sqrt(K(sv, sv)) times _rbf_scale of the normalized kernel value (index
     query on packed_x's device)."""
-    k_norm = index.pairwise(packed_x) * inv_dx[:, None] * inv_ds[None, :]
-    return coef * inv_ds * _rbf_scale(k_norm, gamma, get_array_module(packed_x))
+    return _rbf_weights_of(index.pairwise(packed_x), inv_dx, coef, inv_ds, gamma)
+
+
+def _rbf_weights_of(k_raw, inv_dx, coef, inv_ds, gamma):
+    """_rbf_weights from the raw kernel values k_raw [B, S] (on k_raw's device)."""
+    k_norm = k_raw * inv_dx[:, None] * inv_ds[None, :]
+    return coef * inv_ds * _rbf_scale(k_norm, gamma, get_array_module(k_raw))
 
 
 def _sv_weights(model):

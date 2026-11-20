@@ -4,6 +4,8 @@ CPU, CUDA or Metal."""
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 
 from gkmsvm.backend import get_array_module
@@ -12,6 +14,7 @@ from gkmsvm.explain.common import (
     _explain_V,
     _inv_dx,
     _rbf_weights,
+    _rbf_weights_of,
     _sv_weights,
 )
 from gkmsvm.explain.cpu import _dense_V, _explain_index_cpu, _explain_lmer_cpu
@@ -46,6 +49,9 @@ _DENSE_V_COST = {
 _DENSE_V_BYTES = 512 * 2**20
 # None: by cost; True / False force it (benchmarks, tests)
 _DENSE_V = None
+# MLX, RBF: the starting ratio of Metal's SV-weight query speed to the CPU's
+# (_SplitQuery adapts it per batch); 3.3-4.6x on an M4 against 10 threads
+_METAL_QUERY_RATIO = 3.0
 
 
 def _explain_lmer(
@@ -138,6 +144,11 @@ def _explain_lmer(
     # Metal: each batch's kernels run while the CPU queries the next batch's SV
     # weights (RBF) and packs it; their partials are folded after that
     pending = []
+    split = (
+        _SplitQuery(index)
+        if metal and index is not None and index.queries_on_device("mlx")
+        else None
+    )
     for _, packed_x, packed_x_rc, wx in _batches(base, x, lengths, batch_size, verbose):
         inv_dx = _inv_dx(base, packed_x, packed_x_rc)
         B_b, W = packed_x.shape
@@ -146,11 +157,10 @@ def _explain_lmer(
         if index is None:
             jobs.append((slice(None), V, None))
         else:
-            # (on Metal too, the CPU query: exact in float64, and it runs while
-            # the GPU explains the previous batch; the Metal query alone is
-            # ~1.4x the CPU's on the dsQTL -t 3 model, M5, but would queue
-            # behind that kernel)
-            w = _rbf_weights(index, packed_x, inv_dx, coef, inv_ds, gamma)
+            if split is not None:
+                w = split.weights(packed_x, inv_dx, coef, inv_ds, gamma)
+            else:
+                w = _rbf_weights(index, packed_x, inv_dx, coef, inv_ds, gamma)
             visits = int(np.count_nonzero(packed_x != PAD_WINDOW)) * len(masks)
             if _use_dense_V(index, visits, B_b, l, metal):
                 # Rows in blocks of at most _DENSE_V_BYTES of V (float32 for
@@ -226,6 +236,40 @@ def _explain_lmer(
                 )
     parts.extend(f() for f in pending)
     return np.concatenate(parts)
+
+
+class _SplitQuery:
+    """The SV-weight query of each batch of RBF rows (MLX), split between Metal
+    and the CPU: the first rows go to Metal (LmerIndex.pairwise_metal,
+    started first, so it runs behind the previous batch's explain kernel) and
+    the rest are queried on the CPU meanwhile. Both are exact (float64 on the
+    CPU, int32 counts combined in float64). The Metal share follows the
+    measured speeds: when the CPU waits for Metal, the GPU's time for its rows
+    (including the explain kernel queued ahead of them) sets the ratio;
+    when it doesn't, the GPU was faster than assumed and its share grows."""
+
+    def __init__(self, index):
+        self.index = index
+        self.ratio = _METAL_QUERY_RATIO  # Metal rows per CPU row in equal time
+
+    def weights(self, packed_x, inv_dx, coef, inv_ds, gamma):
+        B = len(packed_x)
+        g = min(B, max(1, round(B * self.ratio / (1 + self.ratio))))
+        finish = self.index.pairwise_metal(packed_x[:g])
+        t0 = time.perf_counter()
+        k_cpu = self.index.pairwise(np.ascontiguousarray(packed_x[g:])) if g < B else None
+        t_cpu = time.perf_counter() - t0
+        k_gpu = finish()
+        t_wait = time.perf_counter() - t0 - t_cpu
+        if g < B:
+            cpu_row = t_cpu / (B - g)
+            if t_wait > 0.05 * t_cpu:
+                self.ratio = cpu_row / ((t_cpu + t_wait) / g)
+            else:
+                self.ratio *= 1.25
+            self.ratio = min(max(self.ratio, 0.05), 50.0)
+        k_raw = k_gpu if k_cpu is None else np.concatenate([k_gpu, k_cpu])
+        return _rbf_weights_of(k_raw, inv_dx, coef, inv_ds, gamma)
 
 
 def _use_dense_V(index, visits, rows, l, metal):

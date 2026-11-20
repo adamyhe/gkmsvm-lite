@@ -8,6 +8,8 @@ All notable changes to gkmsvm-lite are documented here. The format follows
 ### Changed
 
 - RBF GkmExplain (`-t 3`, `-t 5`, `-t 6`) on CPU and MLX: for long queries on dense l-mer indexes, each batch builds every row's l-mer weights in one pass over the index and takes the non-RBF l-mer path, instead of summing an l-mer's index entries at every neighbor visit. A fitted cost rule picks between the two per batch; short queries keep the old path. The dsQTL `-t 3` model, 64 × 300 bp on an M4: CPU hypothetical 1.2-1.4×, perturbation 2.4-3.1×; MLX 1.1-1.3× and 2.1-2.5×. Results agree with the old path to 2e-13 on CPU and 2e-7 on MLX. CUDA is unchanged.
+- MLX: the Metal l-mer index query (`pairwise()`: RBF GkmExplain's SV weights, SMO's first cache fill) launches at most 256 KB of counters at a time, so they stay in the caches: on the dsQTL `-t 3` model, 3.6 ms per 300 bp row against 9.1 ms (CPU, 10 threads: 11.9 ms).
+- MLX: RBF GkmExplain splits each batch's SV-weight query between Metal and the CPU, rebalanced per batch from the measured speeds, so the GPU no longer waits on the CPU's query. With the per-row V above, the dsQTL `-t 3` model, 200 × 300 bp on an M4: hypothetical 2.69 to 1.43 s, perturbation 7.27 to 1.75 s (CPU, 10 threads: 3.15 and 6.16 s).
 
 ## [0.2.2] - 2026-11-16
 
