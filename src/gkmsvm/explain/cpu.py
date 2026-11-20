@@ -101,7 +101,8 @@ def _explain_lmer_cpu(
     n_split,
     wx,
 ):
-    """[B, 4, seqlen] attributions from the SVs' l-mer weights V (see _explain_lmer).
+    """[B, 4, seqlen] attributions from the SVs' l-mer weights V [1 or B, 4^l]
+    (one V for every row, or each row's own: _dense_V; see _explain_lmer).
 
     Each query window u visits every l-mer v = u ^ mask within the mismatch
     cutoff and adds V[v] times the alpha/kappa (or perturbation) weight of
@@ -111,27 +112,28 @@ def _explain_lmer_cpu(
     holds the SVs'). PAD query windows have no neighbors (u ^ mask >= 4^l).
     """
     B, W = packed_x.shape
-    n_lmers = V.shape[0]
+    n_lmers = V.shape[1]
     weighted = wx.shape[1] > 0
     part = np.zeros((B * n_split, 4, seqlen))
     step = (W + n_split - 1) // n_split
     for task in prange(B * n_split):
         b, c = task // n_split, task % n_split
         acc = part[task]
+        Vb = V[min(np.int64(b), V.shape[0] - 1)]
         wxb = wx[min(np.int64(b), wx.shape[0] - 1)]
         for i in range(c * step, min(W, (c + 1) * step)):
             u = packed_x[b, i]
             a = wxb[i] if weighted else 1.0
             for t in range(masks.shape[0]):
                 v = u ^ masks[t]
-                if np.int64(v) >= n_lmers or V[v] == 0.0:
+                if np.int64(v) >= n_lmers or Vb[v] == 0.0:
                     continue
                 _distribute(
                     acc,
                     i,
                     masks[t],
                     v,
-                    a * V[v],
+                    a * Vb[v],
                     table_a[levels[t]],
                     table_b[levels[t]],
                     l,
@@ -141,6 +143,37 @@ def _explain_lmer_cpu(
     for b in range(B):
         out[b] *= inv_dx[b]
     return out
+
+
+@njit(parallel=True, cache=True)
+def _dense_V(offsets, ids, vals, wT, out):
+    """Each row's V (RBF models): out[b, v] = sum of wT[s, b] over the l-mer
+    index's entries s for v, times each entry's window weight in vals (empty
+    when unweighted), summed in float64. wT: per-query SV weights [S, B];
+    out [B, 4^l] (float64, or float32 for Metal).
+
+    One pass over the index serves every row (the B weights of an entry are
+    contiguous), where _explain_index_cpu sums an l-mer's entries again at
+    every visit: _explain_lmer picks between them by cost."""
+    n_lmers = offsets.shape[0] - 1
+    B = wT.shape[1]
+    weighted = vals.shape[0] > 0
+    block = 4096
+    for c in prange((n_lmers + block - 1) // block):
+        acc = np.empty(B)
+        for v in range(c * block, min(n_lmers, (c + 1) * block)):
+            acc[:] = 0.0
+            for e in range(offsets[v], offsets[v + 1]):
+                ws = wT[ids[e]]
+                if weighted:
+                    x = float(vals[e])
+                    for b in range(B):
+                        acc[b] += ws[b] * x
+                else:
+                    for b in range(B):
+                        acc[b] += ws[b]
+            for b in range(B):
+                out[b, v] = acc[b]
 
 
 @njit(parallel=True, cache=True, fastmath=True)

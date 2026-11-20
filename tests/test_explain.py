@@ -715,14 +715,26 @@ def _read_lsgkm_explain(path):
     )
 
 
+# (use_explain_table, use_lmer_index, lmer._DENSE_V): the explain table (non-RBF),
+# the l-mer path (RBF: per-row V and index sums per visit), the per-SV kernel
+_EXPLAIN_PATHS = [
+    (True, True, None),
+    (False, True, False),
+    (False, True, True),
+    (False, False, None),
+]
+
+
 @pytest.mark.parametrize("name", _LSGKM_EXPLAIN_SETS)
 @pytest.mark.parametrize(
     "lsgkm_mode,mode", [(0, "importance"), (1, "hypothetical"), (4, "perturbation")]
 )
-def test_matches_lsgkm_gkmexplain(name, lsgkm_mode, mode):
+def test_matches_lsgkm_gkmexplain(name, lsgkm_mode, mode, monkeypatch):
     """Attributions equal the kundajelab/lsgkm fork's gkmexplain. Perturbation is
     its mode 4, over every pair a substitution changes (mode 3 leaves out pairs
-    with d + 1 mismatches); importance credits N to A, which N packs as."""
+    with d + 1 mismatches); importance credits N to A, which N packs as. RBF
+    models take the l-mer path both ways (per-row V, or index sums per visit)."""
+    from gkmsvm.explain import lmer as explain_lmer
     from gkmsvm.fasta import read_fasta
     from gkmsvm.importers.lsgkm import load_lsgkm_model
 
@@ -738,8 +750,9 @@ def test_matches_lsgkm_gkmexplain(name, lsgkm_mode, mode):
         ]
     )
     expected = _read_lsgkm_explain(oracle)
-    for table, index in [(True, True), (False, True), (False, False)]:
+    for table, index, dense in _EXPLAIN_PATHS:
         model.use_explain_table, model.use_lmer_index = table, index
+        monkeypatch.setattr(explain_lmer, "_DENSE_V", dense)
         model.clear_caches()
         # gkmexplain prints 6 significant digits
         np.testing.assert_allclose(
@@ -747,7 +760,7 @@ def test_matches_lsgkm_gkmexplain(name, lsgkm_mode, mode):
             expected,
             rtol=2e-5,
             atol=5e-6 * np.abs(expected).max(),
-            err_msg=f"{table=} {index=}",
+            err_msg=f"{table=} {index=} {dense=}",
         )
 
 
@@ -836,9 +849,11 @@ def _query_seqs():
 @pytest.mark.parametrize(
     "lsgkm_mode,mode", [(0, "importance"), (1, "hypothetical"), (4, "perturbation")]
 )
-def test_matches_lsgkm_gkmexplain_on_mixed_queries(name, lsgkm_mode, mode):
+def test_matches_lsgkm_gkmexplain_on_mixed_queries(name, lsgkm_mode, mode, monkeypatch):
     """Queries of different lengths explained in one padded batch equal the
-    kundajelab fork's gkmexplain on each, on every explain path."""
+    kundajelab fork's gkmexplain on each, on every explain path (per-row V
+    built a few rows at a time)."""
+    from gkmsvm.explain import lmer as explain_lmer
     from gkmsvm.importers.lsgkm import load_lsgkm_model
 
     oracle = _FIXTURES / f"{name}_query.explain{lsgkm_mode}.txt.gz"
@@ -848,8 +863,12 @@ def test_matches_lsgkm_gkmexplain_on_mixed_queries(name, lsgkm_mode, mode):
     seqs = _query_seqs()
     expected = _read_lsgkm_explain_rows(oracle)
     scale = max(np.abs(e).max() for e in expected)
-    for table, index in [(True, True), (False, True), (False, False)]:
+    # 3 rows of per-row V at a time (batches of 8)
+    n_lmers = 4 ** model.kernel.base.l
+    monkeypatch.setattr(explain_lmer, "_DENSE_V_BYTES", 3 * 8 * n_lmers)
+    for table, index, dense in _EXPLAIN_PATHS:
         model.use_explain_table, model.use_lmer_index = table, index
+        monkeypatch.setattr(explain_lmer, "_DENSE_V", dense)
         model.clear_caches()
         got = np.asarray(gkmexplain(model, seqs, mode=mode, batch_size=8))
         for i, (s, e) in enumerate(zip(seqs, expected)):
@@ -859,7 +878,7 @@ def test_matches_lsgkm_gkmexplain_on_mixed_queries(name, lsgkm_mode, mode):
                 e,
                 rtol=2e-5,
                 atol=5e-6 * scale,
-                err_msg=f"{table=} {index=} sequence {i}",
+                err_msg=f"{table=} {index=} {dense=} sequence {i}",
             )
             assert (got[i, :, len(s) :] == 0).all()
 
